@@ -208,7 +208,7 @@ class PdfLayoutPreserver(private val context: Context) {
         return Pair(FileOutputStream(outputFile, false), outputFile.absolutePath)
     }
 
-    private val OPTION_LABEL_PATTERN = Pattern.compile("^([A-D])[.)]\\s*")
+    private val OPTION_LABEL_PATTERN = Pattern.compile("^([(]?[A-Da-d1-9][.)])\\s*")
 
     /**
      * Extracts multiple-choice option prefixes like "A.", "B)", "C." so they aren't mangled by translation.
@@ -546,6 +546,10 @@ class PdfLayoutPreserver(private val context: Context) {
         val blocks = mutableListOf<TextBlock>()
         private var cropBox: PDRectangle = PDRectangle(0f, 0f, 612f, 792f)
 
+        init {
+            sortByPosition = true
+        }
+
         fun extractPageText(document: PDDocument, page: PDPage, pageIndex: Int) {
             cropBox = page.cropBox ?: page.mediaBox
             startPage = pageIndex + 1
@@ -556,15 +560,50 @@ class PdfLayoutPreserver(private val context: Context) {
 
         override fun writeString(text: String, textPositions: MutableList<TextPosition>) {
             if (textPositions.isEmpty()) return
-            val first = textPositions.first()
-            val last = textPositions.last()
-            val x = cropBox.lowerLeftX + first.xDirAdj
-            val y = cropBox.upperRightY - first.yDirAdj
-            val fontSize = first.fontSizeInPt
-            val width = (last.xDirAdj + last.widthDirAdj) - first.xDirAdj
-            val ascent = fontSize * 0.95f
-            val descent = fontSize * 0.35f
-            blocks.add(TextBlock(text, x, y, fontSize, width, ascent, descent))
+
+            val clusters = mutableListOf<MutableList<TextPosition>>()
+            var currentCluster = mutableListOf<TextPosition>()
+
+            for (tp in textPositions) {
+                if (currentCluster.isEmpty()) {
+                    currentCluster.add(tp)
+                } else {
+                    val prev = currentCluster.last()
+                    val gap = tp.xDirAdj - (prev.xDirAdj + prev.widthDirAdj)
+                    val maxFont = maxOf(prev.fontSizeInPt, tp.fontSizeInPt)
+
+                    // Separate runs if there's a horizontal gap bigger than 1.5x font size, or a Y jump
+                    if (gap > maxFont * 1.5f || abs(tp.yDirAdj - prev.yDirAdj) > maxFont * 0.4f) {
+                        clusters.add(currentCluster)
+                        currentCluster = mutableListOf(tp)
+                    } else {
+                        currentCluster.add(tp)
+                    }
+                }
+            }
+            if (currentCluster.isNotEmpty()) {
+                clusters.add(currentCluster)
+            }
+
+            for (cluster in clusters) {
+                if (cluster.isEmpty()) continue
+                val first = cluster.first()
+                val last = cluster.last()
+                val sb = StringBuilder()
+                for (tp in cluster) {
+                    sb.append(tp.unicode ?: "")
+                }
+                val clusterText = sb.toString()
+                if (clusterText.isBlank()) continue
+
+                val x = cropBox.lowerLeftX + first.xDirAdj
+                val y = cropBox.upperRightY - first.yDirAdj
+                val fontSize = cluster.maxOf { it.fontSizeInPt }
+                val width = maxOf((last.xDirAdj + last.widthDirAdj) - first.xDirAdj, fontSize * 0.5f)
+                val ascent = fontSize * 0.95f
+                val descent = fontSize * 0.35f
+                blocks.add(TextBlock(clusterText, x, y, fontSize, width, ascent, descent))
+            }
         }
 
         private class NullWriter : java.io.Writer() {

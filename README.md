@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  <sub>Việt hóa bởi <a href="https://www.tiktok.com/@huyg.ai">Lê Ngọc Gia Huy · huyg.ai</a></sub>
+</p>
+
+<p align="center">
   <a href="https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-windows.zip">
     <img src="https://img.shields.io/badge/TẢI_XUỐNG-Windows_x64-1f6feb?style=for-the-badge&logo=windows11&logoColor=white" alt="Tải PDF Translate cho Windows">
   </a>
@@ -186,8 +190,14 @@ PDF Translate được phát hành theo giấy phép [AGPL-3.0](LICENSE). Nếu 
 
 Dự án được phát triển từ [PDFMathTranslate](https://github.com/Byaidu/PDFMathTranslate) 1.9.11 và [BabelDOC](https://github.com/funstory-ai/BabelDOC). Xem [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) để biết đầy đủ thông tin ghi công.
 
+Bản Việt hóa và phần đóng gói ứng dụng desktop được thực hiện và duy trì bởi **Lê Ngọc Gia Huy** ([@huyg.ai trên TikTok](https://www.tiktok.com/@huyg.ai)).
+
 ---
 
 <p align="center">
   Nếu PDF Translate hữu ích với bạn, hãy tặng repo một ⭐ để nhiều người biết đến dự án hơn.
+</p>
+
+<p align="center">
+  <sub>Việt hóa &amp; duy trì bởi <a href="https://www.tiktok.com/@huyg.ai">Lê Ngọc Gia Huy (huyg.ai)</a></sub>
 </p>

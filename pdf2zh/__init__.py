@@ -5,6 +5,8 @@ log = logging.getLogger(__name__)
 __version__ = "1.9.11"
 __ruleset__ = "code4life-preservation-v1"
 __author__ = "Byaidu"
+__maintainer__ = "Lê Ngọc Gia Huy (huyg.ai)"
+__maintainer_url__ = "https://www.tiktok.com/@huyg.ai"
 __all__ = ["translate", "translate_stream"]
 
 

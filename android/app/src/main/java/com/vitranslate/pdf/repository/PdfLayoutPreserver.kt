@@ -12,6 +12,11 @@ import com.tom_roush.pdfbox.pdmodel.font.PDFont
 import com.tom_roush.pdfbox.pdmodel.font.PDType0Font
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import com.tom_roush.pdfbox.text.TextPosition
+import com.tom_roush.pdfbox.contentstream.operator.Operator
+import com.tom_roush.pdfbox.cos.COSArray
+import com.tom_roush.pdfbox.cos.COSString
+import com.tom_roush.pdfbox.pdfparser.PDFStreamParser
+import com.tom_roush.pdfbox.pdfwriter.ContentStreamWriter
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
@@ -130,6 +135,9 @@ class PdfLayoutPreserver(private val context: Context) {
                             onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: Tìm thấy ${textBlocks.size} đoạn. Đã dịch: ${translations.size}, Bỏ qua công thức: $skippedMathCount")
 
                             if (translations.isNotEmpty()) {
+                                // Strip original text from page streams so vector drawings & diagrams remain 100% pristine
+                                stripTextFromPage(document, page)
+
                                 PDPageContentStream(
                                     document,
                                     page,
@@ -137,9 +145,6 @@ class PdfLayoutPreserver(private val context: Context) {
                                     true,
                                     true
                                 ).use { stream ->
-                                    for (translation in translations) {
-                                        coverSourceText(stream, translation.block)
-                                    }
                                     for (i in translations.indices) {
                                         val translation = translations[i]
                                         val block = translation.block
@@ -556,6 +561,55 @@ class PdfLayoutPreserver(private val context: Context) {
         stream.restoreGraphicsState()
     }
 
+    private fun stripTextFromPage(document: PDDocument, page: PDPage) {
+        try {
+            val parser = PDFStreamParser(page)
+            parser.parse()
+            val tokens = parser.tokens
+            val newTokens = mutableListOf<Any>()
+            var inTextObject = false
+
+            for (token in tokens) {
+                if (token is Operator) {
+                    val opName = token.name
+                    if (opName == "BT") {
+                        inTextObject = true
+                        newTokens.add(token)
+                    } else if (opName == "ET") {
+                        inTextObject = false
+                        newTokens.add(token)
+                    } else if (inTextObject && (opName == "Tj" || opName == "'")) {
+                        if (newTokens.isNotEmpty() && newTokens.last() is COSString) {
+                            newTokens[newTokens.size - 1] = COSString("")
+                        }
+                        newTokens.add(token)
+                    } else if (inTextObject && opName == "TJ") {
+                        if (newTokens.isNotEmpty() && newTokens.last() is COSArray) {
+                            newTokens[newTokens.size - 1] = COSArray()
+                        }
+                        newTokens.add(token)
+                    } else if (inTextObject && opName == "\"") {
+                        if (newTokens.isNotEmpty() && newTokens.last() is COSString) {
+                            newTokens[newTokens.size - 1] = COSString("")
+                        }
+                        newTokens.add(token)
+                    } else {
+                        newTokens.add(token)
+                    }
+                } else {
+                    newTokens.add(token)
+                }
+            }
+
+            val newStream = com.tom_roush.pdfbox.pdmodel.common.PDStream(document)
+            val out = newStream.createOutputStream()
+            val contentWriter = ContentStreamWriter(out)
+            contentWriter.writeTokens(newTokens)
+            out.close()
+            page.setContents(newStream)
+        } catch (_: Exception) {}
+    }
+
     private fun sanitizeForFont(text: String, font: PDFont): String {
         val sb = StringBuilder(text.length)
         for (char in text) {
@@ -626,7 +680,7 @@ class PdfLayoutPreserver(private val context: Context) {
         val descent: Float
     )
 
-    private class PageTextCollector : PDFTextStripper() {
+    private inner class PageTextCollector : PDFTextStripper() {
         val blocks = mutableListOf<TextBlock>()
         var cropBox: PDRectangle = PDRectangle(0f, 0f, 612f, 792f)
 
@@ -703,11 +757,11 @@ class PdfLayoutPreserver(private val context: Context) {
                 blocks.add(TextBlock(clusterText, x, y, baseFontSize, width, ascent, descent))
             }
         }
+    }
 
-        private class NullWriter : java.io.Writer() {
-            override fun write(cbuf: CharArray, off: Int, len: Int) {}
-            override fun flush() {}
-            override fun close() {}
-        }
+    private class NullWriter : java.io.Writer() {
+        override fun write(cbuf: CharArray, off: Int, len: Int) {}
+        override fun flush() {}
+        override fun close() {}
     }
 }

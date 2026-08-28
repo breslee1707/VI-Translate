@@ -16,6 +16,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
 import java.util.regex.Pattern
+import kotlin.math.abs
 
 data class TranslationResult(
     val outputPath: String,
@@ -57,10 +58,8 @@ class PdfLayoutPreserver(private val context: Context) {
         } else {
             originalFileName
         }
-
         val outputFileName = "$baseName-$targetLang.pdf"
         val (outputStream, resultPath) = prepareOutputStream(outputDirUriOrPath, outputFileName, overwrite)
-
         val engine = GoogleTranslateEngine(sourceLang = "auto", targetLang = targetLang)
         var untranslatedCount = 0
 
@@ -69,15 +68,16 @@ class PdfLayoutPreserver(private val context: Context) {
                 PDDocument.load(inputStream).use { document ->
                     val totalPages = document.numberOfPages
                     onProgress(0, totalPages)
-
                     val font: PDFont = loadBundledFont(document)
 
                     for (pageIndex in 0 until totalPages) {
                         val page = document.getPage(pageIndex)
-
                         val textCollector = PageTextCollector()
                         textCollector.extractPageText(document, page, pageIndex)
-                        val textBlocks = textCollector.blocks
+
+                        // KEY FIX: merge granular word/phrase fragments into
+                        // line/run-level blocks before translating & drawing.
+                        val textBlocks = groupIntoLineRuns(textCollector.blocks)
 
                         if (textBlocks.isNotEmpty()) {
                             val translations = mutableListOf<BlockTranslation>()
@@ -86,7 +86,6 @@ class PdfLayoutPreserver(private val context: Context) {
                                 if (originalText.isBlank() || isPureMathOrFormula(originalText)) {
                                     continue
                                 }
-
                                 val encodedText = FormulaPlaceholder.encodeFormulaPlaceholders(originalText)
                                 var translatedRaw = encodedText
                                 var translationSuccess = false
@@ -96,7 +95,6 @@ class PdfLayoutPreserver(private val context: Context) {
                                 } catch (_: Exception) {
                                     untranslatedCount++
                                 }
-
                                 var translatedText = translatedRaw
                                 if (translationSuccess) {
                                     try {
@@ -107,7 +105,6 @@ class PdfLayoutPreserver(private val context: Context) {
                                             .replace(Regex("</?s[123]>"), "")
                                     }
                                 }
-
                                 translations.add(BlockTranslation(block, translatedText))
                             }
 
@@ -119,16 +116,16 @@ class PdfLayoutPreserver(private val context: Context) {
                                     true,
                                     true
                                 ).use { stream ->
+                                    // Cover every full line/run box first, in one pass,
+                                    // before any new text is drawn over the page.
                                     for (translation in translations) {
                                         coverSourceText(stream, translation.block)
                                     }
-
                                     for (translation in translations) {
                                         val block = translation.block
                                         val cleanedText = stripTagsAndPlaceholders(translation.translated)
                                         val text = sanitizeForFont(cleanedText, font)
                                         if (text.isBlank()) continue
-
                                         drawTextWithWrapping(stream, font, block, text)
                                     }
                                 }
@@ -136,7 +133,6 @@ class PdfLayoutPreserver(private val context: Context) {
                         }
                         onProgress(pageIndex + 1, totalPages)
                     }
-
                     document.save(outStream)
                 }
             } ?: throw Exception("Unable to open input PDF stream")
@@ -165,7 +161,6 @@ class PdfLayoutPreserver(private val context: Context) {
                         }
                         existing.delete()
                     }
-
                     val newFile = docTree.createFile("application/pdf", outputFileName)
                     if (newFile != null) {
                         val outStream = context.contentResolver.openOutputStream(newFile.uri, "w")
@@ -176,11 +171,8 @@ class PdfLayoutPreserver(private val context: Context) {
                 }
             } catch (e: Exception) {
                 if (e.message?.contains("already exists") == true) throw e
-                // Fallback to default output folder if SAF URI fails
             }
         }
-
-        // Fallback for file paths or failed SAF URIs
         val defaultDir = File(context.getExternalFilesDir(null), "translated")
         val outputDir = try {
             if (!outputDirUriOrPath.isNullOrBlank() && !outputDirUriOrPath.startsWith("content://")) {
@@ -193,16 +185,13 @@ class PdfLayoutPreserver(private val context: Context) {
         } catch (_: Exception) {
             defaultDir
         }
-
         if (!outputDir.exists()) {
             outputDir.mkdirs()
         }
-
         val outputFile = File(outputDir, outputFileName)
         if (outputFile.exists() && !overwrite) {
             throw Exception("Output file ${outputFile.name} already exists")
         }
-
         return Pair(FileOutputStream(outputFile), outputFile.absolutePath)
     }
 
@@ -218,6 +207,88 @@ class PdfLayoutPreserver(private val context: Context) {
             .replace(Regex("\\{\\s*v\\d+\\s*\\}"), "")
     }
 
+    /**
+     * Groups word/phrase-level fragments produced by PDFTextStripper into
+     * line-level runs:
+     *  - Fragments are bucketed into a "line" when their y is within
+     *    fontSize * 0.5 of the running line average.
+     *  - Within a line, fragments are merged left-to-right into a single run
+     *    as long as the horizontal gap between them looks like normal word
+     *    spacing (<= 1.5x font size). A larger gap (tab stops, multi-column
+     *    answer choices like "A. ... B. ...") starts a new run instead of
+     *    merging, so unrelated columns don't get glued into one translation.
+     */
+    private fun groupIntoLineRuns(raw: List<TextBlock>): List<TextBlock> {
+        if (raw.isEmpty()) return emptyList()
+
+        val sorted = raw.sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x })
+        val lines = mutableListOf<MutableList<TextBlock>>()
+
+        for (frag in sorted) {
+            val lastLine = lines.lastOrNull()
+            val refY = lastLine?.let { line -> line.map { it.y }.average().toFloat() }
+            if (lastLine != null && refY != null && abs(frag.y - refY) <= frag.fontSize * 0.5f) {
+                lastLine.add(frag)
+            } else {
+                lines.add(mutableListOf(frag))
+            }
+        }
+
+        val result = mutableListOf<TextBlock>()
+        for (line in lines) {
+            val lineSorted = line.sortedBy { it.x }
+            var runFrags = mutableListOf<TextBlock>()
+            var prev: TextBlock? = null
+
+            fun flushRun() {
+                if (runFrags.isNotEmpty()) {
+                    result.add(mergeFragments(runFrags))
+                    runFrags = mutableListOf()
+                }
+            }
+
+            for (frag in lineSorted) {
+                if (prev == null) {
+                    runFrags.add(frag)
+                } else {
+                    val gap = frag.x - (prev.x + prev.width)
+                    val threshold = maxOf(prev.fontSize, frag.fontSize) * 1.5f
+                    if (gap <= threshold) {
+                        runFrags.add(frag)
+                    } else {
+                        flushRun()
+                        runFrags.add(frag)
+                    }
+                }
+                prev = frag
+            }
+            flushRun()
+        }
+        return result
+    }
+
+    private fun mergeFragments(frags: List<TextBlock>): TextBlock {
+        val sorted = frags.sortedBy { it.x }
+        val combinedText = sorted.joinToString(" ") { it.text }
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        val minX = sorted.minOf { it.x }
+        val maxRight = sorted.maxOf { it.x + it.width }
+        val avgY = sorted.map { it.y }.average().toFloat()
+        val maxAscent = sorted.maxOf { it.ascent }
+        val maxDescent = sorted.maxOf { it.descent }
+        val fontSize = sorted.map { it.fontSize }.average().toFloat()
+        return TextBlock(
+            text = combinedText,
+            x = minX,
+            y = avgY,
+            fontSize = fontSize,
+            width = maxRight - minX,
+            ascent = maxAscent,
+            descent = maxDescent
+        )
+    }
+
     private fun drawTextWithWrapping(
         stream: PDPageContentStream,
         font: PDFont,
@@ -226,11 +297,28 @@ class PdfLayoutPreserver(private val context: Context) {
     ) {
         val baseFontSize = block.fontSize.coerceIn(6f, 72f)
         val availableWidth = maxOf(block.width, 30f)
-        val textWidth = measureStringWidth(text, font, baseFontSize)
+        val minSingleLineFontSize = maxOf(baseFontSize * 0.6f, 5.5f)
 
-        if (textWidth <= availableWidth * 1.05f) {
+        // 1) Try to fit on a single line, shrinking the font gradually first.
+        //    This is preferred over wrapping since an extra line can collide
+        //    with whatever content sits directly below this block.
+        var chosenFontSize = baseFontSize
+        var fits = measureStringWidth(text, font, chosenFontSize) <= availableWidth * 1.05f
+        if (!fits) {
+            var size = baseFontSize - 0.5f
+            while (size >= minSingleLineFontSize) {
+                if (measureStringWidth(text, font, size) <= availableWidth * 1.05f) {
+                    chosenFontSize = size
+                    fits = true
+                    break
+                }
+                size -= 0.5f
+            }
+        }
+
+        if (fits) {
             stream.beginText()
-            stream.setFont(font, baseFontSize)
+            stream.setFont(font, chosenFontSize)
             stream.newLineAtOffset(block.x, block.y)
             try {
                 stream.showText(text)
@@ -239,16 +327,16 @@ class PdfLayoutPreserver(private val context: Context) {
             return
         }
 
-        val lines = wrapText(text, font, baseFontSize, availableWidth)
-        val scaleFactor = if (lines.size > 2) 0.85f else 0.95f
-        val effectiveFontSize = (baseFontSize * scaleFactor).coerceAtLeast(5.5f)
-        val lineHeight = effectiveFontSize * 1.2f
+        // 2) Fall back to wrapping at the smallest single-line font size.
+        val wrapFontSize = minSingleLineFontSize
+        val lines = wrapText(text, font, wrapFontSize, availableWidth)
+        val effectiveFontSize = if (lines.size > 3) (wrapFontSize * 0.9f).coerceAtLeast(5f) else wrapFontSize
+        val lineHeight = effectiveFontSize * 1.25f
 
         for ((index, line) in lines.withIndex()) {
             val lineY = block.y - (index * lineHeight)
             val sanitizedLine = sanitizeForFont(line, font)
             if (sanitizedLine.isBlank()) continue
-
             stream.beginText()
             stream.setFont(font, effectiveFontSize)
             stream.newLineAtOffset(block.x, lineY)
@@ -268,7 +356,6 @@ class PdfLayoutPreserver(private val context: Context) {
         val words = text.split(" ")
         val lines = mutableListOf<String>()
         var currentLine = StringBuilder()
-
         for (word in words) {
             if (currentLine.isEmpty()) {
                 currentLine.append(word)
@@ -316,14 +403,11 @@ class PdfLayoutPreserver(private val context: Context) {
         val padX = 3.0f
         val padTop = 2.5f
         val padBottom = 2.5f
-
         val rectX = block.x - padX
         val rectY = block.y - block.descent - padBottom
         val rectW = block.width + padX * 2.0f
         val rectH = block.ascent + block.descent + padTop + padBottom
-
         if (rectW <= 0f || rectH <= 0f) return
-
         stream.saveGraphicsState()
         @Suppress("DEPRECATION")
         stream.setNonStrokingColor(255, 255, 255)
@@ -392,16 +476,12 @@ class PdfLayoutPreserver(private val context: Context) {
             if (textPositions.isEmpty()) return
             val first = textPositions.first()
             val last = textPositions.last()
-
             val x = cropBox.lowerLeftX + first.xDirAdj
             val y = cropBox.upperRightY - first.yDirAdj
-
             val fontSize = first.fontSizeInPt
             val width = (last.xDirAdj + last.widthDirAdj) - first.xDirAdj
-
             val ascent = fontSize * 0.95f
             val descent = fontSize * 0.35f
-
             blocks.add(TextBlock(text, x, y, fontSize, width, ascent, descent))
         }
 

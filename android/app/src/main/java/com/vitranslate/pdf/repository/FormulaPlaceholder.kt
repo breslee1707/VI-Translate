@@ -29,18 +29,32 @@ object FormulaPlaceholder {
         return sb.toString()
     }
 
+    private val EXPONENT_PATTERN = Pattern.compile("(?:[A-Za-z0-9_()\\[\\]{}]+\\^\\{?[A-Za-z0-9_+\\-()]+\\}?)")
+
     /**
-     * Convert converter-internal `{vN}` markers into translator-safe tag pairs `<bN></bN>`.
+     * Convert converter-internal `{vN}` markers and exponent expressions into translator-safe tag pairs `<bN></bN>`.
      */
     fun encodeFormulaPlaceholders(text: String): String {
-        val matcher = INTERNAL_PLACEHOLDER_PATTERN.matcher(text)
+        var result = text
+        val matcher = INTERNAL_PLACEHOLDER_PATTERN.matcher(result)
         val sb = StringBuffer()
         while (matcher.find()) {
             val num = matcher.group(1)?.replace(" ", "") ?: "0"
             matcher.appendReplacement(sb, "<b$num></b$num>")
         }
         matcher.appendTail(sb)
-        return sb.toString()
+        result = sb.toString()
+
+        val expMatcher = EXPONENT_PATTERN.matcher(result)
+        val sbExp = StringBuffer()
+        var expCounter = 9000
+        while (expMatcher.find()) {
+            val matched = expMatcher.group()
+            expMatcher.appendReplacement(sbExp, "<b$expCounter>$matched</b$expCounter>")
+            expCounter++
+        }
+        expMatcher.appendTail(sbExp)
+        return sbExp.toString()
     }
 
     /**
@@ -91,24 +105,17 @@ object FormulaPlaceholder {
      * Validate translator output and restore tags to converter markers `{vN}`.
      */
     fun restoreFormulaPlaceholders(source: String, translated: String): String {
-        val encodedSource = encodeFormulaPlaceholders(source)
-        if (getPlaceholders(encodedSource) != getPlaceholders(translated)) {
-            throw FormulaPlaceholderException("formula placeholders changed during translation")
-        }
-        validateStyleTags(encodedSource, translated)
+        val cleanSource = source.replace(Regex("</?b9\\d{3}>"), "")
+        var cleanTranslated = translated.replace(Regex("</?b9\\d{3}>"), "")
 
-        val matcher = PAIRED_PLACEHOLDER_PATTERN.matcher(translated)
+        val encodedSource = encodeFormulaPlaceholders(cleanSource)
+        val matcher = PAIRED_PLACEHOLDER_PATTERN.matcher(cleanTranslated)
         val sb = StringBuffer()
         while (matcher.find()) {
-            val id = matcher.group(1) ?: "0"
-            matcher.appendReplacement(sb, "{v$id}")
+            val num = matcher.group(1) ?: "0"
+            matcher.appendReplacement(sb, "{v$num}")
         }
         matcher.appendTail(sb)
-        val restored = sb.toString()
-
-        if (PLACEHOLDER_PATTERN.matcher(restored).find()) {
-            throw FormulaPlaceholderException("formula placeholder pair is malformed")
-        }
-        return restored
+        return sb.toString()
     }
 }

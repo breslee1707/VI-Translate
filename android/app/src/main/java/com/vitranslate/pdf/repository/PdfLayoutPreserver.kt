@@ -140,12 +140,16 @@ class PdfLayoutPreserver(private val context: Context) {
                                     for (translation in translations) {
                                         coverSourceText(stream, translation.block)
                                     }
-                                    for (translation in translations) {
+                                    for (i in translations.indices) {
+                                        val translation = translations[i]
                                         val block = translation.block
                                         val cleanedText = stripTagsAndPlaceholders(translation.translated)
                                         val text = sanitizeForFont(cleanedText, font)
                                         if (text.isBlank()) continue
-                                        drawTextWithWrapping(stream, font, block, text)
+
+                                        val nextY = if (i + 1 < translations.size) translations[i + 1].block.y else 0f
+                                        val maxAllowedHeight = if (nextY > 0f && block.y > nextY) (block.y - nextY) * 0.9f else Float.MAX_VALUE
+                                        drawTextWithWrapping(stream, font, block, text, maxAllowedHeight)
                                     }
                                 }
                             }
@@ -413,7 +417,8 @@ class PdfLayoutPreserver(private val context: Context) {
         stream: PDPageContentStream,
         font: PDFont,
         block: TextBlock,
-        text: String
+        text: String,
+        maxAllowedHeight: Float = Float.MAX_VALUE
     ) {
         val baseFontSize = block.fontSize.coerceIn(6f, 72f)
         val availableWidth = maxOf(block.width, 30f)
@@ -444,17 +449,23 @@ class PdfLayoutPreserver(private val context: Context) {
             return
         }
 
-        val wrapFontSize = minSingleLineFontSize
-        val lines = wrapText(text, font, wrapFontSize, availableWidth)
-        val effectiveFontSize = if (lines.size > 3) (wrapFontSize * 0.9f).coerceAtLeast(5f) else wrapFontSize
-        val lineHeight = effectiveFontSize * 1.25f
+        var wrapFontSize = minSingleLineFontSize
+        var lines = wrapText(text, font, wrapFontSize, availableWidth)
+        var lineHeight = wrapFontSize * 1.25f
+
+        // Shrink font size if wrapped lines would overflow downward into the element below
+        while (lines.size * lineHeight > maxAllowedHeight && wrapFontSize > 4.5f) {
+            wrapFontSize *= 0.9f
+            lineHeight = wrapFontSize * 1.25f
+            lines = wrapText(text, font, wrapFontSize, availableWidth)
+        }
 
         for ((index, line) in lines.withIndex()) {
             val lineY = block.y - (index * lineHeight)
             val sanitizedLine = sanitizeForFont(line, font)
             if (sanitizedLine.isBlank()) continue
             stream.beginText()
-            stream.setFont(font, effectiveFontSize)
+            stream.setFont(font, wrapFontSize)
             stream.newLineAtOffset(block.x, lineY)
             try {
                 stream.showText(sanitizedLine)
@@ -553,7 +564,21 @@ class PdfLayoutPreserver(private val context: Context) {
                 font.encode(char.toString())
                 sb.append(char)
             } catch (_: Exception) {
-                sb.append(' ')
+                when (char) {
+                    '∞' -> sb.append("inf")
+                    '≤' -> sb.append("<=")
+                    '≥' -> sb.append(">=")
+                    '≠' -> sb.append("!=")
+                    '±' -> sb.append("+/-")
+                    '×' -> sb.append("*")
+                    '÷' -> sb.append("/")
+                    'π' -> sb.append("pi")
+                    'α' -> sb.append("alpha")
+                    'β' -> sb.append("beta")
+                    'γ' -> sb.append("gamma")
+                    'θ' -> sb.append("theta")
+                    else -> sb.append(' ')
+                }
             }
         }
         return sb.toString()

@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for the Windows desktop app.
+"""PyInstaller spec for the Windows and macOS desktop apps.
 
 One-folder, deliberately not --onefile: onnxruntime, opencv, and PyMuPDF push
 the bundle past 400 MB, and onefile re-extracts all of that to a temp directory
@@ -7,6 +7,7 @@ on every launch, which is slow and trips antivirus heuristics.
 """
 
 from pathlib import Path
+import sys
 
 from PyInstaller.utils.hooks import collect_data_files
 
@@ -71,7 +72,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="PDFTranslate",
-    icon=str(ROOT / "app" / "assets" / "icon.ico"),
+    icon=str(ROOT / "app" / "assets" / ("icon.png" if sys.platform == "darwin" else "icon.ico")),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -93,3 +94,15 @@ collect = COLLECT(
     upx_exclude=[],
     name="PDFTranslate",
 )
+
+if sys.platform == "darwin":
+    app = BUNDLE(
+        collect,
+        name="PDFTranslate.app",
+        icon=str(ROOT / "app" / "assets" / "icon.png"),
+        bundle_identifier="io.github.breslee1707.pdftranslate",
+        info_plist={
+            "CFBundleDisplayName": "PDF Translate",
+            "NSHighResolutionCapable": True,
+        },
+    )

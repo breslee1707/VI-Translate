@@ -12,6 +12,9 @@
   <a href="https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-windows.zip">
     <img src="https://img.shields.io/badge/TẢI_XUỐNG-Windows_x64-1f6feb?style=for-the-badge&logo=windows11&logoColor=white" alt="Tải PDF Translate cho Windows">
   </a>
+  <a href="https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-macos.zip">
+    <img src="https://img.shields.io/badge/TẢI_XUỐNG-macOS_Apple_Silicon-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Tải PDF Translate cho macOS">
+  </a>
 </p>
 
 <p align="center">
@@ -31,7 +34,7 @@
 
 ---
 
-PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows. Công cụ phân tích bố cục từng trang, bảo vệ công thức và code, dịch phần văn xuôi rồi đặt nội dung trở lại đúng vị trí trong tài liệu gốc — không biến PDF của bạn thành một trang chữ trắng đơn giản.
+PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows và macOS. Công cụ phân tích bố cục từng trang, bảo vệ công thức và code, dịch phần văn xuôi rồi đặt nội dung trở lại đúng vị trí trong tài liệu gốc — không biến PDF của bạn thành một trang chữ trắng đơn giản.
 
 ## Điểm nổi bật
 
@@ -45,12 +48,12 @@ PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows. Công
 
 ## Bắt đầu trong 1 phút
 
-1. **[Tải PDF Translate cho Windows](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-windows.zip)** (`.zip`, khoảng 199 MB).
+1. Tải PDF Translate cho **[Windows](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-windows.zip)** hoặc **[macOS Apple Silicon](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-macos.zip)**.
 2. Giải nén toàn bộ file vừa tải.
-3. Mở `PDFTranslate.exe`.
+3. Mở `PDFTranslate.exe` trên Windows hoặc `PDFTranslate.app` trên macOS.
 
 > [!NOTE]
-> Ứng dụng hiện chỉ hỗ trợ **Windows 64-bit**. Bản desktop không cần cài Python và không phải tải thêm model ở lần chạy đầu. Quá trình dịch bằng Google vẫn cần kết nối Internet.
+> Ứng dụng hỗ trợ **Windows 64-bit** và **macOS Apple Silicon**. Bản desktop không cần cài Python và không phải tải thêm model ở lần chạy đầu. Quá trình dịch bằng Google vẫn cần kết nối Internet.
 
 > [!WARNING]
 > Windows SmartScreen có thể cảnh báo vì ứng dụng chưa được ký số. Chọn **More info** → **Run anyway** nếu bạn tải file từ trang Releases chính thức của repo này.
@@ -169,6 +172,17 @@ python -m venv .venv
 ```
 
 Gói phát hành được tạo tại `dist\PDFTranslate-windows.zip`.
+
+### Build ứng dụng macOS
+
+Python dùng để tạo môi trường cần có Tk/Tcl.
+
+```bash
+python3 -m venv .venv
+./build-macos.sh
+```
+
+Gói phát hành được tạo tại `dist/PDFTranslate-macos.zip`. PyInstaller không cross-compile, vì vậy mỗi gói phải được build trên đúng hệ điều hành.
 
 ## Giới hạn hiện tại
 

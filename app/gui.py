@@ -10,6 +10,7 @@ from __future__ import annotations
 import ctypes
 import os
 import queue
+import subprocess
 import sys
 import threading
 import tkinter
@@ -39,8 +40,8 @@ FONT_DIRECTORY = APP_ROOT / "app" / "fonts"
 ASSET_DIRECTORY = APP_ROOT / "app" / "assets"
 UI_FONT = "Be Vietnam Pro"
 MONO_FONT = "JetBrains Mono"
-FALLBACK_UI_FONT = "Segoe UI"
-FALLBACK_MONO_FONT = "Consolas"
+FALLBACK_UI_FONT = "Helvetica" if sys.platform == "darwin" else "Segoe UI"
+FALLBACK_MONO_FONT = "Menlo" if sys.platform == "darwin" else "Consolas"
 
 # One 8px rhythm for the whole window, so nothing is spaced by feel.
 PAD, GAP, EDGE = 8, 16, 24
@@ -143,7 +144,10 @@ def collect_pdfs(paths: list[Path]) -> list[Path]:
     for path in paths:
         if path.is_dir():
             # Not glob("*.pdf"): that is case-sensitive on POSIX and would miss .PDF.
-            found.extend(sorted(p for p in path.iterdir() if _is_pdf(p)))
+            found.extend(sorted(
+                (p for p in path.iterdir() if _is_pdf(p)),
+                key=lambda item: item.name.casefold(),
+            ))
         elif path.suffix.lower() == ".pdf":
             found.append(path)
     unique: dict[Path, None] = {}
@@ -214,7 +218,14 @@ class QueueRow:
 class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def __init__(self) -> None:
         super().__init__()
-        self.TkdndVersion = TkinterDnD._require(self)
+        try:
+            self.TkdndVersion = TkinterDnD._require(self)
+        except RuntimeError:
+            # tkdnd currently targets Tk 8.6 on macOS. Homebrew may pair
+            # Python with Tk 9, where file pickers still work but loading the
+            # older native extension fails. Drag and drop is optional, so do
+            # not make that prevent the whole application from starting.
+            self.TkdndVersion = None
 
         has_fonts = load_bundled_fonts()
         self.ui_font = UI_FONT if has_fonts else FALLBACK_UI_FONT
@@ -237,10 +248,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.outputs: dict[Path, Path] = {}
 
         self._build()
-        self.drop_target_register(DND_FILES)
-        self.dnd_bind("<<Drop>>", self._on_drop)
-        self.dnd_bind("<<DropEnter>>", self._on_drag_enter)
-        self.dnd_bind("<<DropLeave>>", self._on_drag_leave)
+        if self.TkdndVersion is not None:
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind("<<Drop>>", self._on_drop)
+            self.dnd_bind("<<DropEnter>>", self._on_drag_enter)
+            self.dnd_bind("<<DropLeave>>", self._on_drag_leave)
         self.after(100, self._drain_events)
         # Both background threads are staggered: each one holds the GIL long
         # enough while importing to make the freshly opened window hitch, and
@@ -464,8 +476,13 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if target is None or not Path(target).exists():
             return
         try:
-            os.startfile(target)  # noqa: S606 - Windows shell open, the app is Windows only
-        except OSError:
+            if sys.platform == "win32":
+                os.startfile(target)  # type: ignore[attr-defined]  # noqa: S606
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(target)], check=False)  # noqa: S603,S607
+            else:
+                subprocess.run(["xdg-open", str(target)], check=False)  # noqa: S603,S607
+        except (OSError, subprocess.SubprocessError):
             pass  # nothing useful to do if the shell refuses
 
     def _show_output_link(self) -> None:

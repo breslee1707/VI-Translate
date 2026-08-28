@@ -12,7 +12,9 @@ from scripts import translate_pdf
 class TranslatePdfTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_directory = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_directory.name)
+        # macOS exposes /var as a symlink to /private/var. Match production,
+        # which resolves paths before returning them.
+        self.root = Path(self.temp_directory.name).resolve()
         self.source = self.root / "guide.pdf"
         self.source.write_bytes(b"%PDF-1.7\nsource")
         self.output = self.root / "output"

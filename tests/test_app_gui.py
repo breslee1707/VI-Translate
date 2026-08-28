@@ -5,9 +5,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 try:
-    from app.gui import LANGUAGE_NAMES, collect_pdfs, ensure_writable_streams
+    from app.gui import App, LANGUAGE_NAMES, collect_pdfs, ensure_writable_streams
 except ImportError:  # customtkinter and tkinterdnd2 are app-only dependencies
     collect_pdfs = None
 
@@ -87,6 +88,17 @@ class WritableStreamTests(unittest.TestCase):
         sys.stdout = marker
         ensure_writable_streams()
         self.assertIs(sys.stdout, marker)
+
+
+@unittest.skipIf(collect_pdfs is None, "desktop app dependencies are not installed")
+class OpenOutputTests(unittest.TestCase):
+    def test_macos_opens_the_output_with_the_system_open_command(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch("app.gui.sys.platform", "darwin"), \
+                mock.patch("app.gui.subprocess.run") as run:
+            target = Path(directory)
+            App._open(target)
+        run.assert_called_once_with(["open", str(target)], check=False)
 
 
 if __name__ == "__main__":

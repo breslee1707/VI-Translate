@@ -45,3 +45,30 @@ jobs:
         with:
           files: dist/PDFTranslate-windows.zip
           generate_release_notes: true
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag matches APP_VERSION
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's/^APP_VERSION = "\([^"]*\)"$/\1/p' app/update.py)"
+          test "$tag" = "$version"
+
+      - name: Create the virtual environment
+        run: python -m venv .venv
+
+      - name: Build
+        run: ./build-macos.sh
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/PDFTranslate-macos.zip
+          generate_release_notes: true

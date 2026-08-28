@@ -9,6 +9,7 @@ because every line in a paragraph got the same leading.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from pdf2zh.converter import (
@@ -229,7 +230,7 @@ class OrientationAndStyleTests(unittest.TestCase):
 
     def test_missing_style_faces_fall_back_to_the_regular_font(self):
         paths = output_style_font_paths("vi", "C:/missing/regular.ttf")
-        self.assertEqual(set(paths.values()), {"C:\\missing\\regular.ttf"})
+        self.assertEqual(set(paths.values()), {str(Path("C:/missing/regular.ttf"))})
 
 
 if __name__ == "__main__":

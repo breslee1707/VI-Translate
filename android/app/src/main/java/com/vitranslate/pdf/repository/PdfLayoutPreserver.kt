@@ -164,14 +164,7 @@ class PdfLayoutPreserver(private val context: Context) {
                 val treeUri = Uri.parse(outputDirUriOrPath)
                 val docTree = DocumentFile.fromTreeUri(context, treeUri)
                 if (docTree != null) {
-                    val existing = docTree.findFile(outputFileName)
-                    if (existing != null) {
-                        if (!overwrite) {
-                            throw Exception("Output file $outputFileName already exists")
-                        }
-                        try { existing.delete() } catch (_: Exception) {}
-                    }
-                    val targetFile = docTree.createFile("application/pdf", outputFileName)
+                    val targetFile = getUniqueSafFile(docTree, outputFileName, overwrite)
                     if (targetFile != null) {
                         val outStream = context.contentResolver.openOutputStream(targetFile.uri, "w")
                         if (outStream != null) {
@@ -179,8 +172,8 @@ class PdfLayoutPreserver(private val context: Context) {
                         }
                     }
                 }
-            } catch (e: Exception) {
-                if (e.message?.contains("already exists") == true) throw e
+            } catch (_: Exception) {
+                // Fallback to standard file path below
             }
         }
         val defaultDir = File(context.getExternalFilesDir(null), "translated")
@@ -198,14 +191,57 @@ class PdfLayoutPreserver(private val context: Context) {
         if (!outputDir.exists()) {
             outputDir.mkdirs()
         }
-        val outputFile = File(outputDir, outputFileName)
-        if (outputFile.exists()) {
-            if (!overwrite) {
-                throw Exception("Output file ${outputFile.name} already exists")
-            }
-            try { outputFile.delete() } catch (_: Exception) {}
-        }
+
+        val outputFile = getUniqueFile(outputDir, outputFileName, overwrite)
         return Pair(FileOutputStream(outputFile, false), outputFile.absolutePath)
+    }
+
+    private fun getUniqueFile(dir: File, baseOutputName: String, overwrite: Boolean): File {
+        val file = File(dir, baseOutputName)
+        if (overwrite || !file.exists()) {
+            if (overwrite && file.exists()) {
+                try { file.delete() } catch (_: Exception) {}
+            }
+            return file
+        }
+
+        val nameWithoutExt = if (baseOutputName.endsWith(".pdf", ignoreCase = true)) {
+            baseOutputName.substring(0, baseOutputName.length - 4)
+        } else {
+            baseOutputName
+        }
+        var counter = 1
+        while (true) {
+            val candidate = File(dir, "$nameWithoutExt ($counter).pdf")
+            if (!candidate.exists()) {
+                return candidate
+            }
+            counter++
+        }
+    }
+
+    private fun getUniqueSafFile(docTree: DocumentFile, baseOutputName: String, overwrite: Boolean): DocumentFile? {
+        val existing = docTree.findFile(baseOutputName)
+        if (existing != null) {
+            if (overwrite) {
+                try { existing.delete() } catch (_: Exception) {}
+                return docTree.createFile("application/pdf", baseOutputName)
+            }
+            val nameWithoutExt = if (baseOutputName.endsWith(".pdf", ignoreCase = true)) {
+                baseOutputName.substring(0, baseOutputName.length - 4)
+            } else {
+                baseOutputName
+            }
+            var counter = 1
+            while (true) {
+                val candidateName = "$nameWithoutExt ($counter).pdf"
+                if (docTree.findFile(candidateName) == null) {
+                    return docTree.createFile("application/pdf", candidateName)
+                }
+                counter++
+            }
+        }
+        return docTree.createFile("application/pdf", baseOutputName)
     }
 
     private val OPTION_LABEL_PATTERN = Pattern.compile("^([(]?[A-Da-d1-9][.)])\\s*")

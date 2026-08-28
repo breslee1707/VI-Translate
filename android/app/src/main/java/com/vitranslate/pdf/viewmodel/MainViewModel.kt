@@ -68,6 +68,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setCustomOutputDirectory(path: String?) {
         _customOutputDirectory.value = path
         prefs.edit().putString("custom_output_dir", path).apply()
+        resetSkippedItems()
     }
 
     private fun checkForUpdates() {
@@ -81,11 +82,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setSelectedLanguage(language: TargetLanguage) {
         _selectedLanguage.value = language
+        resetSkippedItems()
     }
 
     fun setOverwrite(value: Boolean) {
         _overwrite.value = value
         prefs.edit().putBoolean("overwrite_existing", value).apply()
+        resetSkippedItems()
+    }
+
+    private fun resetSkippedItems() {
+        if (!_isTranslating.value) {
+            _queueItems.value = _queueItems.value.map { item ->
+                if (item.status == TranslationStatus.SKIPPED) {
+                    item.copy(status = TranslationStatus.QUEUED, detail = "")
+                } else {
+                    item
+                }
+            }
+            refreshStatusText()
+        }
     }
 
     fun addFiles(uris: List<Uri>) {
@@ -145,7 +161,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startTranslation() {
         if (_isTranslating.value) return
-        val pending = _queueItems.value.filter { it.status == TranslationStatus.QUEUED || it.status == TranslationStatus.FAILED }
+        val pending = _queueItems.value.filter { 
+            it.status == TranslationStatus.QUEUED || 
+            it.status == TranslationStatus.FAILED || 
+            it.status == TranslationStatus.SKIPPED 
+        }
         if (pending.isEmpty()) {
             _statusText.value = "Không còn file nào cần dịch"
             return

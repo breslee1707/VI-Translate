@@ -97,9 +97,10 @@ class PdfLayoutPreserver(private val context: Context) {
                                 val (optionLabel, remainder) = splitOptionLabel(originalText)
                                 val textToTranslate = remainder.trim()
 
-                                // Skip translating standalone math formulas and numeric choices
+                                // Skip translating standalone math formulas and numeric choices, but preserve them in translations list
                                 if (textToTranslate.isBlank() || isPureMathOrFormula(textToTranslate)) {
                                     skippedMathCount++
+                                    translations.add(BlockTranslation(block, originalText))
                                     continue
                                 }
 

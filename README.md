@@ -16,6 +16,12 @@
   <a href="https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-windows.zip">
     <img src="https://img.shields.io/badge/TẢI_XUỐNG-Windows_x64-1f6feb?style=for-the-badge&logo=windows11&logoColor=white" alt="Tải PDF Translate cho Windows">
   </a>
+  <a href="https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-macos-apple-silicon.dmg">
+    <img src="https://img.shields.io/badge/TẢI_XUỐNG-macOS_Apple_Silicon-111111?style=for-the-badge&logo=apple&logoColor=white" alt="Tải PDF Translate cho Mac Apple Silicon">
+  </a>
+  <a href="https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-macos-intel.dmg">
+    <img src="https://img.shields.io/badge/TẢI_XUỐNG-macOS_Intel-555555?style=for-the-badge&logo=apple&logoColor=white" alt="Tải PDF Translate cho Mac Intel">
+  </a>
 </p>
 
 <p align="center">
@@ -35,7 +41,7 @@
 
 ---
 
-PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows. Công cụ phân tích bố cục từng trang, bảo vệ công thức và code, dịch phần văn xuôi rồi đặt nội dung trở lại đúng vị trí trong tài liệu gốc — không biến PDF của bạn thành một trang chữ trắng đơn giản.
+PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows và macOS. Công cụ phân tích bố cục từng trang, bảo vệ công thức và code, dịch phần văn xuôi rồi đặt nội dung trở lại đúng vị trí trong tài liệu gốc — không biến PDF của bạn thành một trang chữ trắng đơn giản.
 
 ## Điểm nổi bật
 
@@ -49,15 +55,26 @@ PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows. Công
 
 ## Bắt đầu trong 1 phút
 
+### Windows
+
 1. **[Tải PDF Translate cho Windows](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-windows.zip)** (`.zip`, khoảng 199 MB).
 2. Giải nén toàn bộ file vừa tải.
 3. Mở `PDFTranslate.exe`.
 
+### macOS
+
+1. Tải bản phù hợp: **[Apple Silicon](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-macos-apple-silicon.dmg)** cho Mac M1/M2/M3/M4/M5 hoặc **[Intel](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-macos-intel.dmg)** cho Mac Intel.
+2. Mở file `.dmg`, kéo **PDF Translate** vào thư mục **Applications**.
+3. Trong lần chạy đầu, bấm chuột phải vào ứng dụng → **Open** → **Open**.
+
 > [!NOTE]
-> Ứng dụng hiện chỉ hỗ trợ **Windows 64-bit**. Bản desktop không cần cài Python và không phải tải thêm model ở lần chạy đầu. Quá trình dịch bằng Google vẫn cần kết nối Internet.
+> Bản macOS yêu cầu **macOS 14 Sonoma trở lên**. Tất cả bản desktop đều không cần cài Python và không phải tải thêm model ở lần chạy đầu. Quá trình dịch bằng Google vẫn cần kết nối Internet.
 
 > [!WARNING]
 > Windows SmartScreen có thể cảnh báo vì ứng dụng chưa được ký số. Chọn **More info** → **Run anyway** nếu bạn tải file từ trang Releases chính thức của repo này.
+
+> [!WARNING]
+> Bản macOS hiện dùng chữ ký ad-hoc, chưa được Apple notarize. Gatekeeper có thể chặn thao tác mở thông thường; hãy dùng cách bấm chuột phải → **Open** ở trên nếu bạn tải từ trang Releases chính thức.
 
 Bạn cũng có thể mở [trang Releases](https://github.com/breslee1707/VI-Translate/releases/latest) để xem ghi chú thay đổi và các tệp của phiên bản mới nhất.
 
@@ -71,7 +88,7 @@ Chọn một trong ba cách:
 
 - Kéo thả file PDF hoặc cả thư mục vào cửa sổ ứng dụng.
 - Bấm **Chọn file** hoặc **Chọn thư mục**.
-- Thả file trực tiếp lên `PDFTranslate.exe`.
+- Thả file trực tiếp lên biểu tượng ứng dụng.
 
 ### 2. Chọn ngôn ngữ
 
@@ -173,6 +190,16 @@ python -m venv .venv
 ```
 
 Gói phát hành được tạo tại `dist\PDFTranslate-windows.zip`.
+
+### Build ứng dụng macOS
+
+Chạy trên máy Mac dùng đúng kiến trúc cần phát hành:
+
+```bash
+bash build-macos.sh
+```
+
+Gói phát hành được tạo tại `dist/PDFTranslate-macos-apple-silicon.dmg` hoặc `dist/PDFTranslate-macos-intel.dmg`. Từ máy Windows, bạn có thể chạy thủ công workflow **Release** trên GitHub Actions để lấy cả hai DMG trong phần Artifacts; khi push tag `v*`, workflow tự đính kèm chúng vào GitHub Release.
 
 ## Giới hạn hiện tại
 

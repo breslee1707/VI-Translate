@@ -5,7 +5,10 @@ name: Release
 # right every time - which is exactly the kind of thing manual uploads get
 # wrong once and then nobody notices for a month.
 on:
+  workflow_dispatch:
   push:
+    branches:
+      - "codex/macos-build"
     tags:
       - "v*"
 
@@ -23,6 +26,7 @@ jobs:
           python-version: "3.12"
 
       - name: Check the tag matches APP_VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}".TrimStart("v")
@@ -41,7 +45,63 @@ jobs:
       - name: Build
         run: .\build.ps1
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PDFTranslate-windows
+          path: dist/PDFTranslate-windows.zip
+          if-no-files-found: error
+
+  macos:
+    name: macOS (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: apple-silicon
+            runner: macos-15
+          - arch: intel
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag matches APP_VERSION
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(sed -n 's/^APP_VERSION = "\([^"]*\)"$/\1/p' app/update.py)"
+          if [[ "$tag" != "$version" ]]; then
+            echo "Tag $tag does not match APP_VERSION $version in app/update.py" >&2
+            exit 1
+          fi
+          echo "Releasing $version"
+
+      - name: Build app and DMG
+        shell: bash
+        run: bash build-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PDFTranslate-macos-${{ matrix.arch }}
+          path: dist/PDFTranslate-macos-${{ matrix.arch }}.dmg
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/PDFTranslate-windows.zip
+          files: release-assets/*
           generate_release_notes: true

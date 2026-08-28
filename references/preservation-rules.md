@@ -15,6 +15,7 @@ The bundled core translates ordinary text while retaining document structures wh
 - A layout-model table is translated cell by cell only when PyMuPDF can match a cell grid to at least half of the detected table region.
 - Visually merged cells are split into x-position clusters so natural-language labels can be translated without sending adjacent abbreviations, identifiers, numbers, or units to the translation service.
 - Each reliable cell is reflowed within its own bounds while the source grid, fills, and borders remain unchanged.
+- When a dense cell is shrunk vertically, its line spacing is recomputed from the final font size so the last line cannot spill into the next row.
 - Cell translations may shrink to half the source font size. If text still cannot fit, that cell remains in the source language and the result is reported as partial.
 - Tables without a reliable cell grid remain fully protected.
 
@@ -32,8 +33,11 @@ These classifications preserve the complete page layout instead of reflowing num
 - Vietnamese text uses a `1.2` line-height multiplier.
 - Windows uses Times New Roman when available; other environments use the downloaded Unicode font fallback.
 - Long translations scale down before rendering, wrap at word boundaries, reduce line height when necessary, and shrink again only when the paragraph still exceeds its original box.
+- Width fitting deducts first-line indentation from the available line budget so justified or indented translations cannot cross the source right edge.
 - Extended bullets remain anchored, and vertically separated list items start new paragraphs.
+- Symbol and Wingdings private-use bullets stay in their original embedded dingbat font instead of being emitted as missing glyphs by the macOS or Windows prose font.
 - Quarter-turn text keeps its source orientation. Rotated table headings are translated and fitted along their logical baseline instead of wrapping one glyph per line.
+- Reflected text matrices paired with negative font sizes are normalized from their baseline direction; this prevents technically mirrored but visually upright source text from being replayed upside down.
 - Bold, italic, and bold-italic runs travel through the translator as validated style markers and use the matching Times New Roman face on Windows. Missing variants use synthetic weight/slant without discarding the style.
 
 ## Scan and source safety
@@ -42,6 +46,7 @@ These classifications preserve the complete page layout instead of reflowing num
 - The core does not perform OCR. A scan without an extractable text layer remains untranslated.
 - Structural PDF repair uses a temporary copy. The source file is never overwritten.
 - The translated PDF retains the source page canvas and page count; a requested page subset limits translation rather than removing pages.
+- The app emits only the mono translation. Documents of 200 pages or 50 MB and larger skip whole-document font subsetting and use light PDF serialization to avoid a long, UI-blocking finalization pass.
 
 ## Known limits
 

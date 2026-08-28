@@ -138,22 +138,26 @@ private fun QueueRow(
                 modifier = Modifier.padding(end = 8.dp)
             )
 
-            Text(
-                text = item.name,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (item.status == TranslationStatus.QUEUED) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f) else statusColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+            Column(
                 modifier = Modifier.weight(1f)
-            )
-
-            if (item.detail.isNotEmpty()) {
+            ) {
                 Text(
-                    text = item.detail,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = statusColor,
-                    modifier = Modifier.padding(horizontal = 8.dp)
+                    text = item.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (item.status == TranslationStatus.QUEUED) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f) else statusColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+
+                if (item.detail.isNotEmpty()) {
+                    Text(
+                        text = item.detail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = statusColor.copy(alpha = 0.85f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
             if (isClickable) {

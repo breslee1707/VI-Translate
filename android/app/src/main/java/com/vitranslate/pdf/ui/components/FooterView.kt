@@ -27,7 +27,8 @@ fun FooterView(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 16.dp)
+            .navigationBarsPadding()
+            .padding(horizontal = 24.dp, vertical = 12.dp)
     ) {
         if (isTranslating) {
             if (isIndeterminate) {
@@ -62,9 +63,13 @@ fun FooterView(
                 modifier = Modifier.weight(1f)
             )
 
-            TextButton(
+            OutlinedButton(
                 onClick = onShowLog,
-                modifier = Modifier.height(32.dp)
+                modifier = Modifier
+                    .height(36.dp)
+                    .padding(start = 8.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
             ) {
                 Text(
                     text = "Xem Log",

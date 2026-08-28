@@ -144,7 +144,11 @@ fun MainScreen(
     ) {
         HeaderView(
             appVersion = "1.9.11",
-            updateInfo = updateInfo
+            updateInfo = updateInfo,
+            onShowLog = {
+                currentLogText = viewModel.getLogContent()
+                showLogDialog = true
+            }
         )
 
         DropZoneView(

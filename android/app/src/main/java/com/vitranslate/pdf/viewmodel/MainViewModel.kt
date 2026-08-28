@@ -188,11 +188,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val isSkipped = errorMsg.contains("already exists", ignoreCase = true)
                     val finalStatus = if (isSkipped) TranslationStatus.SKIPPED else TranslationStatus.FAILED
 
+                    val displayDetail = if (isSkipped) "File đã tồn tại (Đã bỏ qua)" else errorMsg
+
                     if (finalStatus == TranslationStatus.FAILED) {
                         val logDir = File(getApplication<Application>().getExternalFilesDir(null), "translated")
                         logFailure(logDir, item.name, e)
                     }
-                    updateItemStatus(item.id, finalStatus, errorMsg)
+                    updateItemStatus(item.id, finalStatus, displayDetail)
                 }
 
                 completedFiles++

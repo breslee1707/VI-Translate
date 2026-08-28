@@ -7,8 +7,6 @@ name: Release
 on:
   workflow_dispatch:
   push:
-    branches:
-      - "codex/macos-build"
     tags:
       - "v*"
 

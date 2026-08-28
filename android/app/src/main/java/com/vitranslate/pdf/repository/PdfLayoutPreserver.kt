@@ -154,31 +154,44 @@ class PdfLayoutPreserver(private val context: Context) {
         overwrite: Boolean
     ): Pair<OutputStream, String> {
         if (!outputDirUriOrPath.isNullOrBlank() && outputDirUriOrPath.startsWith("content://")) {
-            val treeUri = Uri.parse(outputDirUriOrPath)
-            val docTree = DocumentFile.fromTreeUri(context, treeUri)
-                ?: throw Exception("Không thể mở thư mục đã chọn")
+            try {
+                val treeUri = Uri.parse(outputDirUriOrPath)
+                val docTree = DocumentFile.fromTreeUri(context, treeUri)
+                if (docTree != null) {
+                    val existing = docTree.findFile(outputFileName)
+                    if (existing != null) {
+                        if (!overwrite) {
+                            throw Exception("Output file $outputFileName already exists")
+                        }
+                        existing.delete()
+                    }
 
-            val existing = docTree.findFile(outputFileName)
-            if (existing != null) {
-                if (!overwrite) {
-                    throw Exception("Output file $outputFileName already exists")
+                    val newFile = docTree.createFile("application/pdf", outputFileName)
+                    if (newFile != null) {
+                        val outStream = context.contentResolver.openOutputStream(newFile.uri, "w")
+                        if (outStream != null) {
+                            return Pair(outStream, newFile.uri.toString())
+                        }
+                    }
                 }
-                existing.delete()
+            } catch (e: Exception) {
+                if (e.message?.contains("already exists") == true) throw e
+                // Fallback to default output folder if SAF URI fails
             }
-
-            val newFile = docTree.createFile("application/pdf", outputFileName)
-                ?: throw Exception("Không thể tạo file $outputFileName trong thư mục")
-
-            val outStream = context.contentResolver.openOutputStream(newFile.uri, "w")
-                ?: throw Exception("Không thể ghi file $outputFileName")
-
-            return Pair(outStream, newFile.uri.toString())
         }
 
-        val outputDir = if (!outputDirUriOrPath.isNullOrBlank() && !outputDirUriOrPath.startsWith("content://")) {
-            File(outputDirUriOrPath)
-        } else {
-            File(context.getExternalFilesDir(null), "translated")
+        // Fallback for file paths or failed SAF URIs
+        val defaultDir = File(context.getExternalFilesDir(null), "translated")
+        val outputDir = try {
+            if (!outputDirUriOrPath.isNullOrBlank() && !outputDirUriOrPath.startsWith("content://")) {
+                val dir = File(outputDirUriOrPath)
+                if (!dir.exists()) dir.mkdirs()
+                if (dir.exists() && dir.canWrite()) dir else defaultDir
+            } else {
+                defaultDir
+            }
+        } catch (_: Exception) {
+            defaultDir
         }
 
         if (!outputDir.exists()) {

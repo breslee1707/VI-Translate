@@ -45,6 +45,34 @@ STYLE_FONT_NAMES = {
 BASE14_STYLE_FONTS = {0: "tiro", 1: "tibo", 2: "tiit", 3: "tibi"}
 
 logger = logging.getLogger(__name__)
+LARGE_DOCUMENT_SUBSET_PAGE_LIMIT = 200
+LARGE_DOCUMENT_BYTE_LIMIT = 50 * 1024 * 1024
+
+
+def is_large_document(page_count: int, source_size: int = 0) -> bool:
+    return (
+        page_count >= LARGE_DOCUMENT_SUBSET_PAGE_LIMIT
+        or source_size >= LARGE_DOCUMENT_BYTE_LIMIT
+    )
+
+
+def should_subset_fonts(
+    page_count: int, skip_subset_fonts: bool, source_size: int = 0
+) -> bool:
+    """Avoid the blocking whole-document font scan on large PDFs."""
+    return not skip_subset_fonts and not is_large_document(page_count, source_size)
+
+
+def pdf_write_options(page_count: int, source_size: int = 0) -> dict[str, int | bool]:
+    """Choose fast, low-memory serialization for large documents.
+
+    Recompressing and garbage-collecting every object in a long textbook can
+    hold the CPython GIL for tens of seconds.  A light cleanup is almost the same
+    size for image-heavy books and lets the GUI finish promptly.
+    """
+    if is_large_document(page_count, source_size):
+        return {"deflate": False, "garbage": 1, "use_objstms": 0}
+    return {"deflate": True, "garbage": 3, "use_objstms": 1}
 
 
 def output_style_font_paths(language: str, regular_path: str) -> dict[int, str]:
@@ -441,9 +469,11 @@ def translate_stream(
     envs: Dict = None,
     prompt: Template = None,
     skip_subset_fonts: bool = False,
+    create_dual: bool = True,
     ignore_cache: bool = False,
     **kwarg: Any,
 ):
+    source_size = len(stream)
     font_path = download_remote_fonts(lang_out.lower())
     style_paths = output_style_font_paths(lang_out.lower(), font_path)
     style_font_names = dict(STYLE_FONT_NAMES)
@@ -465,6 +495,8 @@ def translate_stream(
     stream = io.BytesIO()
     doc_en.save(stream)
     doc_zh = Document(stream=stream)
+    if not create_dual:
+        doc_en.close()
     page_count = doc_zh.page_count
     # font_list = [("GoNotoKurrent-Regular.ttf", font_path), ("tiro", None)]
     font_id = {}
@@ -508,15 +540,30 @@ def translate_stream(
         # print(ops_new.encode())
         doc_zh.update_stream(obj_id, ops_new.encode())
 
-    doc_en.insert_file(doc_zh)
-    for id in range(page_count):
-        doc_en.move_page(page_count + id, id * 2 + 1)
-    if not skip_subset_fonts:
+    if create_dual:
+        doc_en.insert_file(doc_zh)
+        for id in range(page_count):
+            doc_en.move_page(page_count + id, id * 2 + 1)
+
+    # PyMuPDF's whole-document font scan is disproportionately expensive for
+    # textbooks and holds the GIL while it runs.  The output fonts are already
+    # embedded and valid without subsetting, so favour a responsive, reliable
+    # export for large documents over shaving a few megabytes from the result.
+    subset_fonts = should_subset_fonts(page_count, skip_subset_fonts, source_size)
+    if subset_fonts:
         doc_zh.subset_fonts(fallback=True)
-        doc_en.subset_fonts(fallback=True)
+        if create_dual:
+            doc_en.subset_fonts(fallback=True)
+    write_options = pdf_write_options(page_count, source_size)
+    mono = doc_zh.write(**write_options)
+    dual = (
+        doc_en.write(**write_options)
+        if create_dual
+        else None
+    )
     return (
-        doc_zh.write(deflate=True, garbage=3, use_objstms=1),
-        doc_en.write(deflate=True, garbage=3, use_objstms=1),
+        mono,
+        dual,
         translation_failures,
     )
 
@@ -642,6 +689,7 @@ def translate(
         try:
             s_mono, _s_dual, translation_failures = translate_stream(
                 s_raw,
+                create_dual=False,
                 **locals(),
             )
             if translation_failures:

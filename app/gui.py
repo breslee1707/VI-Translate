@@ -10,6 +10,7 @@ from __future__ import annotations
 import ctypes
 import os
 import queue
+import subprocess
 import sys
 import threading
 import tkinter
@@ -39,8 +40,12 @@ FONT_DIRECTORY = APP_ROOT / "app" / "fonts"
 ASSET_DIRECTORY = APP_ROOT / "app" / "assets"
 UI_FONT = "Be Vietnam Pro"
 MONO_FONT = "JetBrains Mono"
-FALLBACK_UI_FONT = "Segoe UI"
-FALLBACK_MONO_FONT = "Consolas"
+if sys.platform == "darwin":
+    FALLBACK_UI_FONT = "Helvetica Neue"
+    FALLBACK_MONO_FONT = "Menlo"
+else:
+    FALLBACK_UI_FONT = "Segoe UI"
+    FALLBACK_MONO_FONT = "Consolas"
 
 # One 8px rhythm for the whole window, so nothing is spaced by feel.
 PAD, GAP, EDGE = 8, 16, 24
@@ -464,7 +469,16 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if target is None or not Path(target).exists():
             return
         try:
-            os.startfile(target)  # noqa: S606 - Windows shell open, the app is Windows only
+            if sys.platform == "win32":
+                os.startfile(target)  # type: ignore[attr-defined]  # noqa: S606
+            else:
+                command = "open" if sys.platform == "darwin" else "xdg-open"
+                subprocess.Popen(  # noqa: S603 - fixed OS command, no shell
+                    [command, str(target)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
         except OSError:
             pass  # nothing useful to do if the shell refuses
 
@@ -702,9 +716,17 @@ def main() -> None:
     ctk.set_appearance_mode("system")
     ctk.set_default_color_theme("blue")
     app = App()
-    # Windows passes anything dropped on the executable icon as arguments.
-    if sys.argv[1:]:
-        app._add([Path(argument) for argument in sys.argv[1:]])
+    arguments = [argument for argument in sys.argv[1:] if argument != "--smoke-test"]
+    if "--smoke-test" in sys.argv[1:]:
+        # CI uses this to prove the frozen executable can load Tk, TkDND and all
+        # native libraries on the Mac architecture that produced the bundle.
+        app.withdraw()
+        app.update_idletasks()
+        app.destroy()
+        return
+    # Desktop shells can pass files dropped on the executable icon as arguments.
+    if arguments:
+        app._add([Path(argument) for argument in arguments])
     app.mainloop()
 
 

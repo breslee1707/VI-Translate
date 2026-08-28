@@ -17,7 +17,7 @@ from pdfminer.utils import apply_matrix_pt, mult_matrix
 from pymupdf import Font
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from pdf2zh.rules import BULLET_CHARACTERS, is_formula_font, line_height_for_language
+from pdf2zh.rules import is_bullet_character, is_formula_font, line_height_for_language
 from pdf2zh.translator import (
     ENGINES,
     BaseTranslator,
@@ -55,35 +55,53 @@ def text_style_from_font(font_name: str | bytes) -> TextStyle:
 
 
 def text_orientation(matrix) -> tuple[float, float, float, float] | None:
-    """Return the nearest quarter-turn text orientation, or None if arbitrary."""
+    """Return the nearest quarter-turn from the glyph baseline direction.
+
+    Some PDF producers use a negative font size together with a reflected text
+    matrix (for example ``1 0 0 -1``) to draw ordinary upright text.  Looking at
+    all four matrix components mistakes that implementation detail for an
+    unsupported orientation and causes the glyphs to be replayed upside down.
+    The first matrix column is the logical baseline, so it is sufficient for
+    classifying the four supported reading directions.
+    """
     a, b, c, d = (float(value) for value in matrix[:4])
     x_scale = math.hypot(a, b)
-    y_scale = math.hypot(c, d)
-    if x_scale <= 1e-6 or y_scale <= 1e-6:
+    if x_scale <= 1e-6 or math.hypot(c, d) <= 1e-6:
         return None
-    normalised = (a / x_scale, b / x_scale, c / y_scale, d / y_scale)
+    baseline = (a / x_scale, b / x_scale)
     candidates = (
         IDENTITY_ORIENTATION,
         (0.0, 1.0, -1.0, 0.0),
         (-1.0, 0.0, 0.0, -1.0),
         (0.0, -1.0, 1.0, 0.0),
     )
-    return min(
-        candidates,
-        key=lambda candidate: sum(
-            (normalised[index] - candidate[index]) ** 2 for index in range(4)
-        ),
-    ) if min(
-        sum((normalised[index] - candidate[index]) ** 2 for index in range(4))
+    distances = [
+        (baseline[0] - candidate[0]) ** 2
+        + (baseline[1] - candidate[1]) ** 2
         for candidate in candidates
-    ) <= 0.08 else None
+    ]
+    best = min(range(len(candidates)), key=distances.__getitem__)
+    return candidates[best] if distances[best] <= 0.04 else None
 
 
 def normalised_text_matrix(matrix) -> tuple[float, float, float, float]:
     a, b, c, d = (float(value) for value in matrix[:4])
     x_scale = max(math.hypot(a, b), 1e-6)
     y_scale = max(math.hypot(c, d), 1e-6)
+    if a * d - b * c < 0:
+        # A reflected text matrix is normally paired with a negative font size.
+        # Preserve its baseline rotation but remove the technical reflection.
+        ux, uy = a / x_scale, b / x_scale
+        return (ux, uy, -uy, ux)
     return (a / x_scale, b / x_scale, c / y_scale, d / y_scale)
+
+
+def paragraph_width_budget(x: float, x0: float, x1: float, lines: int) -> float:
+    """Return usable width while accounting for a first-line indentation."""
+    if lines <= 0 or x1 <= x0:
+        return 0.0
+    first_line = max(0.0, x1 - max(x, x0))
+    return first_line + max(0, lines - 1) * (x1 - x0)
 
 
 def styled_text_matrix(
@@ -469,7 +487,7 @@ class TranslateConverter(PDFConverterEx):
                 h, w = layout.shape
                 cx, cy = np.clip(int(child.x0), 0, w - 1), np.clip(int(child.y0), 0, h - 1)
                 cls = layout[cy, cx]
-                if child.get_text() in BULLET_CHARACTERS:
+                if is_bullet_character(child.get_text(), child.fontname):
                     cls = 0
                 orientation = text_orientation(child.matrix)
                 if (
@@ -936,14 +954,13 @@ class TranslateConverter(PDFConverterEx):
             # also required for a single-line title: without it a longer target
             # string ignores x1 completely and runs into the neighbouring column.
             if new != sstk[id]:
-                line_width = x1 - x0
                 # Count how many lines the original text occupied
                 orig_lines = (
                     max(1, round(height / (pstk[id].size * default_line_height)))
                     if brk
                     else 1
                 )
-                total_avail = line_width * orig_lines
+                total_avail = paragraph_width_budget(x, x0, x1, orig_lines)
                 # Measure actual width of translated text (excluding formula tags)
                 total_new_width = 0
                 tmp_ptr = 0
@@ -1212,20 +1229,6 @@ class TranslateConverter(PDFConverterEx):
                     "style": cstyle,
                 })
 
-            # An inline formula keeps the vertical offsets it had in the source,
-            # so a fraction reaches far below its baseline while the prose around
-            # it does not. Uniform leading therefore let the next line print
-            # straight through the denominator. Measure what each line actually
-            # occupies above and below its own baseline, and open up only the
-            # gaps that need it.
-            ink: dict[int, tuple[float, float]] = {}
-            for vals in ops_vals:
-                s_ = vals["size"] if vals["type"] == OpType.TEXT else 0.0
-                lo = vals["dy"] + min(0.0, vals.get("ylen", 0.0)) - 0.22 * s_
-                hi = vals["dy"] + max(0.0, vals.get("ylen", 0.0)) + 0.78 * s_
-                plo, phi = ink.get(vals["lidx"], (lo, hi))
-                ink[vals["lidx"]] = (min(plo, lo), max(phi, hi))
-
             line_height = default_line_height
 
             # Fit the prose to the box on its own. Charging the formula's extra
@@ -1243,11 +1246,53 @@ class TranslateConverter(PDFConverterEx):
                     if vals["type"] == OpType.TEXT:
                         vals["size"] *= shrink
 
+            # Measure ink only after the final font-size adjustment.  Measuring
+            # before shrinking left the old line gaps in place, so dense table
+            # cells used smaller glyphs but still crossed the row below.
+            ink = operation_ink(ops_vals)
+
+            if pstk[id].layout_bound is not None and ink:
+                # Preserved codes and formula placeholders can be larger than
+                # the surrounding translated prose.  The prose-only line count
+                # above cannot see that, so fit the union of the actual glyph
+                # extents to the cell as a final guard.
+                for _attempt in range(3):
+                    preview_offsets = line_offsets(
+                        ink,
+                        lidx,
+                        size,
+                        line_height,
+                        budget=height - (lidx + 1) * size * line_height,
+                    )
+                    occupied = vertical_ink_extent(ink, preview_offsets)
+                    available_height = max(0.0, height - 1.0)
+                    if occupied <= available_height + 0.01 or occupied <= 0:
+                        break
+                    minimum_size = pstk[id].size * 0.5
+                    scale = max(minimum_size / max(size, 1e-6), available_height / occupied)
+                    scale = min(1.0, scale)
+                    if scale >= 0.999:
+                        break
+                    size *= scale
+                    for vals in ops_vals:
+                        if vals["type"] == OpType.TEXT:
+                            vals["size"] *= scale
+                    ink = operation_ink(ops_vals)
+
             # ponytail: the paragraph's own box is the whole budget, so a
             # formula in an already tight paragraph stays somewhat cramped.
             # Measuring the gap down to the next paragraph would buy the rest.
             offsets = line_offsets(ink, lidx, size, line_height,
                                    budget=height - (lidx + 1) * size * line_height)
+
+            if pstk[id].layout_bound is not None:
+                y += vertical_shift_to_bounds(
+                    y,
+                    ink,
+                    offsets,
+                    pstk[id].y0 + 0.5,
+                    pstk[id].y1 - 0.5,
+                )
 
             for vals in ops_vals:
                 if vals["type"] == OpType.TEXT:
@@ -1309,3 +1354,68 @@ def line_offsets(
 class OpType(Enum):
     TEXT = "text"
     LINE = "line"
+
+
+def operation_ink(
+    operations: list[dict],
+) -> dict[int, tuple[float, float]]:
+    """Measure each rendered line using its final glyph sizes and offsets."""
+    ink: dict[int, tuple[float, float]] = {}
+    for values in operations:
+        size = values["size"] if values["type"] == OpType.TEXT else 0.0
+        low = (
+            values["dy"]
+            + min(0.0, values.get("ylen", 0.0))
+            - 0.22 * size
+        )
+        high = (
+            values["dy"]
+            + max(0.0, values.get("ylen", 0.0))
+            + 0.78 * size
+        )
+        previous_low, previous_high = ink.get(values["lidx"], (low, high))
+        ink[values["lidx"]] = (
+            min(previous_low, low),
+            max(previous_high, high),
+        )
+    return ink
+
+
+def vertical_ink_extent(
+    ink: dict[int, tuple[float, float]], offsets: list[float]
+) -> float:
+    """Return total vertical glyph span after applying per-line offsets."""
+    extents = [
+        (low - offsets[index], high - offsets[index])
+        for index, (low, high) in ink.items()
+        if index < len(offsets)
+    ]
+    if not extents:
+        return 0.0
+    return max(high for _low, high in extents) - min(low for low, _high in extents)
+
+
+def vertical_shift_to_bounds(
+    baseline: float,
+    ink: dict[int, tuple[float, float]],
+    offsets: list[float],
+    lower: float,
+    upper: float,
+) -> float:
+    """Move a fitted paragraph back inside its cell without changing layout."""
+    extents = [
+        (baseline + low - offsets[index], baseline + high - offsets[index])
+        for index, (low, high) in ink.items()
+        if index < len(offsets)
+    ]
+    if not extents or upper <= lower:
+        return 0.0
+    minimum = min(low for low, _high in extents)
+    maximum = max(high for _low, high in extents)
+    if maximum - minimum > upper - lower + 0.01:
+        return 0.0
+    if minimum < lower:
+        return lower - minimum
+    if maximum > upper:
+        return upper - maximum
+    return 0.0

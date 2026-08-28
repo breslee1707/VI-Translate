@@ -13,9 +13,13 @@ from types import SimpleNamespace
 
 from pdf2zh.converter import (
     IDENTITY_ORIENTATION,
+    OpType,
     TextStyle,
     line_offsets,
     matrix_font_size,
+    normalised_text_matrix,
+    operation_ink,
+    paragraph_width_budget,
     preferred_translation,
     should_translate_rotated_text,
     styled_text_matrix,
@@ -24,6 +28,8 @@ from pdf2zh.converter import (
     text_orientation,
     text_style_from_font,
     uses_synthetic_bold,
+    vertical_ink_extent,
+    vertical_shift_to_bounds,
 )
 from pdf2zh.high_level import output_style_font_paths
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
@@ -155,6 +161,33 @@ class LineOffsetTests(unittest.TestCase):
     def test_lines_without_recorded_ink_fall_back_to_the_usual_leading(self):
         self.assertEqual([round(o, 4) for o in self._offsets({}, 2)], [0.0, 11.0, 22.0])
 
+    def test_ink_uses_the_final_shrunk_font_size(self):
+        operations = [
+            {"type": OpType.TEXT, "size": 5.0, "dy": 0.0, "lidx": 0},
+            {"type": OpType.TEXT, "size": 5.0, "dy": 0.0, "lidx": 1},
+        ]
+        ink = operation_ink(operations)
+        self.assertEqual(tuple(round(value, 1) for value in ink[0]), (-1.1, 3.9))
+        self.assertEqual(tuple(round(value, 1) for value in ink[1]), (-1.1, 3.9))
+
+    def test_vertical_extent_includes_large_preserved_text_on_later_line(self):
+        ink = {0: (-1.1, 3.9), 1: (-2.4, 8.6)}
+        self.assertAlmostEqual(vertical_ink_extent(ink, [0.0, 6.0]), 12.3)
+
+    def test_fitted_cell_text_is_shifted_inside_the_lower_border(self):
+        ink = {0: (-1.0, 4.0), 1: (-1.0, 4.0)}
+        self.assertEqual(
+            vertical_shift_to_bounds(20.0, ink, [0.0, 8.0], 13.0, 26.0),
+            2.0,
+        )
+
+    def test_fitted_cell_text_is_shifted_inside_the_upper_border(self):
+        ink = {0: (-1.0, 4.0)}
+        self.assertEqual(
+            vertical_shift_to_bounds(20.0, ink, [0.0], 10.0, 22.0),
+            -2.0,
+        )
+
 
 class TableCellFitTests(unittest.TestCase):
     @staticmethod
@@ -186,6 +219,13 @@ class OrientationAndStyleTests(unittest.TestCase):
         self.assertEqual(text_orientation((-8, 0, 0, -8, 0, 0)), (-1, 0, 0, -1))
         self.assertEqual(text_orientation((0, -8, 8, 0, 0, 0)), (0, -1, 1, 0))
         self.assertIsNone(text_orientation((6, 4, -4, 6, 0, 0)))
+
+    def test_reflected_upright_text_is_not_mistaken_for_rotation(self):
+        self.assertEqual(text_orientation((1, 0, 0, -1, 0, 0)), IDENTITY_ORIENTATION)
+        self.assertEqual(
+            normalised_text_matrix((1, 0, 0, -1, 0, 0)),
+            IDENTITY_ORIENTATION,
+        )
 
     def test_rotated_font_size_comes_from_matrix_not_glyph_advance(self):
         self.assertEqual(matrix_font_size((0, 8, -8, 0, 0, 0)), 8)
@@ -230,6 +270,10 @@ class OrientationAndStyleTests(unittest.TestCase):
     def test_missing_style_faces_fall_back_to_the_regular_font(self):
         paths = output_style_font_paths("vi", "C:/missing/regular.ttf")
         self.assertEqual(set(paths.values()), {"C:\\missing\\regular.ttf"})
+
+    def test_first_line_indent_is_deducted_from_width_budget(self):
+        self.assertEqual(paragraph_width_budget(20, 10, 110, 1), 90)
+        self.assertEqual(paragraph_width_budget(20, 10, 110, 3), 290)
 
 
 if __name__ == "__main__":

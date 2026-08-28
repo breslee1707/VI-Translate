@@ -1,5 +1,8 @@
 # Desktop app and packaging, on top of requirements.txt
 -r requirements.txt
 customtkinter==5.2.2
-tkinterdnd2==0.4.3
+# 0.6.2 carries native TkDND binaries for Apple Silicon. Keep the already
+# verified Windows build on 0.4.3 until its release bundle is retested.
+tkinterdnd2==0.6.2; sys_platform == "darwin"
+tkinterdnd2==0.4.3; sys_platform != "darwin"
 pyinstaller==6.11.1

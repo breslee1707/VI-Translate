@@ -31,6 +31,8 @@ BULLET_CHARACTERS = frozenset(
     ("•", "■", "□", "▪", "▸", "▹", "►", "▶", "●", "○", "◆", "◇", "★", "☆", "‣", "⬤")
 )
 
+PRIVATE_USE_BULLETS = frozenset(("\uf0b7", "\uf0d8", "\uf0fc"))
+
 LANGUAGE_LINE_HEIGHT = {
     "zh-cn": 1.4,
     "zh-tw": 1.4,
@@ -68,6 +70,21 @@ class TableTextCluster:
 def is_formula_font(font_name: str) -> bool:
     """Return whether a font name marks formula or code text."""
     return FORMULA_FONT_PATTERN.match(font_name) is not None
+
+
+def is_bullet_character(text: str, font_name: str | bytes = "") -> bool:
+    """Recognize Unicode bullets and common Symbol/Wingdings PUA bullets."""
+    if text in BULLET_CHARACTERS:
+        return True
+    if isinstance(font_name, bytes):
+        font_name = font_name.decode(errors="ignore")
+    return (
+        text in PRIVATE_USE_BULLETS
+        and re.search(
+            r"wingdings|webdings|symbol|dingbats", font_name, re.IGNORECASE
+        )
+        is not None
+    )
 
 
 def line_height_for_language(language: str) -> float:

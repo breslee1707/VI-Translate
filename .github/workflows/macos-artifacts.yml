@@ -1,0 +1,48 @@
+name: Build macOS Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/macos-build
+    paths:
+      - ".github/workflows/macos-artifacts.yml"
+      - "app/**"
+      - "pdf2zh/**"
+      - "scripts/**"
+      - "app-macos.spec"
+      - "build-macos.sh"
+      - "requirements*.txt"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macOS (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: apple-silicon
+            runner: macos-15
+          - arch: intel
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build app and DMG
+        shell: bash
+        run: bash build-macos.sh
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: PDFTranslate-macos-${{ matrix.arch }}
+          path: dist/PDFTranslate-macos-${{ matrix.arch }}.dmg
+          if-no-files-found: error
+          retention-days: 7

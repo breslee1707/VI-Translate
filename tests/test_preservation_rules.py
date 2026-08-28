@@ -11,6 +11,7 @@ from pdf2zh.rules import (
     classify_preserved_page,
     cluster_table_words,
     formula_regions,
+    is_bullet_character,
     is_formula_font,
     is_scanned_page,
     line_height_for_language,
@@ -122,6 +123,16 @@ class PreservationRuleTests(unittest.TestCase):
     def test_vietnamese_line_height_and_extended_bullets_are_preserved(self):
         self.assertEqual(line_height_for_language("vi"), 1.2)
         self.assertTrue({"•", "■", "▸", "◆", "⬤"}.issubset(BULLET_CHARACTERS))
+
+    def test_office_private_use_bullets_keep_their_dingbat_font(self):
+        for character, font in (
+            ("\uf0d8", "Wingdings"),
+            ("\uf0b7", "Symbol"),
+            ("\uf0fc", "Wingdings"),
+        ):
+            with self.subTest(character=hex(ord(character)), font=font):
+                self.assertTrue(is_bullet_character(character, font))
+        self.assertFalse(is_bullet_character("\uf0d8", "Times New Roman"))
 
     def test_full_page_image_is_classified_as_scanned(self):
         self.assertTrue(

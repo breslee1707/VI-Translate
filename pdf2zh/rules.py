@@ -19,6 +19,10 @@ MATH_OPERATOR_PATTERN = re.compile(
     r"[=≤≥≈≠±×÷·∑∫√∞∝+*/^]"
 )
 PROSE_WORD_PATTERN = re.compile(r"[a-z]{3,}")
+MATH_FUNCTION_PATTERN = re.compile(
+    r"(?<![A-Za-z])(?:sin|cos|tan|cot|sec|csc|log|ln|exp|min|max|lim|det|mod)(?![A-Za-z])",
+    re.IGNORECASE,
+)
 STACKED_TOKEN_PATTERN = re.compile(
     r"[A-Za-z\u0370-\u03ff][A-Za-z\u0370-\u03ff0-9%]*"
 )
@@ -115,10 +119,11 @@ def formula_regions(
         if bounds is None or len(block) < 5:
             continue
         compact = " ".join(str(block[4]).split())
+        prose_candidate = MATH_FUNCTION_PATTERN.sub("", compact)
         if (
             compact
             and MATH_OPERATOR_PATTERN.search(compact)
-            and PROSE_WORD_PATTERN.search(compact) is None
+            and PROSE_WORD_PATTERN.search(prose_candidate) is None
         ):
             protected.append(bounds)
 

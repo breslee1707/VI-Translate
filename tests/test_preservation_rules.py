@@ -37,6 +37,19 @@ class PreservationRuleTests(unittest.TestCase):
         blocks = [(10, 20, 90, 40, "F1 / b0 â‰¤ C2 [N/mm]")]
         self.assertEqual(formula_regions(blocks, []), [(10.0, 20.0, 90.0, 40.0)])
 
+    def test_trigonometric_functions_do_not_make_an_equation_look_like_prose(self):
+        for equation in (
+            "FWA = F1² + F2² - 2 · F1 · F2 · cos β [N]",
+            "FR = 2 · F2 · cos γ / 2 - FTR [N]",
+            "FW6 = √2 · F2 · sin (β/2) [N]",
+        ):
+            with self.subTest(equation=equation):
+                blocks = [(10, 20, 190, 40, equation)]
+                self.assertEqual(
+                    formula_regions(blocks, []),
+                    [(10.0, 20.0, 190.0, 40.0)],
+                )
+
     def test_prose_containing_variables_is_not_protected_as_a_formula(self):
         blocks = [(10, 20, 190, 40, "If F1 is larger than C2, use another belt")]
         self.assertEqual(formula_regions(blocks, []), [])

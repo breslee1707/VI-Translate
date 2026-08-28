@@ -74,19 +74,24 @@ class PdfLayoutPreserver(private val context: Context) {
                         val page = document.getPage(pageIndex)
                         val textCollector = PageTextCollector()
                         textCollector.extractPageText(document, page, pageIndex)
-
-                        // KEY FIX: merge granular word/phrase fragments into
-                        // line/run-level blocks before translating & drawing.
                         val textBlocks = groupIntoLineRuns(textCollector.blocks)
 
                         if (textBlocks.isNotEmpty()) {
                             val translations = mutableListOf<BlockTranslation>()
                             for (block in textBlocks) {
                                 val originalText = block.text.trim()
-                                if (originalText.isBlank() || isPureMathOrFormula(originalText)) {
+                                if (originalText.isBlank()) continue
+
+                                // Separate option label prefix (e.g. "A.") from content before translating
+                                val (optionLabel, remainder) = splitOptionLabel(originalText)
+                                val textToTranslate = remainder.trim()
+
+                                // Skip translating standalone math formulas and numeric choices
+                                if (textToTranslate.isBlank() || isPureMathOrFormula(textToTranslate)) {
                                     continue
                                 }
-                                val encodedText = FormulaPlaceholder.encodeFormulaPlaceholders(originalText)
+
+                                val encodedText = FormulaPlaceholder.encodeFormulaPlaceholders(textToTranslate)
                                 var translatedRaw = encodedText
                                 var translationSuccess = false
                                 try {
@@ -95,15 +100,22 @@ class PdfLayoutPreserver(private val context: Context) {
                                 } catch (_: Exception) {
                                     untranslatedCount++
                                 }
-                                var translatedText = translatedRaw
+                                var translatedRemainder = translatedRaw
                                 if (translationSuccess) {
                                     try {
-                                        translatedText = FormulaPlaceholder.restoreFormulaPlaceholders(originalText, translatedRaw)
+                                        translatedRemainder = FormulaPlaceholder.restoreFormulaPlaceholders(textToTranslate, translatedRaw)
                                     } catch (_: Exception) {
-                                        translatedText = FormulaPlaceholder.removeControlCharacters(translatedRaw)
+                                        translatedRemainder = FormulaPlaceholder.removeControlCharacters(translatedRaw)
                                             .replace(Regex("</?b\\d+>"), "")
                                             .replace(Regex("</?s[123]>"), "")
                                     }
+                                }
+
+                                // Re-attach option label prefix if it was present
+                                val translatedText = if (optionLabel != null) {
+                                    optionLabel + translatedRemainder
+                                } else {
+                                    translatedRemainder
                                 }
                                 translations.add(BlockTranslation(block, translatedText))
                             }
@@ -116,8 +128,6 @@ class PdfLayoutPreserver(private val context: Context) {
                                     true,
                                     true
                                 ).use { stream ->
-                                    // Cover every full line/run box first, in one pass,
-                                    // before any new text is drawn over the page.
                                     for (translation in translations) {
                                         coverSourceText(stream, translation.block)
                                     }
@@ -195,9 +205,45 @@ class PdfLayoutPreserver(private val context: Context) {
         return Pair(FileOutputStream(outputFile), outputFile.absolutePath)
     }
 
+    private val OPTION_LABEL_PATTERN = Pattern.compile("^([A-D])[.)]\\s*")
+
+    /**
+     * Extracts multiple-choice option prefixes like "A.", "B)", "C." so they aren't mangled by translation.
+     */
+    private fun splitOptionLabel(text: String): Pair<String?, String> {
+        val matcher = OPTION_LABEL_PATTERN.matcher(text)
+        return if (matcher.find() && matcher.start() == 0) {
+            val label = matcher.group()
+            Pair(label, text.substring(matcher.end()))
+        } else {
+            Pair(null, text)
+        }
+    }
+
+    private val MATH_FUNCTION_WORDS = Regex(
+        "\\b(?:ln|log|lim|sin|cos|tan|cot|sec|csc|exp|max|min|mod|sqrt)\\b",
+        RegexOption.IGNORE_CASE
+    )
+    private val MATH_SYMBOL_ONLY_PATTERN = Pattern.compile(
+        "^[0-9+\\-*/=()<>\\[\\]{},._:;^√∫∑∞≤≥≠±∓×÷%'\"\\\\|\\s]*$"
+    )
+    private val LETTER_RUN_PATTERN = Regex("[A-Za-z]+")
+
+    /**
+     * Checks if text consists of mathematical expressions, variables, or functions rather than plain prose sentences.
+     */
     private fun isPureMathOrFormula(text: String): Boolean {
-        val pureMathPattern = Pattern.compile("^[0-9+\\-*/=()<>\\[\\]{},._:;^√∫∑∞\\\\|\\s]+$")
-        return pureMathPattern.matcher(text).matches()
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return false
+
+        val withoutFunctionWords = trimmed.replace(MATH_FUNCTION_WORDS, " ")
+
+        val hasRealWord = LETTER_RUN_PATTERN.findAll(withoutFunctionWords)
+            .any { it.value.length > 2 }
+        if (hasRealWord) return false
+
+        val withoutVariableLetters = withoutFunctionWords.replace(Regex("[A-Za-z]"), "")
+        return MATH_SYMBOL_ONLY_PATTERN.matcher(withoutVariableLetters).matches()
     }
 
     private fun stripTagsAndPlaceholders(text: String): String {
@@ -208,30 +254,23 @@ class PdfLayoutPreserver(private val context: Context) {
     }
 
     /**
-     * Groups word/phrase-level fragments produced by PDFTextStripper into
-     * line-level runs:
-     *  - Fragments are bucketed into a "line" when their y is within
-     *    fontSize * 0.5 of the running line average.
-     *  - Within a line, fragments are merged left-to-right into a single run
-     *    as long as the horizontal gap between them looks like normal word
-     *    spacing (<= 1.5x font size). A larger gap (tab stops, multi-column
-     *    answer choices like "A. ... B. ...") starts a new run instead of
-     *    merging, so unrelated columns don't get glued into one translation.
+     * Groups raw text fragments into horizontal lines and runs, retaining superscript positioning.
      */
     private fun groupIntoLineRuns(raw: List<TextBlock>): List<TextBlock> {
         if (raw.isEmpty()) return emptyList()
 
-        val sorted = raw.sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x })
         val lines = mutableListOf<MutableList<TextBlock>>()
-
-        for (frag in sorted) {
+        for (frag in raw) {
             val lastLine = lines.lastOrNull()
-            val refY = lastLine?.let { line -> line.map { it.y }.average().toFloat() }
-            if (lastLine != null && refY != null && abs(frag.y - refY) <= frag.fontSize * 0.5f) {
-                lastLine.add(frag)
-            } else {
-                lines.add(mutableListOf(frag))
+            if (lastLine != null) {
+                val refFrag = lastLine.maxByOrNull { it.fontSize } ?: lastLine.last()
+                val maxFontSize = maxOf(refFrag.fontSize, frag.fontSize)
+                if (abs(frag.y - refFrag.y) <= maxFontSize * 0.9f) {
+                    lastLine.add(frag)
+                    continue
+                }
             }
+            lines.add(mutableListOf(frag))
         }
 
         val result = mutableListOf<TextBlock>()
@@ -267,22 +306,57 @@ class PdfLayoutPreserver(private val context: Context) {
         return result
     }
 
+    private val SUPERSCRIPT_DIGIT_MAP = mapOf(
+        '0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴',
+        '5' to '⁵', '6' to '⁶', '7' to '⁷', '8' to '⁸', '9' to '⁹',
+        '+' to '⁺', '-' to '⁻'
+    )
+
+    /**
+     * Converts exponent numbers or operators into superscript characters.
+     */
+    private fun toSuperscriptToken(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return trimmed
+        val isDigitsOnly = trimmed.all { it.isDigit() || it == '+' || it == '-' }
+        return if (isDigitsOnly) {
+            trimmed.map { SUPERSCRIPT_DIGIT_MAP[it] ?: it }.joinToString("")
+        } else {
+            "^$trimmed"
+        }
+    }
+
+    /**
+     * Combines line fragments into a single text block, handling superscript formatting for exponents.
+     */
     private fun mergeFragments(frags: List<TextBlock>): TextBlock {
         val sorted = frags.sortedBy { it.x }
-        val combinedText = sorted.joinToString(" ") { it.text }
-            .replace(Regex("\\s+"), " ")
-            .trim()
+        val refFrag = sorted.maxByOrNull { it.fontSize } ?: sorted.first()
+        val refFontSize = refFrag.fontSize
+        val refY = refFrag.y
+
+        val sb = StringBuilder()
+        for ((index, frag) in sorted.withIndex()) {
+            val isSuperscript = frag.fontSize <= refFontSize * 0.8f &&
+                frag.y > refY + refFontSize * 0.12f
+            val piece = if (isSuperscript) toSuperscriptToken(frag.text) else frag.text
+            when {
+                index == 0 -> sb.append(piece)
+                isSuperscript -> sb.append(piece)
+                else -> sb.append(' ').append(piece)
+            }
+        }
+        val combinedText = sb.toString().replace(Regex("\\s+"), " ").trim()
+
         val minX = sorted.minOf { it.x }
         val maxRight = sorted.maxOf { it.x + it.width }
-        val avgY = sorted.map { it.y }.average().toFloat()
         val maxAscent = sorted.maxOf { it.ascent }
         val maxDescent = sorted.maxOf { it.descent }
-        val fontSize = sorted.map { it.fontSize }.average().toFloat()
         return TextBlock(
             text = combinedText,
             x = minX,
-            y = avgY,
-            fontSize = fontSize,
+            y = refY,
+            fontSize = refFontSize,
             width = maxRight - minX,
             ascent = maxAscent,
             descent = maxDescent
@@ -299,9 +373,6 @@ class PdfLayoutPreserver(private val context: Context) {
         val availableWidth = maxOf(block.width, 30f)
         val minSingleLineFontSize = maxOf(baseFontSize * 0.6f, 5.5f)
 
-        // 1) Try to fit on a single line, shrinking the font gradually first.
-        //    This is preferred over wrapping since an extra line can collide
-        //    with whatever content sits directly below this block.
         var chosenFontSize = baseFontSize
         var fits = measureStringWidth(text, font, chosenFontSize) <= availableWidth * 1.05f
         if (!fits) {
@@ -327,7 +398,6 @@ class PdfLayoutPreserver(private val context: Context) {
             return
         }
 
-        // 2) Fall back to wrapping at the smallest single-line font size.
         val wrapFontSize = minSingleLineFontSize
         val lines = wrapText(text, font, wrapFontSize, availableWidth)
         val effectiveFontSize = if (lines.size > 3) (wrapFontSize * 0.9f).coerceAtLeast(5f) else wrapFontSize
@@ -384,16 +454,25 @@ class PdfLayoutPreserver(private val context: Context) {
     }
 
     private fun loadBundledFont(document: PDDocument): PDFont {
-        return try {
-            context.assets.open("fonts/NotoSans-Regular.ttf").use { fontStream ->
-                PDType0Font.load(document, fontStream)
+        val candidatePaths = listOf(
+            "fonts/NotoSerif-Regular.ttf",
+            "fonts/NotoSans-Regular.ttf"
+        )
+        var lastError: Exception? = null
+        for (path in candidatePaths) {
+            try {
+                context.assets.open(path).use { fontStream ->
+                    return PDType0Font.load(document, fontStream)
+                }
+            } catch (e: Exception) {
+                lastError = e
             }
-        } catch (e: Exception) {
-            throw Exception(
-                "Failed to load bundled NotoSans font. " +
-                    "Ensure fonts/NotoSans-Regular.ttf exists in assets.", e
-            )
         }
+        throw Exception(
+            "Failed to load bundled font. Ensure fonts/NotoSerif-Regular.ttf " +
+                "or fonts/NotoSans-Regular.ttf exists in assets.",
+            lastError
+        )
     }
 
     private fun coverSourceText(

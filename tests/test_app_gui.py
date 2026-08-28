@@ -9,10 +9,11 @@ from pathlib import Path
 from unittest import mock
 
 try:
-    from app.gui import App, LANGUAGE_NAMES, collect_pdfs, ensure_writable_streams
+    from app.gui import App, LANGUAGE_NAMES, collect_pdfs, ensure_writable_streams, main
 except ImportError:  # customtkinter and tkinterdnd2 are app-only dependencies
     App = None
     collect_pdfs = None
+    main = None
 
 from scripts.translate_pdf import TARGET_LANGUAGES
 
@@ -109,6 +110,26 @@ class OpenResultTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+
+
+@unittest.skipIf(main is None, "desktop app dependencies are not installed")
+class PackagedSmokeTestTests(unittest.TestCase):
+    def test_smoke_test_loads_and_closes_the_app_without_entering_mainloop(self):
+        fake_app = mock.Mock()
+        with (
+            mock.patch("app.gui.sys.argv", ["PDFTranslate", "--smoke-test"]),
+            mock.patch("app.gui.ensure_writable_streams"),
+            mock.patch("app.gui.use_bundled_assets"),
+            mock.patch("app.gui.ctk.set_appearance_mode"),
+            mock.patch("app.gui.ctk.set_default_color_theme"),
+            mock.patch("app.gui.App", return_value=fake_app),
+        ):
+            main()
+
+        fake_app.withdraw.assert_called_once_with()
+        fake_app.update_idletasks.assert_called_once_with()
+        fake_app.destroy.assert_called_once_with()
+        fake_app.mainloop.assert_not_called()
 
 
 if __name__ == "__main__":

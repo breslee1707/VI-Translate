@@ -716,9 +716,17 @@ def main() -> None:
     ctk.set_appearance_mode("system")
     ctk.set_default_color_theme("blue")
     app = App()
+    arguments = [argument for argument in sys.argv[1:] if argument != "--smoke-test"]
+    if "--smoke-test" in sys.argv[1:]:
+        # CI uses this to prove the frozen executable can load Tk, TkDND and all
+        # native libraries on the Mac architecture that produced the bundle.
+        app.withdraw()
+        app.update_idletasks()
+        app.destroy()
+        return
     # Desktop shells can pass files dropped on the executable icon as arguments.
-    if sys.argv[1:]:
-        app._add([Path(argument) for argument in sys.argv[1:]])
+    if arguments:
+        app._add([Path(argument) for argument in arguments])
     app.mainloop()
 
 

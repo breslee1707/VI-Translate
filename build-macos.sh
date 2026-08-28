@@ -62,6 +62,10 @@ if [[ ! -x "$EXECUTABLE" || ! -f "$APP/Contents/Info.plist" ]]; then
   exit 1
 fi
 
+echo "==> Smoke-testing the packaged executable"
+file "$EXECUTABLE" | grep -q "$(uname -m)"
+"$EXECUTABLE" --smoke-test
+
 if [[ -n "${MACOS_SIGNING_IDENTITY:-}" ]]; then
   echo "==> Signing with the configured Developer ID"
   codesign --force --deep --options runtime --timestamp \

@@ -6,7 +6,15 @@ import unittest
 from pathlib import Path
 
 from pdf2zh.cache import clean_test_db, init_test_db
-from pdf2zh.translator import HandoffTranslator, load_segment_table, placeholders
+from pdf2zh.translator import (
+    FormulaPlaceholderError,
+    HandoffTranslator,
+    encode_formula_placeholders,
+    load_segment_table,
+    placeholders,
+    restore_formula_placeholders,
+    validate_style_tags,
+)
 
 
 def _jsonl(path: Path, records: list[dict]) -> Path:
@@ -58,6 +66,55 @@ class SegmentTableTests(unittest.TestCase):
             placeholders("a <b0></b0> b <b1></b1>"),
             ["<b0>", "</b0>", "<b1>", "</b1>"],
         )
+
+    def test_legacy_converter_placeholders_are_normalised(self):
+        path = _jsonl(
+            self.root / "table.jsonl",
+            [{"src": "where {v0} holds", "dst": "nÆ¡i {v0} Ä‘Ãºng"}],
+        )
+        self.assertEqual(
+            load_segment_table(str(path)),
+            {"where <b0></b0> holds": "nÆ¡i <b0></b0> Ä‘Ãºng"},
+        )
+
+    def test_converter_placeholders_round_trip_through_safe_tags(self):
+        source = "{v27} C{v28}[ ]"
+        encoded = encode_formula_placeholders(source)
+        self.assertEqual(encoded, "<b27></b27> C<b28></b28>[ ]")
+        self.assertEqual(restore_formula_placeholders(source, encoded), source)
+
+    def test_damaged_or_reordered_placeholder_tags_are_rejected(self):
+        source = "{v0} and {v1}"
+        for translated in (
+            "<b0></b0> and <b1>",
+            "<b1></b1> and <b0></b0>",
+        ):
+            with self.subTest(translated=translated):
+                with self.assertRaises(FormulaPlaceholderError):
+                    restore_formula_placeholders(source, translated)
+
+    def test_balanced_style_pairs_may_reorder_as_complete_runs(self):
+        validate_style_tags(
+            "<s1>Bold</s1> and <s2>italic</s2>",
+            "<s2>nghiêng</s2> và <s1>đậm</s1>",
+        )
+
+    def test_missing_or_cross_nested_style_tags_are_rejected(self):
+        source = "<s1>Bold</s1> and <s2>italic</s2>"
+        for translated in (
+            "đậm and <s2>nghiêng</s2>",
+            "<s1><s2>sai</s1></s2>",
+        ):
+            with self.subTest(translated=translated):
+                with self.assertRaises(FormulaPlaceholderError):
+                    validate_style_tags(source, translated)
+
+    def test_handoff_skips_a_translation_that_loses_style(self):
+        path = _jsonl(
+            self.root / "table.jsonl",
+            [{"src": "<s1>Important</s1>", "dst": "Quan trọng"}],
+        )
+        self.assertEqual(load_segment_table(str(path)), {})
 
 
 class HandoffTranslatorTests(unittest.TestCase):

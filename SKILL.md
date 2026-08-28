@@ -101,6 +101,12 @@ Copy each `src` value exactly. Preserve URLs, paths, identifiers, citation marke
 
 Formula and code placeholders such as `<b0></b0>` are immutable. Every opening and closing tag must retain the same identifier, count, and order as the source. The loader rejects a record whose placeholders differ, leaving that segment untranslated.
 
+Inline emphasis markers are immutable as balanced pairs: `<s1>...</s1>` is
+bold, `<s2>...</s2>` is italic, and `<s3>...</s3>` is bold italic. Complete
+style pairs may move with the translated phrase, but none may be dropped,
+duplicated, or cross-nested. Invalid style markup leaves the segment
+untranslated instead of silently losing emphasis.
+
 ### 3. Rebuild
 
 ```text

@@ -8,6 +8,7 @@ import logging
 import re
 import threading
 import unicodedata
+from collections import Counter
 from typing import Any, ClassVar
 
 import requests
@@ -17,6 +18,13 @@ from pdf2zh.cache import TranslationCache
 logger = logging.getLogger(__name__)
 
 PLACEHOLDER_PATTERN = re.compile(r"</?b\d+>")
+INTERNAL_PLACEHOLDER_PATTERN = re.compile(r"\{\s*v([\d\s]+)\}", re.IGNORECASE)
+PAIRED_PLACEHOLDER_PATTERN = re.compile(r"<b(\d+)></b\1>")
+STYLE_TAG_PATTERN = re.compile(r"<(/?)s([123])>", re.IGNORECASE)
+
+
+class FormulaPlaceholderError(ValueError):
+    """Raised when a translator damages or reorders protected formula tags."""
 
 
 def remove_control_characters(value: str) -> str:
@@ -132,6 +140,52 @@ def placeholders(text: str) -> list[str]:
     return PLACEHOLDER_PATTERN.findall(text)
 
 
+def encode_formula_placeholders(text: str) -> str:
+    """Turn converter-internal ``{vN}`` markers into translator-safe tag pairs."""
+    return INTERNAL_PLACEHOLDER_PATTERN.sub(
+        lambda match: f"<b{int(match.group(1).replace(' ', ''))}></b{int(match.group(1).replace(' ', ''))}>",
+        text,
+    )
+
+
+def restore_formula_placeholders(source: str, translated: str) -> str:
+    """Validate translator output and restore its tags to converter markers."""
+    encoded_source = encode_formula_placeholders(source)
+    if placeholders(encoded_source) != placeholders(translated):
+        raise FormulaPlaceholderError("formula placeholders changed during translation")
+    validate_style_tags(encoded_source, translated)
+    restored = PAIRED_PLACEHOLDER_PATTERN.sub(
+        lambda match: f"{{v{match.group(1)}}}", translated
+    )
+    if PLACEHOLDER_PATTERN.search(restored):
+        raise FormulaPlaceholderError("formula placeholder pair is malformed")
+    return restored
+
+
+def _style_tag_counts(text: str) -> Counter[str]:
+    """Return balanced style-pair counts, allowing complete pairs to reorder."""
+    stack: list[str] = []
+    pairs: Counter[str] = Counter()
+    for match in STYLE_TAG_PATTERN.finditer(text):
+        closing, identifier = match.groups()
+        if not closing:
+            stack.append(identifier)
+            continue
+        if not stack or stack[-1] != identifier:
+            raise FormulaPlaceholderError("style tags are malformed or cross-nested")
+        stack.pop()
+        pairs[identifier] += 1
+    if stack:
+        raise FormulaPlaceholderError("style tags are not closed")
+    return pairs
+
+
+def validate_style_tags(source: str, translated: str) -> None:
+    """Require the same balanced bold/italic runs after translation."""
+    if _style_tag_counts(source) != _style_tag_counts(translated):
+        raise FormulaPlaceholderError("style tags changed during translation")
+
+
 def load_segment_table(path: str | None) -> dict[str, str]:
     """Load a source-to-translation table from a JSONL file of {"src", "dst"} records.
 
@@ -157,9 +211,23 @@ def load_segment_table(path: str | None) -> dict[str, str]:
                 raise ValueError(f"{path} line {number}: 'src' and 'dst' must be strings")
             if not translation:
                 continue
+            # Old converter versions emitted {vN}; normalise those records so
+            # existing handoff files remain usable with the documented tags.
+            source = encode_formula_placeholders(source)
+            translation = encode_formula_placeholders(translation)
             if placeholders(source) != placeholders(translation):
                 logger.warning(
                     "%s line %d: formula placeholders differ between src and dst; "
+                    "segment left untranslated",
+                    path,
+                    number,
+                )
+                continue
+            try:
+                validate_style_tags(source, translation)
+            except FormulaPlaceholderError:
+                logger.warning(
+                    "%s line %d: style tags differ between src and dst; "
                     "segment left untranslated",
                     path,
                     number,

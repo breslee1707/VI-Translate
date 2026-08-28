@@ -26,11 +26,48 @@ from pymupdf import Document, Font
 from pdf2zh.converter import TranslateConverter
 from pdf2zh.doclayout import OnnxModel
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
-from pdf2zh.rules import classify_preserved_page, is_scanned_page
+from pdf2zh.rules import (
+    classify_preserved_page,
+    cluster_table_words,
+    formula_regions,
+    is_scanned_page,
+    matching_table_cells,
+    should_translate_table_cell,
+)
 
 NOTO_NAME = "noto"
+STYLE_FONT_NAMES = {
+    0: NOTO_NAME,
+    1: "noto-bold",
+    2: "noto-italic",
+    3: "noto-bolditalic",
+}
+BASE14_STYLE_FONTS = {0: "tiro", 1: "tibo", 2: "tiit", 3: "tibi"}
 
 logger = logging.getLogger(__name__)
+
+
+def output_style_font_paths(language: str, regular_path: str) -> dict[int, str]:
+    """Resolve regular/bold/italic/bold-italic fonts for translated prose.
+
+    Vietnamese desktop builds run on Windows, where Times New Roman ships with
+    all four faces. Other environments retain the existing Unicode font and let
+    the converter synthesize missing weight/slant instead of downloading a new
+    family at render time.
+    """
+    regular = str(Path(regular_path))
+    result = {style: regular for style in STYLE_FONT_NAMES}
+    if Path(regular).name.lower() != "times.ttf":
+        return result
+    windows_variants = {
+        1: Path("C:/Windows/Fonts/timesbd.ttf"),
+        2: Path("C:/Windows/Fonts/timesi.ttf"),
+        3: Path("C:/Windows/Fonts/timesbi.ttf"),
+    }
+    for style, path in windows_variants.items():
+        if path.is_file():
+            result[style] = str(path)
+    return result
 
 noto_list = [
     "am",  # Amharic
@@ -84,10 +121,14 @@ def translate_patch(
     envs: Dict = None,
     prompt: Template = None,
     ignore_cache: bool = False,
+    style_font_names: Dict | None = None,
+    style_fonts: Dict | None = None,
+    synthetic_styles: set[int] | None = None,
     **kwarg: Any,
 ) -> None:
     rsrcmgr = PDFResourceManager()
     layout = {}
+    layout_bounds = {}
     scanned_pages = set()
     device = TranslateConverter(
         rsrcmgr,
@@ -103,6 +144,10 @@ def translate_patch(
         envs,
         prompt,
         ignore_cache,
+        layout_bounds,
+        style_font_names,
+        style_fonts,
+        synthetic_styles,
     )
 
     assert device is not None
@@ -138,6 +183,7 @@ def translate_patch(
             box = np.ones((pix.height, pix.width))
             h, w = box.shape
             vcls = ["abandon", "figure", "table", "isolate_formula", "formula_caption"]
+            model_table_bounds = []
             # Process non-vcls boxes in ascending confidence order so that
             # higher-confidence boxes overwrite lower-confidence ones
             non_vcls_boxes = [
@@ -154,8 +200,16 @@ def translate_patch(
                 )
                 box[y0:y1, x0:x1] = i + 2
             for i, d in enumerate(page_layout.boxes):
-                if page_layout.names[int(d.cls)] in vcls:
-                    x0, y0, x1, y1 = d.xyxy.squeeze()
+                name = page_layout.names[int(d.cls)]
+                if name in vcls:
+                    raw_x0, raw_y0, raw_x1, raw_y1 = (
+                        float(value) for value in d.xyxy.squeeze()
+                    )
+                    if name == "table":
+                        model_table_bounds.append(
+                            (raw_x0, raw_y0, raw_x1, raw_y1)
+                        )
+                    x0, y0, x1, y1 = raw_x0, raw_y0, raw_x1, raw_y1
                     x0, y0, x1, y1 = (
                         np.clip(int(x0 - 1), 0, w - 1),
                         np.clip(int(h - y1 - 1), 0, h - 1),
@@ -163,6 +217,85 @@ def translate_patch(
                         np.clip(int(h - y0 + 1), 0, h - 1),
                     )
                     box[y0:y1, x0:x1] = 0
+
+            # A model-detected table stays protected unless PyMuPDF can split
+            # that same region into cells. Each reliable cell gets its own class
+            # so its text is translated independently while the original grid,
+            # fills and borders remain untouched.
+            source_page = doc_zh[page.pageno]
+            try:
+                detected_tables = source_page.find_tables().tables
+            except Exception as error:
+                logger.warning(
+                    "Page %s table-cell detection failed; preserving tables: %s",
+                    pageno + 1,
+                    error,
+                )
+                detected_tables = []
+            next_class = len(page_layout.boxes) + 2
+            page_bounds = layout_bounds.setdefault(page.pageno, {})
+            page_height = float(page_rect.height)
+            page_words = source_page.get_text("words", sort=True)
+            for table_bounds in model_table_bounds:
+                for cell in matching_table_cells(table_bounds, detected_tables):
+                    cx0 = max(float(cell[0]), table_bounds[0])
+                    cy0 = max(float(cell[1]), table_bounds[1])
+                    cx1 = min(float(cell[2]), table_bounds[2])
+                    cy1 = min(float(cell[3]), table_bounds[3])
+                    if cx1 - cx0 <= 4 or cy1 - cy0 <= 1:
+                        continue
+                    cell_words = [
+                        word
+                        for word in page_words
+                        if cx0 <= (float(word[0]) + float(word[2])) / 2 <= cx1
+                        and cy0 <= (float(word[1]) + float(word[3])) / 2 <= cy1
+                    ]
+                    for cluster in cluster_table_words(
+                        cell_words, (cx0, cy0, cx1, cy1)
+                    ):
+                        if not should_translate_table_cell(cluster.text):
+                            continue
+                        for word in cluster.words:
+                            wx0, wy0, wx1, wy1 = (
+                                float(value) for value in word[:4]
+                            )
+                            px0, py0, px1, py1 = (
+                                np.clip(int(wx0 - 1), 0, w - 1),
+                                np.clip(int(h - wy1 - 1), 0, h - 1),
+                                np.clip(int(wx1 + 1), 0, w - 1),
+                                np.clip(int(h - wy0 + 1), 0, h - 1),
+                            )
+                            box[py0:py1, px0:px1] = next_class
+                        bx0, by0, bx1, by1 = cluster.bbox
+                        content_y0 = min(by0, *(float(word[1]) for word in cluster.words))
+                        content_y1 = max(by1, *(float(word[3]) for word in cluster.words))
+                        padded = (
+                            bx0 + 2.0,
+                            page_height - content_y1,
+                            bx1 - 2.0,
+                            page_height - content_y0,
+                        )
+                        if padded[2] > padded[0] and padded[3] > padded[1]:
+                            page_bounds[next_class] = padded
+                        next_class += 1
+
+            # Technical documents often use ordinary prose fonts for equations.
+            # Protect operator-only blocks and stacked identifiers before the
+            # converter can reflow them. A one-point pad catches their rules and
+            # small subscripts without swallowing adjacent prose.
+            fallback_formulas = formula_regions(
+                source_page.get_text("blocks", sort=True),
+                page_words,
+                stacked_exclusions=model_table_bounds,
+            )
+            for fx0, fy0, fx1, fy1 in fallback_formulas:
+                bx0, by0, bx1, by1 = (
+                    np.clip(int(fx0 - 1), 0, w - 1),
+                    np.clip(int(h - fy1 - 1), 0, h - 1),
+                    np.clip(int(fx1 + 1), 0, w - 1),
+                    np.clip(int(h - fy0 + 1), 0, h - 1),
+                )
+                box[by0:by1, bx0:bx1] = 0
 
             # Detect TOC pages by analyzing extracted text patterns
             page_text = doc_zh[page.pageno].get_text("text")
@@ -311,12 +444,22 @@ def translate_stream(
     ignore_cache: bool = False,
     **kwarg: Any,
 ):
-    font_list = [("tiro", None)]
-
     font_path = download_remote_fonts(lang_out.lower())
+    style_paths = output_style_font_paths(lang_out.lower(), font_path)
+    style_font_names = dict(STYLE_FONT_NAMES)
+    style_fonts = {
+        style: Font(style_font_names[style], path)
+        for style, path in style_paths.items()
+    }
+    synthetic_styles = {
+        style for style, path in style_paths.items() if style and path == style_paths[0]
+    }
+    font_list = [(name, None) for name in BASE14_STYLE_FONTS.values()]
     noto_name = NOTO_NAME
-    noto = Font(noto_name, font_path)
-    font_list.append((noto_name, font_path))
+    noto = style_fonts[0]
+    font_list.extend(
+        (style_font_names[style], path) for style, path in style_paths.items()
+    )
 
     doc_en = Document(stream=stream)
     stream = io.BytesIO()

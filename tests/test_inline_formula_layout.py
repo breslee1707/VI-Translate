@@ -9,8 +9,23 @@ because every line in a paragraph got the same leading.
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
-from pdf2zh.converter import line_offsets
+from pdf2zh.converter import (
+    IDENTITY_ORIENTATION,
+    TextStyle,
+    line_offsets,
+    matrix_font_size,
+    preferred_translation,
+    should_translate_rotated_text,
+    styled_text_matrix,
+    styled_character_text,
+    text_fits_box_at_minimum_size,
+    text_orientation,
+    text_style_from_font,
+    uses_synthetic_bold,
+)
+from pdf2zh.high_level import output_style_font_paths
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
 
@@ -130,8 +145,91 @@ class LineOffsetTests(unittest.TestCase):
     def test_a_single_line_paragraph_needs_no_gaps(self):
         self.assertEqual(self._offsets({0: (-2.2, 7.8)}, 0), [0.0])
 
+    def test_negative_cell_slack_with_no_formula_extra_keeps_plain_leading(self):
+        prose = (-2.2, 7.8)
+        self.assertEqual(
+            [round(o, 4) for o in self._offsets({0: prose, 1: prose}, 1, budget=-1.0)],
+            [0.0, 11.0],
+        )
+
     def test_lines_without_recorded_ink_fall_back_to_the_usual_leading(self):
         self.assertEqual([round(o, 4) for o in self._offsets({}, 2)], [0.0, 11.0, 22.0])
+
+
+class TableCellFitTests(unittest.TestCase):
+    @staticmethod
+    def _measure(_character, size):
+        return size
+
+    def test_short_translation_fits_at_half_size(self):
+        self.assertTrue(
+            text_fits_box_at_minimum_size("two words", 25, 10, 10, [], self._measure)
+        )
+
+    def test_translation_that_needs_too_many_lines_falls_back(self):
+        self.assertFalse(
+            text_fits_box_at_minimum_size(
+                "one two three four", 15, 5, 10, [], self._measure
+            )
+        )
+
+    def test_formula_placeholder_uses_its_original_width(self):
+        self.assertFalse(
+            text_fits_box_at_minimum_size("{v0}", 10, 10, 10, [20], self._measure)
+        )
+
+
+class OrientationAndStyleTests(unittest.TestCase):
+    def test_quarter_turn_matrices_are_classified(self):
+        self.assertEqual(text_orientation((8, 0, 0, 8, 0, 0)), IDENTITY_ORIENTATION)
+        self.assertEqual(text_orientation((0, 8, -8, 0, 0, 0)), (0, 1, -1, 0))
+        self.assertEqual(text_orientation((-8, 0, 0, -8, 0, 0)), (-1, 0, 0, -1))
+        self.assertEqual(text_orientation((0, -8, 8, 0, 0, 0)), (0, -1, 1, 0))
+        self.assertIsNone(text_orientation((6, 4, -4, 6, 0, 0)))
+
+    def test_rotated_font_size_comes_from_matrix_not_glyph_advance(self):
+        self.assertEqual(matrix_font_size((0, 8, -8, 0, 0, 0)), 8)
+
+    def test_font_face_names_map_to_inline_styles(self):
+        cases = {
+            "MyriadPro-Regular": TextStyle.REGULAR,
+            "MyriadPro-Semibold": TextStyle.BOLD,
+            "TimesNewRomanPS-ItalicMT": TextStyle.ITALIC,
+            "TimesNewRomanPS-BoldItalicMT": TextStyle.BOLD_ITALIC,
+        }
+        for face, expected in cases.items():
+            with self.subTest(face=face):
+                self.assertEqual(text_style_from_font(face), expected)
+
+    def test_styled_runs_are_serialised_without_losing_text(self):
+        chars = [
+            SimpleNamespace(fontname="Regular", get_text=lambda: "A"),
+            SimpleNamespace(fontname="SemiBold", get_text=lambda: "B"),
+            SimpleNamespace(fontname="Italic", get_text=lambda: "C"),
+        ]
+        self.assertEqual(styled_character_text(chars), "A<s1>B</s1><s2>C</s2>")
+
+    def test_rotated_vietnamese_headers_have_stable_terminology_and_style(self):
+        self.assertEqual(
+            preferred_translation("<s1>Designation</s1>", "vi"),
+            "<s1>Tên gọi</s1>",
+        )
+        self.assertEqual(preferred_translation("Unit", "vi"), "Đơn vị")
+        self.assertIsNone(preferred_translation("Designation", "fr"))
+        self.assertFalse(should_translate_rotated_text("Ref. no. 304-2"))
+        self.assertTrue(should_translate_rotated_text("Designation"))
+
+    def test_synthetic_italic_composes_with_rotation(self):
+        self.assertEqual(
+            styled_text_matrix((0, 1, -1, 0), TextStyle.ITALIC, True),
+            (0, 1, -1.0, 0.2),
+        )
+        self.assertTrue(uses_synthetic_bold(TextStyle.BOLD_ITALIC, True))
+        self.assertFalse(uses_synthetic_bold(TextStyle.BOLD, False))
+
+    def test_missing_style_faces_fall_back_to_the_regular_font(self):
+        paths = output_style_font_paths("vi", "C:/missing/regular.ttf")
+        self.assertEqual(set(paths.values()), {"C:\\missing\\regular.ttf"})
 
 
 if __name__ == "__main__":

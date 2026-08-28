@@ -6,7 +6,17 @@ The bundled core translates ordinary text while retaining document structures wh
 
 - Formula glyphs remain original PDF operators and are represented by placeholders only while surrounding prose is translated.
 - Formula detection covers TeX and common math fonts plus monospace/code families such as Consolas, Courier, Menlo, Monaco, Inconsolata, Source Code, Fira Code, DejaVu Sans Mono, and Liberation Mono.
-- Isolated formulas, formula captions, figures, and tables remain protected layout regions.
+- Ordinary-font blocks made only of mathematical operators and identifiers are protected, as are stacked numbered terms such as `F1/b0` inside prose.
+- Formula placeholders are validated after translation; a damaged or reordered placeholder leaves its segment untranslated instead of corrupting the PDF.
+- Isolated formulas, formula captions, and figures remain protected layout regions.
+
+## Tables
+
+- A layout-model table is translated cell by cell only when PyMuPDF can match a cell grid to at least half of the detected table region.
+- Visually merged cells are split into x-position clusters so natural-language labels can be translated without sending adjacent abbreviations, identifiers, numbers, or units to the translation service.
+- Each reliable cell is reflowed within its own bounds while the source grid, fills, and borders remain unchanged.
+- Cell translations may shrink to half the source font size. If text still cannot fit, that cell remains in the source language and the result is reported as partial.
+- Tables without a reliable cell grid remain fully protected.
 
 ## Numbered-page structures
 
@@ -23,6 +33,8 @@ These classifications preserve the complete page layout instead of reflowing num
 - Windows uses Times New Roman when available; other environments use the downloaded Unicode font fallback.
 - Long translations scale down before rendering, wrap at word boundaries, reduce line height when necessary, and shrink again only when the paragraph still exceeds its original box.
 - Extended bullets remain anchored, and vertically separated list items start new paragraphs.
+- Quarter-turn text keeps its source orientation. Rotated table headings are translated and fitted along their logical baseline instead of wrapping one glyph per line.
+- Bold, italic, and bold-italic runs travel through the translator as validated style markers and use the matching Times New Roman face on Windows. Missing variants use synthetic weight/slant without discarding the style.
 
 ## Scan and source safety
 
@@ -33,4 +45,4 @@ These classifications preserve the complete page layout instead of reflowing num
 
 ## Known limits
 
-Text inside a protected table or figure can remain in the source language. Complex embedded fonts, malformed content streams, or inaccurate layout-model classifications can also require manual review. Treat any substantial untranslated passage or visual defect as a partial result.
+Text inside an unmatched table or protected figure can remain in the source language. Complex embedded fonts, malformed content streams, or inaccurate layout-model classifications can also require manual review. Treat any substantial untranslated passage or visual defect as a partial result.

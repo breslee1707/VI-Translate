@@ -27,3 +27,6 @@ pdf-translate.log
 .idea/
 Thumbs.db
 desktop.ini
+
+# Local contributor instructions; keep them out of the repository.
+/AGENTS.md

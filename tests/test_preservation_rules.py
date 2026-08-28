@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from pdfminer.pdfinterp import PDFResourceManager
 
@@ -8,9 +9,13 @@ from pdf2zh.converter import TranslateConverter
 from pdf2zh.rules import (
     BULLET_CHARACTERS,
     classify_preserved_page,
+    cluster_table_words,
+    formula_regions,
     is_formula_font,
     is_scanned_page,
     line_height_for_language,
+    matching_table_cells,
+    should_translate_table_cell,
 )
 
 
@@ -27,6 +32,79 @@ class PreservationRuleTests(unittest.TestCase):
             with self.subTest(font=font):
                 self.assertTrue(is_formula_font(font))
         self.assertFalse(is_formula_font("TimesNewRomanPSMT"))
+
+    def test_operator_only_ordinary_font_block_is_protected_as_formula(self):
+        blocks = [(10, 20, 90, 40, "F1 / b0 â‰¤ C2 [N/mm]")]
+        self.assertEqual(formula_regions(blocks, []), [(10.0, 20.0, 90.0, 40.0)])
+
+    def test_prose_containing_variables_is_not_protected_as_a_formula(self):
+        blocks = [(10, 20, 190, 40, "If F1 is larger than C2, use another belt")]
+        self.assertEqual(formula_regions(blocks, []), [])
+
+    def test_stacked_numbered_identifiers_are_protected_inside_prose(self):
+        words = [
+            (10, 10, 20, 20, "F1", 7, 0, 0),
+            (10, 20, 20, 30, "b0", 7, 1, 0),
+            (30, 20, 60, 30, "value", 7, 1, 1),
+        ]
+        self.assertEqual(formula_regions([], words), [(10.0, 10.0, 20.0, 30.0)])
+
+    def test_stacked_detection_does_not_cross_a_protected_table(self):
+        words = [
+            (10, 10, 20, 20, "F1", 7, 0, 0),
+            (10, 20, 20, 30, "F2", 7, 1, 0),
+        ]
+        self.assertEqual(
+            formula_regions([], words, stacked_exclusions=[(0, 0, 100, 100)]),
+            [],
+        )
+
+    def test_table_cells_require_a_half_area_model_match(self):
+        matching = SimpleNamespace(
+            bbox=(0, 0, 100, 140),
+            cells=[(0, 0, 50, 50), (50, 0, 100, 50), (0, 100, 100, 140)],
+        )
+        distant = SimpleNamespace(bbox=(200, 200, 300, 300), cells=[(200, 200, 300, 300)])
+        self.assertEqual(
+            matching_table_cells((0, 0, 100, 100), [distant, matching]),
+            [(0.0, 0.0, 50.0, 50.0), (50.0, 0.0, 100.0, 50.0)],
+        )
+        self.assertEqual(
+            matching_table_cells((0, 0, 100, 100), [SimpleNamespace(bbox=(0, 0, 40, 100), cells=[])]),
+            [],
+        )
+
+    def test_table_codes_and_numbers_stay_as_original_glyphs(self):
+        for value in ("E 2/1, E 3/1, NOVO", "180Â° 210Â° 240Â°", "2.0"):
+            with self.subTest(value=value):
+                self.assertFalse(should_translate_table_cell(value))
+        self.assertTrue(should_translate_table_cell("Tension member"))
+        self.assertTrue(should_translate_table_cell("Lá»›p phá»§ máº·t dÆ°á»›i"))
+
+    def test_merged_description_and_code_cell_splits_into_x_clusters(self):
+        words = [
+            (0, 0, 20, 10, "Drive", 1, 0, 0),
+            (22, 0, 45, 10, "drum", 1, 0, 1),
+            (47, 0, 80, 10, "diameter", 1, 0, 2),
+            (160, 0, 170, 10, "dA", 1, 0, 3),
+        ]
+        clusters = cluster_table_words(words, (0, 0, 180, 12))
+        self.assertEqual([cluster.text for cluster in clusters], ["Drive drum diameter", "dA"])
+        self.assertTrue(should_translate_table_cell(clusters[0].text))
+        self.assertFalse(should_translate_table_cell(clusters[1].text))
+
+    def test_wrapped_description_lines_stay_in_one_cluster(self):
+        words = [
+            (0, 0, 30, 10, "Maximum", 1, 0, 0),
+            (32, 0, 50, 10, "belt", 1, 0, 1),
+            (0, 11, 20, 21, "pull", 1, 1, 0),
+            (22, 11, 55, 21, "allowed", 1, 1, 1),
+            (160, 5, 170, 15, "F1", 1, 2, 0),
+        ]
+        clusters = cluster_table_words(words, (0, 0, 180, 24))
+        self.assertEqual(len(clusters), 2)
+        self.assertIn("Maximum", clusters[0].text)
+        self.assertIn("allowed", clusters[0].text)
 
     def test_vietnamese_line_height_and_extended_bullets_are_preserved(self):
         self.assertEqual(line_height_for_language("vi"), 1.2)
@@ -93,6 +171,15 @@ class PreservationRuleTests(unittest.TestCase):
             with self.subTest(service=service):
                 converter = TranslateConverter(PDFResourceManager(), service=service)
                 self.assertEqual(converter.translator.name, service)
+
+    def test_converter_keeps_the_late_filled_cell_bounds_mapping(self):
+        bounds = {}
+        converter = TranslateConverter(
+            PDFResourceManager(), service="google", layout_bounds=bounds
+        )
+        bounds[0] = {7: (1, 2, 3, 4)}
+        self.assertIs(converter.layout_bounds, bounds)
+        self.assertEqual(converter.layout_bounds[0][7], (1, 2, 3, 4))
 
 
 if __name__ == "__main__":

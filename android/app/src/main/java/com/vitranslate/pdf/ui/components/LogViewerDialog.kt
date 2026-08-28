@@ -48,7 +48,7 @@ fun LogViewerDialog(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Nhật ký lỗi (App Log)",
+                        text = "Nhật ký ứng dụng (App Log)",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )

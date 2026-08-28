@@ -50,9 +50,12 @@ class PdfLayoutPreserver(private val context: Context) {
         outputDirUriOrPath: String?,
         targetLang: String,
         overwrite: Boolean,
-        onProgress: (done: Int, total: Int) -> Unit
+        onProgress: (done: Int, total: Int) -> Unit,
+        onLog: ((String) -> Unit)? = null
     ): TranslationResult {
         val originalFileName = getFileName(inputUri)
+        onLog?.invoke("Bắt đầu xử lý file: $originalFileName (Ngôn ngữ đích: $targetLang, Ghi đè: $overwrite)")
+
         val baseName = if (originalFileName.endsWith(".pdf", ignoreCase = true)) {
             originalFileName.substring(0, originalFileName.length - 4)
         } else {
@@ -68,6 +71,7 @@ class PdfLayoutPreserver(private val context: Context) {
                 PDDocument.load(inputStream).use { document ->
                     val totalPages = document.numberOfPages
                     onProgress(0, totalPages)
+                    onLog?.invoke("Mở file PDF thành công. Tổng số trang: $totalPages")
                     val font: PDFont = loadBundledFont(document)
 
                     for (pageIndex in 0 until totalPages) {
@@ -78,6 +82,8 @@ class PdfLayoutPreserver(private val context: Context) {
 
                         if (textBlocks.isNotEmpty()) {
                             val translations = mutableListOf<BlockTranslation>()
+                            var skippedMathCount = 0
+
                             for (block in textBlocks) {
                                 val originalText = block.text.trim()
                                 if (originalText.isBlank()) continue
@@ -88,6 +94,7 @@ class PdfLayoutPreserver(private val context: Context) {
 
                                 // Skip translating standalone math formulas and numeric choices
                                 if (textToTranslate.isBlank() || isPureMathOrFormula(textToTranslate)) {
+                                    skippedMathCount++
                                     continue
                                 }
 
@@ -120,6 +127,8 @@ class PdfLayoutPreserver(private val context: Context) {
                                 translations.add(BlockTranslation(block, translatedText))
                             }
 
+                            onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: Tìm thấy ${textBlocks.size} đoạn. Đã dịch: ${translations.size}, Bỏ qua công thức: $skippedMathCount")
+
                             if (translations.isNotEmpty()) {
                                 PDPageContentStream(
                                     document,
@@ -140,10 +149,13 @@ class PdfLayoutPreserver(private val context: Context) {
                                     }
                                 }
                             }
+                        } else {
+                            onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: Không tìm thấy văn bản nào.")
                         }
                         onProgress(pageIndex + 1, totalPages)
                     }
                     document.save(outStream)
+                    onLog?.invoke("Lưu file dịch thành công: $resultPath")
                 }
             } ?: throw Exception("Unable to open input PDF stream")
         }
@@ -352,17 +364,12 @@ class PdfLayoutPreserver(private val context: Context) {
     )
 
     /**
-     * Converts exponent numbers or operators into superscript characters.
+     * Converts exponent numbers or operators into superscript caret notation (e.g. ^3).
      */
     private fun toSuperscriptToken(raw: String): String {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return trimmed
-        val isDigitsOnly = trimmed.all { it.isDigit() || it == '+' || it == '-' }
-        return if (isDigitsOnly) {
-            trimmed.map { SUPERSCRIPT_DIGIT_MAP[it] ?: it }.joinToString("")
-        } else {
-            "^$trimmed"
-        }
+        return "^$trimmed"
     }
 
     /**
@@ -518,9 +525,9 @@ class PdfLayoutPreserver(private val context: Context) {
         stream: PDPageContentStream,
         block: TextBlock
     ) {
-        val padX = 3.0f
-        val padTop = 2.5f
-        val padBottom = 2.5f
+        val padX = 1.0f
+        val padTop = 1.0f
+        val padBottom = 1.0f
         val rectX = block.x - padX
         val rectY = block.y - block.descent - padBottom
         val rectW = block.width + padX * 2.0f

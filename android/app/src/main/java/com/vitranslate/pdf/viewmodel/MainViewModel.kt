@@ -197,7 +197,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             _progress.value = totalFraction
                             _statusText.value = "Đang dịch ${item.name}   trang $donePages/$totalPages"
                             updateItemStatus(item.id, TranslationStatus.RUNNING, "trang $donePages/$totalPages")
-                        }
+                        },
+                        onLog = { appendLog(it) }
                     )
 
                     val finalStatus = if (result.untranslatedCount > 0) TranslationStatus.PARTIAL else TranslationStatus.DONE
@@ -212,9 +213,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                     val displayDetail = if (isSkipped) "File đã tồn tại (Đã bỏ qua)" else errorMsg
 
+                    val logDir = File(getApplication<Application>().getExternalFilesDir(null), "translated")
                     if (finalStatus == TranslationStatus.FAILED) {
-                        val logDir = File(getApplication<Application>().getExternalFilesDir(null), "translated")
                         logFailure(logDir, item.name, e)
+                    } else {
+                        appendLog("Bỏ qua file ${item.name}: $displayDetail")
                     }
                     updateItemStatus(item.id, finalStatus, displayDetail)
                 }
@@ -260,11 +263,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun appendLog(message: String) {
+        try {
+            val logDir = File(getApplication<Application>().getExternalFilesDir(null), "translated")
+            logDir.mkdirs()
+            val logFile = File(logDir, "pdf-translate.log")
+            val timeStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+            FileWriter(logFile, true).use { writer ->
+                writer.write("[$timeStr] $message\n")
+            }
+        } catch (_: Exception) {}
+    }
+
     fun getLogContent(): String {
         return try {
             val defaultLogDir = File(getApplication<Application>().getExternalFilesDir(null), "translated")
             val logFile = File(defaultLogDir, "pdf-translate.log")
-            if (logFile.exists()) logFile.readText() else "Chưa có log lỗi nào."
+            if (logFile.exists()) logFile.readText() else "Chưa có log nhật ký nào."
         } catch (e: Exception) {
             "Lỗi khi đọc file log: ${e.message}"
         }
@@ -285,8 +300,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             FileWriter(logFile, true).use { writer ->
                 val timeStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
                 writer.write("\n======================================================================\n")
-                writer.write("$timeStr  $sourceName\n")
+                writer.write("[$timeStr] ERROR: $sourceName\n")
                 writer.write(error.stackTraceToString())
+                writer.write("\n======================================================================\n")
             }
         } catch (_: Exception) {}
     }

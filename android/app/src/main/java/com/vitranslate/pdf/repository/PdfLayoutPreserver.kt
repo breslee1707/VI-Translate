@@ -149,7 +149,7 @@ class PdfLayoutPreserver(private val context: Context) {
 
                                         val nextY = if (i + 1 < translations.size) translations[i + 1].block.y else 0f
                                         val maxAllowedHeight = if (nextY > 0f && block.y > nextY) (block.y - nextY) * 0.9f else Float.MAX_VALUE
-                                        drawTextWithWrapping(stream, font, block, text, maxAllowedHeight)
+                                        drawTextWithWrapping(stream, font, block, text, maxAllowedHeight, textCollector.cropBox.width)
                                     }
                                 }
                             }
@@ -418,10 +418,15 @@ class PdfLayoutPreserver(private val context: Context) {
         font: PDFont,
         block: TextBlock,
         text: String,
-        maxAllowedHeight: Float = Float.MAX_VALUE
+        maxAllowedHeight: Float = Float.MAX_VALUE,
+        cropBoxWidth: Float = 612f
     ) {
         val baseFontSize = block.fontSize.coerceIn(6f, 72f)
-        val availableWidth = maxOf(block.width, 30f)
+        val availableWidth = if (cropBoxWidth > 0f) {
+            maxOf(block.width, cropBoxWidth - block.x - 40f).coerceAtLeast(30f)
+        } else {
+            maxOf(block.width, 30f)
+        }
         val minSingleLineFontSize = maxOf(baseFontSize * 0.6f, 5.5f)
 
         var chosenFontSize = baseFontSize
@@ -612,7 +617,7 @@ class PdfLayoutPreserver(private val context: Context) {
 
     private class PageTextCollector : PDFTextStripper() {
         val blocks = mutableListOf<TextBlock>()
-        private var cropBox: PDRectangle = PDRectangle(0f, 0f, 612f, 792f)
+        var cropBox: PDRectangle = PDRectangle(0f, 0f, 612f, 792f)
 
         init {
             sortByPosition = true
@@ -657,20 +662,34 @@ class PdfLayoutPreserver(private val context: Context) {
                 if (cluster.isEmpty()) continue
                 val first = cluster.first()
                 val last = cluster.last()
+                val baseFontSize = cluster.maxOf { it.fontSizeInPt }
+                val refDirAdj = first.yDirAdj
+
                 val sb = StringBuilder()
-                for (tp in cluster) {
-                    sb.append(tp.unicode ?: "")
+                for (i in cluster.indices) {
+                    val tp = cluster[i]
+                    val ch = tp.unicode ?: ""
+                    if (ch.isEmpty()) continue
+
+                    // Insert caret '^' for superscript exponent characters
+                    val isSuperscript = i > 0 &&
+                        (tp.fontSizeInPt <= baseFontSize * 0.85f || tp.yDirAdj < refDirAdj - baseFontSize * 0.12f) &&
+                        !ch.startsWith("^") && !sb.endsWith("^")
+
+                    if (isSuperscript) {
+                        sb.append("^")
+                    }
+                    sb.append(ch)
                 }
                 val clusterText = sb.toString()
                 if (clusterText.isBlank()) continue
 
                 val x = cropBox.lowerLeftX + first.xDirAdj
                 val y = cropBox.upperRightY - first.yDirAdj
-                val fontSize = cluster.maxOf { it.fontSizeInPt }
-                val width = maxOf((last.xDirAdj + last.widthDirAdj) - first.xDirAdj, fontSize * 0.5f)
-                val ascent = fontSize * 0.95f
-                val descent = fontSize * 0.35f
-                blocks.add(TextBlock(clusterText, x, y, fontSize, width, ascent, descent))
+                val width = maxOf((last.xDirAdj + last.widthDirAdj) - first.xDirAdj, baseFontSize * 0.5f)
+                val ascent = baseFontSize * 0.8f
+                val descent = baseFontSize * 0.2f
+                blocks.add(TextBlock(clusterText, x, y, baseFontSize, width, ascent, descent))
             }
         }
 

@@ -35,7 +35,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedLanguage = MutableStateFlow(TargetLanguage.getByCode(TargetLanguage.DEFAULT_CODE))
     val selectedLanguage: StateFlow<TargetLanguage> = _selectedLanguage.asStateFlow()
 
-    private val _overwrite = MutableStateFlow(false)
+    private val prefs = application.getSharedPreferences("pdf_translate_prefs", android.content.Context.MODE_PRIVATE)
+
+    private val _overwrite = MutableStateFlow(prefs.getBoolean("overwrite_existing", false))
     val overwrite: StateFlow<Boolean> = _overwrite.asStateFlow()
 
     private val _isTranslating = MutableStateFlow(false)
@@ -53,7 +55,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _lastOutputDirectory = MutableStateFlow<String?>(null)
     val lastOutputDirectory: StateFlow<String?> = _lastOutputDirectory.asStateFlow()
 
-    private val prefs = application.getSharedPreferences("pdf_translate_prefs", android.content.Context.MODE_PRIVATE)
     private val _customOutputDirectory = MutableStateFlow<String?>(prefs.getString("custom_output_dir", null))
     val customOutputDirectory: StateFlow<String?> = _customOutputDirectory.asStateFlow()
 
@@ -84,6 +85,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setOverwrite(value: Boolean) {
         _overwrite.value = value
+        prefs.edit().putBoolean("overwrite_existing", value).apply()
     }
 
     fun addFiles(uris: List<Uri>) {

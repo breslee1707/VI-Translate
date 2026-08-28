@@ -169,13 +169,13 @@ class PdfLayoutPreserver(private val context: Context) {
                         if (!overwrite) {
                             throw Exception("Output file $outputFileName already exists")
                         }
-                        existing.delete()
+                        try { existing.delete() } catch (_: Exception) {}
                     }
-                    val newFile = docTree.createFile("application/pdf", outputFileName)
-                    if (newFile != null) {
-                        val outStream = context.contentResolver.openOutputStream(newFile.uri, "w")
+                    val targetFile = docTree.createFile("application/pdf", outputFileName)
+                    if (targetFile != null) {
+                        val outStream = context.contentResolver.openOutputStream(targetFile.uri, "w")
                         if (outStream != null) {
-                            return Pair(outStream, newFile.uri.toString())
+                            return Pair(outStream, targetFile.uri.toString())
                         }
                     }
                 }
@@ -199,10 +199,13 @@ class PdfLayoutPreserver(private val context: Context) {
             outputDir.mkdirs()
         }
         val outputFile = File(outputDir, outputFileName)
-        if (outputFile.exists() && !overwrite) {
-            throw Exception("Output file ${outputFile.name} already exists")
+        if (outputFile.exists()) {
+            if (!overwrite) {
+                throw Exception("Output file ${outputFile.name} already exists")
+            }
+            try { outputFile.delete() } catch (_: Exception) {}
         }
-        return Pair(FileOutputStream(outputFile), outputFile.absolutePath)
+        return Pair(FileOutputStream(outputFile, false), outputFile.absolutePath)
     }
 
     private val OPTION_LABEL_PATTERN = Pattern.compile("^([A-D])[.)]\\s*")

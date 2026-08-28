@@ -7,8 +7,6 @@ name: Release
 on:
   workflow_dispatch:
   push:
-    branches:
-      - "codex/macos-build"
     tags:
       - "v*"
 
@@ -19,9 +17,9 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -45,7 +43,7 @@ jobs:
       - name: Build
         run: .\build.ps1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: PDFTranslate-windows
           path: dist/PDFTranslate-windows.zip
@@ -63,9 +61,9 @@ jobs:
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -85,7 +83,7 @@ jobs:
         shell: bash
         run: bash build-macos.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: PDFTranslate-macos-${{ matrix.arch }}
           path: dist/PDFTranslate-macos-${{ matrix.arch }}.dmg
@@ -96,12 +94,12 @@ jobs:
     needs: [windows, macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: release-assets
           merge-multiple: true
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: release-assets/*
           generate_release_notes: true

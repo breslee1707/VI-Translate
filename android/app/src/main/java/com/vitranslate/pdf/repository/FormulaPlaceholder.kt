@@ -29,7 +29,7 @@ object FormulaPlaceholder {
         return sb.toString()
     }
 
-    private val EXPONENT_PATTERN = Pattern.compile("(?:[A-Za-z0-9_()\\[\\]{}]+\\^\\{?[A-Za-z0-9_+\\-()]+\\}?)")
+    private val EXPONENT_PATTERN = Pattern.compile("(?:[A-Za-z0-9_()\\[\\]{}]*(?:\\^\\{?[A-Za-z0-9_+\\-()]+\\}?|[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]+))")
 
     /**
      * Convert converter-internal `{vN}` markers and exponent expressions into translator-safe tag pairs `<bN></bN>`.

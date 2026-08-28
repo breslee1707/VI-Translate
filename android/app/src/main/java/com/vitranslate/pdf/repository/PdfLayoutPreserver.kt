@@ -361,19 +361,18 @@ class PdfLayoutPreserver(private val context: Context) {
         return result
     }
 
-    private val SUPERSCRIPT_DIGIT_MAP = mapOf(
-        '0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴',
-        '5' to '⁵', '6' to '⁶', '7' to '⁷', '8' to '⁸', '9' to '⁹',
-        '+' to '⁺', '-' to '⁻'
-    )
+    companion object {
+        private val SUPERSCRIPT_DIGIT_MAP = mapOf(
+            '0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴',
+            '5' to '⁵', '6' to '⁶', '7' to '⁷', '8' to '⁸', '9' to '⁹',
+            '+' to '⁺', '-' to '⁻'
+        )
 
-    /**
-     * Converts exponent numbers or operators into superscript caret notation (e.g. ^3).
-     */
-    private fun toSuperscriptToken(raw: String): String {
-        val trimmed = raw.trim()
-        if (trimmed.isEmpty()) return trimmed
-        return "^$trimmed"
+        fun toSuperscriptToken(raw: String): String {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) return trimmed
+            return trimmed.map { SUPERSCRIPT_DIGIT_MAP[it] ?: it }.joinToString("")
+        }
     }
 
     /**
@@ -570,6 +569,18 @@ class PdfLayoutPreserver(private val context: Context) {
                 sb.append(char)
             } catch (_: Exception) {
                 when (char) {
+                    '⁰' -> sb.append('0')
+                    '¹' -> sb.append('1')
+                    '²' -> sb.append('2')
+                    '³' -> sb.append('3')
+                    '⁴' -> sb.append('4')
+                    '⁵' -> sb.append('5')
+                    '⁶' -> sb.append('6')
+                    '⁷' -> sb.append('7')
+                    '⁸' -> sb.append('8')
+                    '⁹' -> sb.append('9')
+                    '⁺' -> sb.append('+')
+                    '⁻' -> sb.append('-')
                     '∞' -> sb.append("inf")
                     '≤' -> sb.append("<=")
                     '≥' -> sb.append(">=")
@@ -671,15 +682,15 @@ class PdfLayoutPreserver(private val context: Context) {
                     val ch = tp.unicode ?: ""
                     if (ch.isEmpty()) continue
 
-                    // Insert caret '^' for superscript exponent characters
+                    // Check if character is a superscript exponent
                     val isSuperscript = i > 0 &&
-                        (tp.fontSizeInPt <= baseFontSize * 0.85f || tp.yDirAdj < refDirAdj - baseFontSize * 0.12f) &&
-                        !ch.startsWith("^") && !sb.endsWith("^")
+                        (tp.fontSizeInPt <= baseFontSize * 0.85f || tp.yDirAdj < refDirAdj - baseFontSize * 0.12f)
 
                     if (isSuperscript) {
-                        sb.append("^")
+                        sb.append(toSuperscriptToken(ch))
+                    } else {
+                        sb.append(ch)
                     }
-                    sb.append(ch)
                 }
                 val clusterText = sb.toString()
                 if (clusterText.isBlank()) continue

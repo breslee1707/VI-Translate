@@ -9,9 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import com.vitranslate.pdf.ui.components.*
 import com.vitranslate.pdf.ui.theme.PDFTranslateTheme
@@ -61,7 +59,7 @@ class MainActivity : ComponentActivity() {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 )
             } catch (_: Exception) {}
-            val path = treeUri.path ?: treeUri.toString()
+            val path = treeUri.toString()
             viewModel.setCustomOutputDirectory(path)
         }
     }
@@ -127,6 +125,20 @@ fun MainScreen(
     val lastOutputDirectory by viewModel.lastOutputDirectory.collectAsState()
     val updateInfo by viewModel.updateInfo.collectAsState()
 
+    var showLogDialog by remember { mutableStateOf(false) }
+    var currentLogText by remember { mutableStateOf("") }
+
+    if (showLogDialog) {
+        LogViewerDialog(
+            logText = currentLogText,
+            onDismiss = { showLogDialog = false },
+            onClearLog = {
+                viewModel.clearLog()
+                currentLogText = ""
+            }
+        )
+    }
+
     Column(
         modifier = Modifier.fillMaxSize()
     ) {
@@ -165,7 +177,11 @@ fun MainScreen(
             progress = progress,
             isIndeterminate = isIndeterminate,
             statusText = statusText,
-            lastOutputDirectory = lastOutputDirectory
+            lastOutputDirectory = lastOutputDirectory,
+            onShowLog = {
+                currentLogText = viewModel.getLogContent()
+                showLogDialog = true
+            }
         )
     }
 }

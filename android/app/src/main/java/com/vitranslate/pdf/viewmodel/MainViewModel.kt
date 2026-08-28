@@ -236,6 +236,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun getLogContent(): String {
+        return try {
+            val defaultLogDir = File(getApplication<Application>().getExternalFilesDir(null), "translated")
+            val logFile = File(defaultLogDir, "pdf-translate.log")
+            if (logFile.exists()) logFile.readText() else "Chưa có log lỗi nào."
+        } catch (e: Exception) {
+            "Lỗi khi đọc file log: ${e.message}"
+        }
+    }
+
+    fun clearLog() {
+        try {
+            val defaultLogDir = File(getApplication<Application>().getExternalFilesDir(null), "translated")
+            val logFile = File(defaultLogDir, "pdf-translate.log")
+            if (logFile.exists()) logFile.delete()
+        } catch (_: Exception) {}
+    }
+
     private fun logFailure(outputDir: File, sourceName: String, error: Throwable) {
         try {
             outputDir.mkdirs()

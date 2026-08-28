@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextDecoration
@@ -18,7 +19,8 @@ fun FooterView(
     progress: Float,
     isIndeterminate: Boolean,
     statusText: String,
-    lastOutputDirectory: String?
+    lastOutputDirectory: String?,
+    onShowLog: () -> Unit
 ) {
     val context = LocalContext.current
 
@@ -48,11 +50,29 @@ fun FooterView(
             }
         }
 
-        Text(
-            text = statusText,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = statusText,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                modifier = Modifier.weight(1f)
+            )
+
+            TextButton(
+                onClick = onShowLog,
+                modifier = Modifier.height(32.dp)
+            ) {
+                Text(
+                    text = "Xem Log",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
 
         if (lastOutputDirectory != null) {
             Spacer(modifier = Modifier.height(4.dp))

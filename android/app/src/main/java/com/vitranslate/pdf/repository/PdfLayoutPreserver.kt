@@ -157,6 +157,7 @@ class PdfLayoutPreserver(private val context: Context) {
 
                                         val nextY = if (i + 1 < translations.size) translations[i + 1].block.y else 0f
                                         val maxAllowedHeight = if (nextY > 0f && block.y > nextY) (block.y - nextY) * 0.9f else Float.MAX_VALUE
+                                        coverSourceText(stream, block)
                                         drawTextWithWrapping(stream, font, block, text, maxAllowedHeight, textCollector.cropBox.width)
                                     }
                                 }
@@ -470,13 +471,17 @@ class PdfLayoutPreserver(private val context: Context) {
                 val fD = if (needsDenP && !denText.startsWith("(")) "($denText)" else denText
                 val minX = minOf(numCandidate.x, denCandidate.x, bar.x)
                 val maxR = maxOf(numCandidate.x + numCandidate.width, denCandidate.x + denCandidate.width, barRight)
+                val avgY = (numCandidate.y + denCandidate.y) / 2f
+                val topY = numCandidate.y + numCandidate.ascent
+                val botY = denCandidate.y - denCandidate.descent
 
                 collapsed.add(TextBlock(
                     text = "$fN/$fD",
-                    x = minX, y = (numCandidate.y + denCandidate.y) / 2f,
+                    x = minX, y = avgY,
                     fontSize = maxOf(numCandidate.fontSize, denCandidate.fontSize),
                     width = maxR - minX,
-                    ascent = numCandidate.ascent, descent = denCandidate.descent
+                    ascent = topY - avgY,
+                    descent = avgY - botY
                 ))
             }
 
@@ -518,13 +523,17 @@ class PdfLayoutPreserver(private val context: Context) {
                 val nT = top.text.trim(); val dT = bot.text.trim()
                 val minX = minOf(top.x, bot.x)
                 val maxR = maxOf(topRight, bot.x + bot.width)
+                val avgY = (top.y + bot.y) / 2f
+                val topY = top.y + top.ascent
+                val botY = bot.y - bot.descent
 
                 collapsed.add(TextBlock(
                     text = "$nT/$dT",
-                    x = minX, y = (top.y + bot.y) / 2f,
+                    x = minX, y = avgY,
                     fontSize = maxOf(top.fontSize, bot.fontSize),
                     width = maxR - minX,
-                    ascent = top.ascent, descent = bot.descent
+                    ascent = topY - avgY,
+                    descent = avgY - botY
                 ))
             }
 

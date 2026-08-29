@@ -9,6 +9,7 @@ import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
 import com.tom_roush.pdfbox.pdmodel.font.PDFont
+import com.tom_roush.pdfbox.pdmodel.font.PDSimpleFont
 import com.tom_roush.pdfbox.pdmodel.font.PDType0Font
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import com.tom_roush.pdfbox.text.TextPosition
@@ -314,19 +315,29 @@ class PdfLayoutPreserver(private val context: Context) {
             .replace(Regex("\\{\\s*v\\d+\\s*\\}"), "")
     }
 
+    // A "fraction bar" that survives as an extracted text fragment usually looks like a
+    // run of hyphen/underscore/dash-like characters rather than real prose.
+    private val FRACTION_BAR_PATTERN = Regex("^[-_–—―─═]{2,}$")
+
     /**
-     * Groups raw text fragments into horizontal lines and runs, retaining superscript positioning.
+     * Groups raw text fragments into horizontal lines and runs, retaining superscript
+     * positioning, and collapses vertical fraction stacks (numerator / bar / denominator)
+     * into a single inline "(numerator) / (denominator)" line before run-splitting.
      */
     private fun groupIntoLineRuns(raw: List<TextBlock>): List<TextBlock> {
         if (raw.isEmpty()) return emptyList()
 
+        // Pass 1: cluster fragments into lines using a *tight* baseline tolerance. Normal
+        // same-line baseline jitter is tiny; a vertical fraction's numerator and denominator
+        // sit much further apart than this and correctly start new lines instead of being
+        // flattened into one broken horizontal run.
         val lines = mutableListOf<MutableList<TextBlock>>()
         for (frag in raw) {
             val lastLine = lines.lastOrNull()
             if (lastLine != null) {
                 val refFrag = lastLine.maxByOrNull { it.fontSize } ?: lastLine.last()
                 val maxFontSize = maxOf(refFrag.fontSize, frag.fontSize)
-                if (abs(frag.y - refFrag.y) <= maxFontSize * 0.9f) {
+                if (abs(frag.y - refFrag.y) <= maxFontSize * 0.35f) {
                     lastLine.add(frag)
                     continue
                 }
@@ -334,8 +345,12 @@ class PdfLayoutPreserver(private val context: Context) {
             lines.add(mutableListOf(frag))
         }
 
+        // Pass 2: detect numerator/[bar]/denominator stacks among the resulting lines and
+        // collapse each match into a single line so it survives as one atomic text block.
+        val mergedLines = mergeFractionLines(lines)
+
         val result = mutableListOf<TextBlock>()
-        for (line in lines) {
+        for (line in mergedLines) {
             val lineSorted = line.sortedBy { it.x }
             var runFrags = mutableListOf<TextBlock>()
             var prev: TextBlock? = null
@@ -367,6 +382,112 @@ class PdfLayoutPreserver(private val context: Context) {
         return result
     }
 
+    /**
+     * Scans consecutive line-groups (top-to-bottom) for the numerator / [bar] / denominator
+     * shape of a vertical fraction — two (or three) short, similarly-sized, horizontally
+     * overlapping lines stacked closely together — and flattens a match into one line
+     * containing "(numerator) / (denominator)".
+     *
+     * The bar itself is optional: many PDFs draw the fraction rule as a vector line rather
+     * than a text glyph, in which case it never reaches this function as a TextBlock at all;
+     * the numerator line simply sits directly above the denominator line.
+     */
+    private fun mergeFractionLines(lines: List<MutableList<TextBlock>>): List<MutableList<TextBlock>> {
+        if (lines.size < 2) return lines
+
+        fun bounds(line: List<TextBlock>): Triple<Float, Float, Float> {
+            val minX = line.minOf { it.x }
+            val maxX = line.maxOf { it.x + it.width }
+            val avgFont = line.map { it.fontSize }.average().toFloat()
+            return Triple(minX, maxX, avgFont)
+        }
+
+        fun overlapRatio(aMin: Float, aMax: Float, bMin: Float, bMax: Float): Float {
+            val overlap = minOf(aMax, bMax) - maxOf(aMin, bMin)
+            if (overlap <= 0f) return 0f
+            val smaller = minOf(aMax - aMin, bMax - bMin)
+            return if (smaller <= 0f) 0f else overlap / smaller
+        }
+
+        fun lineText(line: List<TextBlock>) = line.sortedBy { it.x }.joinToString(" ") { it.text }.trim()
+        fun isBarLine(line: List<TextBlock>) = FRACTION_BAR_PATTERN.matches(lineText(line))
+
+        // Guards to avoid misfiring on two ordinary, closely-set lines of prose: fraction
+        // rows are short expressions and share a similar font size with their neighbour.
+        fun looksLikeFractionRow(line: List<TextBlock>, fontSize: Float, neighborFont: Float): Boolean {
+            val text = lineText(line)
+            return text.length in 1..40 && abs(fontSize - neighborFont) <= maxOf(fontSize, neighborFont) * 0.3f
+        }
+
+        val result = mutableListOf<MutableList<TextBlock>>()
+        var i = 0
+        while (i < lines.size) {
+            val current = lines[i]
+            val (curMinX, curMaxX, curFont) = bounds(current)
+            val refY = current.first().y
+
+            var barIdx = -1
+            var denIdx = -1
+
+            var cursor = i + 1
+            if (cursor < lines.size) {
+                val next = lines[cursor]
+                val (nMinX, nMaxX, nFont) = bounds(next)
+                val gap = abs(refY - next.first().y)
+                val overlaps = overlapRatio(curMinX, curMaxX, nMinX, nMaxX) > 0.5f
+                if (overlaps && gap < maxOf(curFont, nFont) * 1.8f && isBarLine(next)) {
+                    barIdx = cursor
+                    cursor++
+                }
+            }
+            if (cursor < lines.size) {
+                val next = lines[cursor]
+                val (nMinX, nMaxX, nFont) = bounds(next)
+                val prevRefY = if (barIdx != -1) lines[barIdx].first().y else refY
+                val gap = abs(prevRefY - next.first().y)
+                val overlaps = overlapRatio(curMinX, curMaxX, nMinX, nMaxX) > 0.5f
+                if (overlaps && gap < maxOf(curFont, nFont) * 1.8f && !isBarLine(next) &&
+                    looksLikeFractionRow(current, curFont, nFont) && looksLikeFractionRow(next, nFont, curFont)
+                ) {
+                    denIdx = cursor
+                }
+            }
+
+            if (denIdx != -1) {
+                val numerator = lineText(current)
+                val denominator = lineText(lines[denIdx])
+                val needsParensNum = Regex("[+\\-]").containsMatchIn(numerator)
+                val needsParensDen = Regex("[+\\-]").containsMatchIn(denominator)
+                val fractionText = "${if (needsParensNum) "($numerator)" else numerator} / " +
+                    if (needsParensDen) "($denominator)" else denominator
+
+                val allFrags = current + (if (barIdx != -1) lines[barIdx] else emptyList()) + lines[denIdx]
+                val minX = allFrags.minOf { it.x }
+                val maxRight = allFrags.maxOf { it.x + it.width }
+                val maxFont = allFrags.maxOf { it.fontSize }
+                val topFrag = current.maxByOrNull { it.y }!!
+                val bottomFrag = lines[denIdx].minByOrNull { it.y }!!
+
+                val fractionBlock = TextBlock(
+                    text = fractionText,
+                    x = minX,
+                    y = (topFrag.y + bottomFrag.y) / 2f,
+                    fontSize = maxFont,
+                    width = maxRight - minX,
+                    ascent = topFrag.ascent,
+                    descent = bottomFrag.descent
+                )
+                result.add(mutableListOf(fractionBlock))
+                i = denIdx + 1
+                continue
+            }
+
+            result.add(current)
+            i++
+        }
+        return result
+    }
+
     companion object {
         private val SUPERSCRIPT_DIGIT_MAP = mapOf(
             '0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴',
@@ -374,15 +495,27 @@ class PdfLayoutPreserver(private val context: Context) {
             '+' to '⁺', '-' to '⁻'
         )
 
+        private val SUBSCRIPT_DIGIT_MAP = mapOf(
+            '0' to '₀', '1' to '₁', '2' to '₂', '3' to '₃', '4' to '₄',
+            '5' to '₅', '6' to '₆', '7' to '₇', '8' to '₈', '9' to '₉',
+            '+' to '₊', '-' to '₋'
+        )
+
         fun toSuperscriptToken(raw: String): String {
             val trimmed = raw.trim()
             if (trimmed.isEmpty()) return trimmed
             return trimmed.map { SUPERSCRIPT_DIGIT_MAP[it] ?: it }.joinToString("")
         }
+
+        fun toSubscriptToken(raw: String): String {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) return trimmed
+            return trimmed.map { SUBSCRIPT_DIGIT_MAP[it] ?: it }.joinToString("")
+        }
     }
 
     /**
-     * Combines line fragments into a single text block, handling superscript formatting for exponents.
+     * Combines line fragments into a single text block, handling superscript and subscript formatting.
      */
     private fun mergeFragments(frags: List<TextBlock>): TextBlock {
         val sorted = frags.sortedBy { it.x }
@@ -394,10 +527,16 @@ class PdfLayoutPreserver(private val context: Context) {
         for ((index, frag) in sorted.withIndex()) {
             val isSuperscript = frag.fontSize <= refFontSize * 0.8f &&
                 frag.y > refY + refFontSize * 0.12f
-            val piece = if (isSuperscript) toSuperscriptToken(frag.text) else frag.text
+            val isSubscript = frag.fontSize <= refFontSize * 0.8f &&
+                frag.y < refY - refFontSize * 0.12f
+            val piece = when {
+                isSuperscript -> toSuperscriptToken(frag.text)
+                isSubscript -> toSubscriptToken(frag.text)
+                else -> frag.text
+            }
             when {
                 index == 0 -> sb.append(piece)
-                isSuperscript -> sb.append(piece)
+                isSuperscript || isSubscript -> sb.append(piece)
                 else -> sb.append(' ').append(piece)
             }
         }
@@ -648,6 +787,65 @@ class PdfLayoutPreserver(private val context: Context) {
                     'β' -> sb.append("beta")
                     'γ' -> sb.append("gamma")
                     'θ' -> sb.append("theta")
+                    // Subscript digits (u₁, Q₁, ...) — degrade to the plain digit rather
+                    // than vanishing if the bundled font lacks the subscript block.
+                    '₀' -> sb.append('0')
+                    '₁' -> sb.append('1')
+                    '₂' -> sb.append('2')
+                    '₃' -> sb.append('3')
+                    '₄' -> sb.append('4')
+                    '₅' -> sb.append('5')
+                    '₆' -> sb.append('6')
+                    '₇' -> sb.append('7')
+                    '₈' -> sb.append('8')
+                    '₉' -> sb.append('9')
+                    '₊' -> sb.append('+')
+                    '₋' -> sb.append('-')
+                    // Blackboard-bold set letters (ℝ, ℕ, ...) — degrade to the plain letter.
+                    'ℂ' -> sb.append('C')
+                    'ℍ' -> sb.append('H')
+                    'ℕ' -> sb.append('N')
+                    'ℙ' -> sb.append('P')
+                    'ℚ' -> sb.append('Q')
+                    'ℝ' -> sb.append('R')
+                    'ℤ' -> sb.append('Z')
+                    // TeX/AMS math symbols resolved by TexMathSymbols — degrade to a short
+                    // ASCII gloss rather than disappearing if the bundled font can't render them.
+                    '∈' -> sb.append(" in ")
+                    '∉' -> sb.append(" not in ")
+                    '∋' -> sb.append(" contains ")
+                    '∅' -> sb.append(" empty set ")
+                    '∃' -> sb.append(" exists ")
+                    '∀' -> sb.append(" for all ")
+                    '∩' -> sb.append(" intersect ")
+                    '∪' -> sb.append(" union ")
+                    '⊂' -> sb.append(" subset ")
+                    '⊃' -> sb.append(" superset ")
+                    '⊆' -> sb.append(" subset-eq ")
+                    '⊇' -> sb.append(" superset-eq ")
+                    '∧' -> sb.append(" and ")
+                    '∨' -> sb.append(" or ")
+                    '¬' -> sb.append(" not ")
+                    '→' -> sb.append(" -> ")
+                    '←' -> sb.append(" <- ")
+                    '↔' -> sb.append(" <-> ")
+                    '⇒' -> sb.append(" => ")
+                    '⇐' -> sb.append(" <= ")
+                    '⇔' -> sb.append(" <=> ")
+                    '∼' -> sb.append(" ~ ")
+                    '≅' -> sb.append(" ~= ")
+                    '≈' -> sb.append(" ~~ ")
+                    '⊗' -> sb.append("(x)")
+                    '⊕' -> sb.append("(+)")
+                    '√' -> sb.append("sqrt")
+                    '∇' -> sb.append("nabla")
+                    '∂' -> sb.append('d')
+                    '∑' -> sb.append("sum")
+                    '∏' -> sb.append("prod")
+                    '∫' -> sb.append("integral")
+                    '⊥' -> sb.append(" perp ")
+                    '∠' -> sb.append(" angle ")
+                    '∴' -> sb.append(" therefore ")
                     else -> sb.append(' ')
                 }
             }
@@ -697,6 +895,26 @@ class PdfLayoutPreserver(private val context: Context) {
             writeText(document, NullWriter())
         }
 
+        /**
+         * Looks up a Unicode fallback for a glyph from a known TeX/AMS math symbol font by
+         * resolving its PostScript glyph name via the font's simple encoding. Safe to call
+         * on any TextPosition; returns null (never throws) if the font isn't a recognized
+         * symbol font, isn't a simple (Type1-style) font, or the glyph name is unmapped.
+         */
+        private fun resolveTexFallback(tp: TextPosition): String? {
+            return try {
+                val font = tp.font ?: return null
+                val baseName = font.name
+                if (!TexMathSymbols.isSymbolFont(baseName)) return null
+                val codes = tp.characterCodes
+                val code = codes?.firstOrNull() ?: return null
+                val glyphName = (font as? PDSimpleFont)?.encoding?.getName(code)
+                TexMathSymbols.resolve(baseName, glyphName)
+            } catch (_: Exception) {
+                null
+            }
+        }
+
         override fun writeString(text: String, textPositions: MutableList<TextPosition>) {
             if (textPositions.isEmpty()) return
 
@@ -734,17 +952,33 @@ class PdfLayoutPreserver(private val context: Context) {
                 val sb = StringBuilder()
                 for (i in cluster.indices) {
                     val tp = cluster[i]
-                    val ch = tp.unicode ?: ""
+                    var ch = tp.unicode ?: ""
+
+                    // TeX math symbol fonts (CMSY10, MSBM10, MSAM10, etc.) frequently lack a
+                    // usable ToUnicode mapping, so PDFBox returns blank/control characters for
+                    // glyphs like "∈", or renders a blackboard-bold letter (e.g. "R" for the
+                    // reals, ℝ) as a plain, unstyled letter. Resolve those via glyph name.
+                    val texFallback = resolveTexFallback(tp)
+                    if (texFallback != null &&
+                        (ch.isEmpty() || ch.codePointAt(0) < 0x20 || ch != texFallback)
+                    ) {
+                        ch = texFallback
+                    }
                     if (ch.isEmpty()) continue
 
-                    // Check if character is a superscript exponent
-                    val isSuperscript = i > 0 &&
-                        (tp.fontSizeInPt <= baseFontSize * 0.85f || tp.yDirAdj < refDirAdj - baseFontSize * 0.12f)
+                    // yDirAdj increases *downward* on the page (image-space), so a smaller
+                    // yDirAdj than the reference baseline means the glyph sits above the line
+                    // (superscript, e.g. x²) and a larger yDirAdj means it sits below the line
+                    // (subscript, e.g. u₁, Q₁). Font-size shrinkage alone is not sufficient to
+                    // tell them apart, since PDFs commonly render both sub- and superscripts in
+                    // a reduced size.
+                    val isRaised = tp.yDirAdj < refDirAdj - baseFontSize * 0.08f
+                    val isLowered = tp.yDirAdj > refDirAdj + baseFontSize * 0.08f
 
-                    if (isSuperscript) {
-                        sb.append(toSuperscriptToken(ch))
-                    } else {
-                        sb.append(ch)
+                    when {
+                        i > 0 && isRaised -> sb.append(toSuperscriptToken(ch))
+                        i > 0 && isLowered -> sb.append(toSubscriptToken(ch))
+                        else -> sb.append(ch)
                     }
                 }
                 val clusterText = sb.toString()
@@ -757,6 +991,97 @@ class PdfLayoutPreserver(private val context: Context) {
                 val descent = baseFontSize * 0.2f
                 blocks.add(TextBlock(clusterText, x, y, baseFontSize, width, ascent, descent))
             }
+        }
+    }
+
+    /**
+     * Fallback Unicode resolution for glyphs from TeX/AMS math symbol fonts (cmsy10,
+     * cmmi10, msam10, msbm10, ...) that PDFBox cannot map via the embedded font's
+     * ToUnicode CMap — a common gap for these fonts, which produces blank/dropped
+     * characters (e.g. "∈") or an unstyled plain letter for blackboard-bold set
+     * symbols (e.g. plain "R" instead of ℝ).
+     */
+    private object TexMathSymbols {
+        // Standard Adobe/TeX PostScript glyph names, as they typically appear in the
+        // /Differences array of an embedded TeX symbol font's /Encoding dictionary,
+        // mapped to their Unicode equivalents. If your PDF's font subset uses different
+        // glyph names, inspect the font's /Differences array (e.g. via `pdffonts -v`,
+        // or PDSimpleFont.encoding.differences in PDFBox) and extend this table.
+        private val GLYPH_NAME_MAP: Map<String, String> = mapOf(
+            "element" to "∈",
+            "elementof" to "∈",
+            "notelement" to "∉",
+            "owner" to "∋",
+            "emptyset" to "∅",
+            "existential" to "∃",
+            "universal" to "∀",
+            "infinity" to "∞",
+            "intersection" to "∩",
+            "union" to "∪",
+            "propersubset" to "⊂",
+            "propersuperset" to "⊃",
+            "reflexsubset" to "⊆",
+            "reflexsuperset" to "⊇",
+            "logicaland" to "∧",
+            "logicalor" to "∨",
+            "logicalnot" to "¬",
+            "arrowright" to "→",
+            "arrowleft" to "←",
+            "arrowboth" to "↔",
+            "arrowdblright" to "⇒",
+            "arrowdblleft" to "⇐",
+            "arrowdblboth" to "⇔",
+            "similar" to "∼",
+            "congruent" to "≅",
+            "approxequal" to "≈",
+            "notequal" to "≠",
+            "lessequal" to "≤",
+            "greaterequal" to "≥",
+            "multiply" to "×",
+            "divide" to "÷",
+            "circlemultiply" to "⊗",
+            "circleplus" to "⊕",
+            "radical" to "√",
+            "gradient" to "∇",
+            "partialdiff" to "∂",
+            "summation" to "∑",
+            "product" to "∏",
+            "integral" to "∫",
+            "perpendicular" to "⊥",
+            "angle" to "∠",
+            "therefore" to "∴"
+        )
+
+        // Blackboard-bold capital letters from AMS fonts (msbm10) that have a dedicated
+        // Unicode "double-struck" codepoint. Letters without one (e.g. blackboard "S")
+        // fall back to the plain letter since Unicode has no precomposed glyph for them.
+        private val BLACKBOARD_MAP: Map<Char, String> = mapOf(
+            'C' to "ℂ", 'H' to "ℍ", 'N' to "ℕ", 'P' to "ℙ",
+            'Q' to "ℚ", 'R' to "ℝ", 'Z' to "ℤ"
+        )
+
+        private val SYMBOL_FONT_TOKENS = listOf("CMSY", "MSAM", "MSBM", "CMMI", "CMEX", "STMARY")
+
+        fun isSymbolFont(fontName: String?): Boolean {
+            if (fontName == null) return false
+            val upper = fontName.uppercase()
+            return SYMBOL_FONT_TOKENS.any { upper.contains(it) }
+        }
+
+        fun resolve(fontName: String, glyphName: String?): String? {
+            if (glyphName == null || glyphName == ".notdef") return null
+
+            val upperFont = fontName.uppercase()
+            if (upperFont.contains("MSBM")) {
+                if (glyphName.length == 1) {
+                    val ch = glyphName[0]
+                    if (ch in 'A'..'Z') {
+                        return BLACKBOARD_MAP[ch] ?: glyphName
+                    }
+                }
+            }
+
+            return GLYPH_NAME_MAP[glyphName]
         }
     }
 

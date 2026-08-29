@@ -109,6 +109,12 @@ object FormulaPlaceholder {
         var cleanTranslated = translated.replace(Regex("</?b9\\d{3}>"), "")
 
         val encodedSource = encodeFormulaPlaceholders(cleanSource)
+        val sourcePlaceholders = getPlaceholders(encodedSource).filterNot { it.matches(Regex("</?b9\\d{3}>")) }
+        val translatedPlaceholders = getPlaceholders(cleanTranslated).filterNot { it.matches(Regex("</?b9\\d{3}>")) }
+        if (sourcePlaceholders != translatedPlaceholders) {
+            throw FormulaPlaceholderException("Formula placeholders were altered during translation")
+        }
+
         val matcher = PAIRED_PLACEHOLDER_PATTERN.matcher(cleanTranslated)
         val sb = StringBuffer()
         while (matcher.find()) {

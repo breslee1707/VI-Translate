@@ -10,7 +10,7 @@ class PdfLayoutPreserverTest {
     fun testFormulaPlaceholderEncodingAndRestoration() {
         val original = "Let {v0} be a function where x^2 + 1 = 0."
         val encoded = FormulaPlaceholder.encodeFormulaPlaceholders(original)
-        assertEquals("Let <b0></b0> be a function where x^2 + 1 = 0.", encoded)
+        assertEquals("Let <b0></b0> be a function where <b9000>x^2</b9000> + 1 = 0.", encoded)
 
         val restored = FormulaPlaceholder.restoreFormulaPlaceholders(original, encoded)
         assertEquals(original, restored)

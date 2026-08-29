@@ -412,8 +412,13 @@ class PdfLayoutPreserver(private val context: Context) {
          * found between the numerator and denominator.  Without a bar, blocks
          * are never merged — this avoids destroying normal consecutive text lines.
          */
+        // Strict pattern: only digits, single letters, operators, parens, superscript/subscript
+        private val SHORT_MATH_PATTERN = Pattern.compile(
+            "^[0-9a-zA-Z⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻₀₁₂₃₄₅₆₇₈₉₊₋+\\-*/^().√∞παβγθ\\s]{1,8}$"
+        )
+
         fun collapseVerticalFractions(raw: List<TextBlock>): List<TextBlock> {
-            if (raw.size < 3) return raw          // need at least num + bar + den
+            if (raw.size < 2) return raw
 
             fun overlapRatio(aMin: Float, aMax: Float, bMin: Float, bMax: Float): Float {
                 val overlap = minOf(aMax, bMax) - maxOf(aMin, bMin)
@@ -423,13 +428,13 @@ class PdfLayoutPreserver(private val context: Context) {
             }
 
             fun isBar(text: String) = FRACTION_BAR_PATTERN.matches(text.trim())
+            fun isShortMath(text: String) = SHORT_MATH_PATTERN.matcher(text.trim()).matches()
 
-            // Sort top-to-bottom (higher Y first), then left-to-right
             val unused = raw.sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x }).toMutableList()
             val collapsed = mutableListOf<TextBlock>()
             val consumed = mutableSetOf<TextBlock>()
 
-            // First pass: find explicit  numerator ── bar ── denominator  triples
+            // Pass 1: explicit  numerator ── bar ── denominator  triples
             for (bar in unused) {
                 if (!isBar(bar.text)) continue
                 if (consumed.contains(bar)) continue
@@ -437,60 +442,86 @@ class PdfLayoutPreserver(private val context: Context) {
                 val barFont = bar.fontSize
                 val barRight = bar.x + bar.width
 
-                // Look for a numerator ABOVE the bar (higher Y)
                 val numCandidate = unused.firstOrNull { c ->
                     !consumed.contains(c) && !isBar(c.text) &&
-                    c.y > bar.y &&                                   // above the bar
-                    (c.y - bar.y) <= barFont * 1.8f &&               // close vertically
+                    c.y > bar.y && (c.y - bar.y) <= barFont * 1.8f &&
                     overlapRatio(c.x, c.x + c.width, bar.x, barRight) > 0.5f &&
-                    c.text.trim().length <= 20                       // short math content only
+                    c.text.trim().length <= 20
                 }
                 if (numCandidate == null) continue
 
-                // Look for a denominator BELOW the bar (lower Y)
                 val denCandidate = unused.firstOrNull { c ->
                     !consumed.contains(c) && !isBar(c.text) && c != numCandidate &&
-                    bar.y > c.y &&                                   // below the bar
-                    (bar.y - c.y) <= barFont * 1.8f &&               // close vertically
+                    bar.y > c.y && (bar.y - c.y) <= barFont * 1.8f &&
                     overlapRatio(c.x, c.x + c.width, bar.x, barRight) > 0.5f &&
-                    c.text.trim().length <= 20                       // short math content only
+                    c.text.trim().length <= 20
                 }
                 if (denCandidate == null) continue
 
-                // We have a confirmed  num / bar / den  triple — merge them
                 consumed.add(bar)
                 consumed.add(numCandidate)
                 consumed.add(denCandidate)
 
                 val numText = numCandidate.text.trim()
                 val denText = denCandidate.text.trim()
-                val needsNumParens = numText.contains(' ') || Regex("[+\\-]").containsMatchIn(numText)
-                val needsDenParens = denText.contains(' ') || Regex("[+\\-]").containsMatchIn(denText)
-                val fmtNum = if (needsNumParens && !numText.startsWith("(")) "($numText)" else numText
-                val fmtDen = if (needsDenParens && !denText.startsWith("(")) "($denText)" else denText
-
+                val needsNumP = numText.contains(' ') || Regex("[+\\-]").containsMatchIn(numText)
+                val needsDenP = denText.contains(' ') || Regex("[+\\-]").containsMatchIn(denText)
+                val fN = if (needsNumP && !numText.startsWith("(")) "($numText)" else numText
+                val fD = if (needsDenP && !denText.startsWith("(")) "($denText)" else denText
                 val minX = minOf(numCandidate.x, denCandidate.x, bar.x)
-                val maxR = maxOf(numCandidate.x + numCandidate.width,
-                                 denCandidate.x + denCandidate.width,
-                                 barRight)
-                val avgY = (numCandidate.y + denCandidate.y) / 2f
+                val maxR = maxOf(numCandidate.x + numCandidate.width, denCandidate.x + denCandidate.width, barRight)
 
                 collapsed.add(TextBlock(
-                    text = "$fmtNum / $fmtDen",
-                    x = minX,
-                    y = avgY,
+                    text = "$fN/$fD",
+                    x = minX, y = (numCandidate.y + denCandidate.y) / 2f,
                     fontSize = maxOf(numCandidate.fontSize, denCandidate.fontSize),
                     width = maxR - minX,
-                    ascent = numCandidate.ascent,
-                    descent = denCandidate.descent
+                    ascent = numCandidate.ascent, descent = denCandidate.descent
                 ))
             }
 
-            // Keep every block that was NOT consumed by a fraction triple
-            for (block in unused) {
-                if (!consumed.contains(block)) {
-                    collapsed.add(block)
+            // Pass 2: bar-less fractions — ONLY very short pure-math blocks
+            val remaining = unused.filter { !consumed.contains(it) }
+                .sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x })
+                .toMutableList()
+
+            val consumed2 = mutableSetOf<TextBlock>()
+            for (top in remaining) {
+                if (consumed2.contains(top)) continue
+                if (!isShortMath(top.text)) continue
+
+                val topFont = top.fontSize
+                val topRight = top.x + top.width
+
+                val bot = remaining.firstOrNull { c ->
+                    !consumed2.contains(c) && c != top &&
+                    top.y > c.y &&                                         // below
+                    (top.y - c.y) <= topFont * 1.2f &&                     // very tight gap
+                    overlapRatio(top.x, topRight, c.x, c.x + c.width) > 0.6f &&
+                    isShortMath(c.text) &&
+                    abs(c.fontSize - topFont) <= topFont * 0.3f            // similar font size
                 }
+                if (bot == null) continue
+
+                consumed2.add(top)
+                consumed2.add(bot)
+
+                val nT = top.text.trim(); val dT = bot.text.trim()
+                val minX = minOf(top.x, bot.x)
+                val maxR = maxOf(topRight, bot.x + bot.width)
+
+                collapsed.add(TextBlock(
+                    text = "$nT/$dT",
+                    x = minX, y = (top.y + bot.y) / 2f,
+                    fontSize = maxOf(top.fontSize, bot.fontSize),
+                    width = maxR - minX,
+                    ascent = top.ascent, descent = bot.descent
+                ))
+            }
+
+            // Keep unconsumed blocks
+            for (block in remaining) {
+                if (!consumed2.contains(block)) collapsed.add(block)
             }
 
             return collapsed.sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x })
@@ -938,6 +969,18 @@ class PdfLayoutPreserver(private val context: Context) {
                     val tp = cluster[i]
                     var ch = tp.unicode ?: ""
 
+                    // Detect word-spacing gaps between characters. PDFs often
+                    // represent spaces as positional gaps rather than actual
+                    // space characters, so we must insert them ourselves.
+                    if (i > 0) {
+                        val prev = cluster[i - 1]
+                        val gap = tp.xDirAdj - (prev.xDirAdj + prev.widthDirAdj)
+                        val avgFont = (prev.fontSizeInPt + tp.fontSizeInPt) / 2f
+                        if (gap > avgFont * 0.25f) {
+                            sb.append(' ')
+                        }
+                    }
+
                     // TeX math symbol fonts (CMSY10, MSBM10, MSAM10, etc.) frequently lack a
                     // usable ToUnicode mapping, so PDFBox returns blank/control characters for
                     // glyphs like "∈", or renders a blackboard-bold letter (e.g. "R" for the
@@ -953,9 +996,7 @@ class PdfLayoutPreserver(private val context: Context) {
                     // yDirAdj increases *downward* on the page (image-space), so a smaller
                     // yDirAdj than the reference baseline means the glyph sits above the line
                     // (superscript, e.g. x²) and a larger yDirAdj means it sits below the line
-                    // (subscript, e.g. u₁, Q₁). Font-size shrinkage alone is not sufficient to
-                    // tell them apart, since PDFs commonly render both sub- and superscripts in
-                    // a reduced size.
+                    // (subscript, e.g. u₁, Q₁).
                     val isRaised = tp.yDirAdj < refDirAdj - baseFontSize * 0.08f
                     val isLowered = tp.yDirAdj > refDirAdj + baseFontSize * 0.08f
 

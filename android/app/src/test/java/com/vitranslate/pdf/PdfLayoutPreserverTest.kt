@@ -56,7 +56,7 @@ class PdfLayoutPreserverTest {
 
         val collapsed = PdfLayoutPreserver.collapseVerticalFractions(listOf(top, bar, bot))
         assertEquals(1, collapsed.size)
-        assertEquals("(ax² + bx + c) / (x - d)", collapsed[0].text)
+        assertEquals("(ax² + bx + c)/(x - d)", collapsed[0].text)
         assertEquals(115f, collapsed[0].y, 0.1f)
     }
 

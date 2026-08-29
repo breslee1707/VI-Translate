@@ -97,9 +97,17 @@ class PdfLayoutPreserverTest {
 
     @Test
     fun testIsPureMathOrFormula() {
+        // Pure math — should be classified as formula
         assertTrue(PdfLayoutPreserver.isPureMathOrFormula("(ax² + bx + c) / (x - d)"))
         assertTrue(PdfLayoutPreserver.isPureMathOrFormula("fnc / fnt = 2^(n/12)"))
         assertTrue(PdfLayoutPreserver.isPureMathOrFormula("32 / 3"))
+
+        // Vietnamese prose containing math — should NOT be classified as formula
         assertFalse(PdfLayoutPreserver.isPureMathOrFormula("Cho hàm số y = (ax² + bx + c) / (x - d) có đồ thị như hình vẽ"))
+        assertFalse(PdfLayoutPreserver.isPureMathOrFormula("Họ nguyên hàm của hàm số f(x) = 1/(1-x) + sin(2x) là"))
+        assertFalse(PdfLayoutPreserver.isPureMathOrFormula("Giá trị lớn nhất của hàm số y = x + 4 - x² bằng"))
+
+        // English prose containing math — should NOT be classified as formula
+        assertFalse(PdfLayoutPreserver.isPureMathOrFormula("The sum of the solutions of the equation is"))
     }
 }

@@ -353,7 +353,7 @@ class PdfLayoutPreserver(private val context: Context) {
         private val MATH_SYMBOL_ONLY_PATTERN = Pattern.compile(
             "^[0-9+\\-*/=()<>\\[\\]{},._:;^√∫∑∞≤≥≠±∓×÷%'\"\\\\|\\s]*$"
         )
-        private val LETTER_RUN_PATTERN = Regex("[A-Za-z]+")
+        private val LETTER_RUN_PATTERN = Regex("[\\p{L}]+")
         private val FRACTION_BAR_PATTERN = Regex("^[-_–—―─═]{2,}$")
 
         private val SUPERSCRIPT_DIGIT_MAP = mapOf(
@@ -392,7 +392,7 @@ class PdfLayoutPreserver(private val context: Context) {
 
             val hasLongProseWord = letterRuns.any { it.length > 2 }
             if (!hasLongProseWord) {
-                val withoutVariableLetters = withoutFunctionWords.replace(Regex("[A-Za-z]"), "")
+                val withoutVariableLetters = withoutFunctionWords.replace(Regex("[\\p{L}]"), "")
                 if (MATH_SYMBOL_ONLY_PATTERN.matcher(withoutVariableLetters).matches()) {
                     return true
                 }
@@ -821,7 +821,7 @@ class PdfLayoutPreserver(private val context: Context) {
                     '≈' -> sb.append(" ~~ ")
                     '⊗' -> sb.append("(x)")
                     '⊕' -> sb.append("(+)")
-                    '√' -> sb.append("sqrt")
+                    '√' -> {}  // radical glyph — radicand already extracted separately
                     '∇' -> sb.append("nabla")
                     '∂' -> sb.append('d')
                     '∑' -> sb.append("sum")

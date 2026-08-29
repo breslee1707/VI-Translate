@@ -110,8 +110,16 @@ fun LogViewerDialog(
                         Spacer(modifier = Modifier.width(8.dp))
                     }
 
-                    Button(onClick = onDismiss) {
-                        Text("Đóng")
+                    Button(
+                        onClick = onDismiss,
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = "Đóng",
+                            maxLines = 1,
+                            softWrap = false
+                        )
                     }
                 }
             }

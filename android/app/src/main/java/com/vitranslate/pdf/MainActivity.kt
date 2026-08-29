@@ -126,6 +126,7 @@ fun MainScreen(
     val updateInfo by viewModel.updateInfo.collectAsState()
 
     var showLogDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
     var currentLogText by remember { mutableStateOf("") }
 
     if (showLogDialog) {
@@ -139,6 +140,13 @@ fun MainScreen(
         )
     }
 
+    if (showAboutDialog) {
+        AboutDialog(
+            appVersion = "1.9.11",
+            onDismiss = { showAboutDialog = false }
+        )
+    }
+
     Column(
         modifier = Modifier.fillMaxSize()
     ) {
@@ -148,6 +156,9 @@ fun MainScreen(
             onShowLog = {
                 currentLogText = viewModel.getLogContent()
                 showLogDialog = true
+            },
+            onShowAbout = {
+                showAboutDialog = true
             }
         )
 

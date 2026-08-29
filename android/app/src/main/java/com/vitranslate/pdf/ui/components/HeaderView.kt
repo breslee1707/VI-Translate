@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
@@ -21,7 +22,8 @@ import com.vitranslate.pdf.model.UpdateInfo
 fun HeaderView(
     appVersion: String = "1.9.11",
     updateInfo: UpdateInfo? = null,
-    onShowLog: (() -> Unit)? = null
+    onShowLog: (() -> Unit)? = null,
+    onShowAbout: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
 
@@ -58,6 +60,21 @@ fun HeaderView(
         Row(
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (onShowAbout != null) {
+                IconButton(
+                    onClick = onShowAbout,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = "Thông tin ứng dụng",
+                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+
             if (onShowLog != null) {
                 IconButton(
                     onClick = onShowLog,

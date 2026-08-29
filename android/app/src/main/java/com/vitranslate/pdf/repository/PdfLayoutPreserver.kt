@@ -354,7 +354,7 @@ class PdfLayoutPreserver(private val context: Context) {
             "^[0-9+\\-*/=()<>\\[\\]{},._:;^√∫∑∞≤≥≠±∓×÷%'\"\\\\|\\s]*$"
         )
         private val LETTER_RUN_PATTERN = Regex("[\\p{L}]+")
-        private val FRACTION_BAR_PATTERN = Regex("^[-_–—―─═]{2,}$")
+        private val FRACTION_BAR_PATTERN = Regex("^[-_–—―─═]{1,}$")
 
         private val SUPERSCRIPT_DIGIT_MAP = mapOf(
             '0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴',
@@ -505,6 +505,15 @@ class PdfLayoutPreserver(private val context: Context) {
 
                 consumed2.add(top)
                 consumed2.add(bot)
+
+                // Consume any intervening bar/dash block between top and bot
+                for (mid in remaining) {
+                    if (!consumed2.contains(mid) && mid.y < top.y && mid.y > bot.y) {
+                        if (overlapRatio(top.x, topRight, mid.x, mid.x + mid.width) > 0.3f) {
+                            consumed2.add(mid)
+                        }
+                    }
+                }
 
                 val nT = top.text.trim(); val dT = bot.text.trim()
                 val minX = minOf(top.x, bot.x)

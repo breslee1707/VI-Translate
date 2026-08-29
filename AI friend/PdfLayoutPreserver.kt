@@ -994,9 +994,7 @@ class PdfLayoutPreserver(private val context: Context) {
                     if (ch.isEmpty()) continue
 
                     // yDirAdj increases *downward* on the page (image-space), so a smaller
-                    // yDirAdj than the reference baseline means the glyph sits above the line
-                    // (superscript, e.g. x²) and a larger yDirAdj means it sits below the line
-                    // (subscript, e.g. u₁, Q₁).
+                    // yDirAdj means the glyph sits above the line (superscript)
                     val isRaised = tp.yDirAdj < refDirAdj - baseFontSize * 0.08f
                     val isLowered = tp.yDirAdj > refDirAdj + baseFontSize * 0.08f
 
@@ -1027,11 +1025,6 @@ class PdfLayoutPreserver(private val context: Context) {
      * symbols (e.g. plain "R" instead of ℝ).
      */
     private object TexMathSymbols {
-        // Standard Adobe/TeX PostScript glyph names, as they typically appear in the
-        // /Differences array of an embedded TeX symbol font's /Encoding dictionary,
-        // mapped to their Unicode equivalents. If your PDF's font subset uses different
-        // glyph names, inspect the font's /Differences array (e.g. via `pdffonts -v`,
-        // or PDSimpleFont.encoding.differences in PDFBox) and extend this table.
         private val GLYPH_NAME_MAP: Map<String, String> = mapOf(
             "element" to "∈",
             "elementof" to "∈",
@@ -1077,9 +1070,6 @@ class PdfLayoutPreserver(private val context: Context) {
             "therefore" to "∴"
         )
 
-        // Blackboard-bold capital letters from AMS fonts (msbm10) that have a dedicated
-        // Unicode "double-struck" codepoint. Letters without one (e.g. blackboard "S")
-        // fall back to the plain letter since Unicode has no precomposed glyph for them.
         private val BLACKBOARD_MAP: Map<Char, String> = mapOf(
             'C' to "ℂ", 'H' to "ℍ", 'N' to "ℕ", 'P' to "ℙ",
             'Q' to "ℚ", 'R' to "ℝ", 'Z' to "ℤ"

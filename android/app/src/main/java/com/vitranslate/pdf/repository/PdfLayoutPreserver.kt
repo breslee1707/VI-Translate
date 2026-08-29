@@ -407,12 +407,13 @@ class PdfLayoutPreserver(private val context: Context) {
         }
 
         /**
-         * Scans raw extracted text blocks across a page and merges vertical fraction stacks
-         * (numerator over denominator) into a single inline block "(numerator) / (denominator)"
-         * placed at the baseline midpoint before horizontal line grouping occurs.
+         * Scans raw extracted text blocks and merges vertical fraction stacks
+         * ONLY when an explicit fraction bar (a run of dashes/underscores) is
+         * found between the numerator and denominator.  Without a bar, blocks
+         * are never merged — this avoids destroying normal consecutive text lines.
          */
         fun collapseVerticalFractions(raw: List<TextBlock>): List<TextBlock> {
-            if (raw.size < 2) return raw
+            if (raw.size < 3) return raw          // need at least num + bar + den
 
             fun overlapRatio(aMin: Float, aMax: Float, bMin: Float, bMax: Float): Float {
                 val overlap = minOf(aMax, bMax) - maxOf(aMin, bMin)
@@ -423,79 +424,75 @@ class PdfLayoutPreserver(private val context: Context) {
 
             fun isBar(text: String) = FRACTION_BAR_PATTERN.matches(text.trim())
 
+            // Sort top-to-bottom (higher Y first), then left-to-right
             val unused = raw.sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x }).toMutableList()
             val collapsed = mutableListOf<TextBlock>()
+            val consumed = mutableSetOf<TextBlock>()
 
-            while (unused.isNotEmpty()) {
-                val top = unused.removeAt(0)
-                if (isBar(top.text)) {
-                    continue
+            // First pass: find explicit  numerator ── bar ── denominator  triples
+            for (bar in unused) {
+                if (!isBar(bar.text)) continue
+                if (consumed.contains(bar)) continue
+
+                val barFont = bar.fontSize
+                val barRight = bar.x + bar.width
+
+                // Look for a numerator ABOVE the bar (higher Y)
+                val numCandidate = unused.firstOrNull { c ->
+                    !consumed.contains(c) && !isBar(c.text) &&
+                    c.y > bar.y &&                                   // above the bar
+                    (c.y - bar.y) <= barFont * 1.8f &&               // close vertically
+                    overlapRatio(c.x, c.x + c.width, bar.x, barRight) > 0.5f &&
+                    c.text.trim().length <= 20                       // short math content only
                 }
+                if (numCandidate == null) continue
 
-                val topFont = top.fontSize
-                val topRight = top.x + top.width
-
-                var barCandidate: TextBlock? = null
-                var botCandidate: TextBlock? = null
-
-                val barMatch = unused.firstOrNull { candidate ->
-                    val gap = top.y - candidate.y
-                    gap > 0f && gap <= topFont * 1.6f &&
-                        overlapRatio(top.x, topRight, candidate.x, candidate.x + candidate.width) > 0.3f &&
-                        isBar(candidate.text)
+                // Look for a denominator BELOW the bar (lower Y)
+                val denCandidate = unused.firstOrNull { c ->
+                    !consumed.contains(c) && !isBar(c.text) && c != numCandidate &&
+                    bar.y > c.y &&                                   // below the bar
+                    (bar.y - c.y) <= barFont * 1.8f &&               // close vertically
+                    overlapRatio(c.x, c.x + c.width, bar.x, barRight) > 0.5f &&
+                    c.text.trim().length <= 20                       // short math content only
                 }
-                if (barMatch != null) {
-                    barCandidate = barMatch
-                }
+                if (denCandidate == null) continue
 
-                val refYForBot = barCandidate?.y ?: top.y
-                val maxGap = if (barCandidate != null) topFont * 2.2f else topFont * 1.8f
+                // We have a confirmed  num / bar / den  triple — merge them
+                consumed.add(bar)
+                consumed.add(numCandidate)
+                consumed.add(denCandidate)
 
-                val botMatch = unused.firstOrNull { candidate ->
-                    val gap = refYForBot - candidate.y
-                    gap > 0f && gap <= maxGap &&
-                        overlapRatio(top.x, topRight, candidate.x, candidate.x + candidate.width) > 0.3f &&
-                        !isBar(candidate.text) &&
-                        abs(candidate.fontSize - topFont) <= maxOf(topFont, candidate.fontSize) * 0.45f &&
-                        top.text.trim().length <= 40 && candidate.text.trim().length <= 40
-                }
-                if (botMatch != null) {
-                    botCandidate = botMatch
-                }
+                val numText = numCandidate.text.trim()
+                val denText = denCandidate.text.trim()
+                val needsNumParens = numText.contains(' ') || Regex("[+\\-]").containsMatchIn(numText)
+                val needsDenParens = denText.contains(' ') || Regex("[+\\-]").containsMatchIn(denText)
+                val fmtNum = if (needsNumParens && !numText.startsWith("(")) "($numText)" else numText
+                val fmtDen = if (needsDenParens && !denText.startsWith("(")) "($denText)" else denText
 
-                if (botCandidate != null) {
-                    if (barCandidate != null) unused.remove(barCandidate)
-                    unused.remove(botCandidate)
+                val minX = minOf(numCandidate.x, denCandidate.x, bar.x)
+                val maxR = maxOf(numCandidate.x + numCandidate.width,
+                                 denCandidate.x + denCandidate.width,
+                                 barRight)
+                val avgY = (numCandidate.y + denCandidate.y) / 2f
 
-                    val numText = top.text.trim()
-                    val denText = botCandidate.text.trim()
-                    val numNeedsParens = numText.contains(" ") || Regex("[+\\-]").containsMatchIn(numText)
-                    val denNeedsParens = denText.contains(" ") || Regex("[+\\-]").containsMatchIn(denText)
+                collapsed.add(TextBlock(
+                    text = "$fmtNum / $fmtDen",
+                    x = minX,
+                    y = avgY,
+                    fontSize = maxOf(numCandidate.fontSize, denCandidate.fontSize),
+                    width = maxR - minX,
+                    ascent = numCandidate.ascent,
+                    descent = denCandidate.descent
+                ))
+            }
 
-                    val formattedNum = if (numNeedsParens && !numText.startsWith("(")) "($numText)" else numText
-                    val formattedDen = if (denNeedsParens && !denText.startsWith("(")) "($denText)" else denText
-                    val fracText = "$formattedNum / $formattedDen"
-
-                    val minX = minOf(top.x, botCandidate.x)
-                    val maxR = maxOf(topRight, botCandidate.x + botCandidate.width)
-                    val avgY = (top.y + botCandidate.y) / 2f
-                    val maxFont = maxOf(top.fontSize, botCandidate.fontSize)
-
-                    collapsed.add(
-                        TextBlock(
-                            text = fracText,
-                            x = minX,
-                            y = avgY,
-                            fontSize = maxFont,
-                            width = maxR - minX,
-                            ascent = top.ascent,
-                            descent = botCandidate.descent
-                        )
-                    )
-                } else {
-                    collapsed.add(top)
+            // Keep every block that was NOT consumed by a fraction triple
+            for (block in unused) {
+                if (!consumed.contains(block)) {
+                    collapsed.add(block)
                 }
             }
+
             return collapsed.sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x })
         }
     }

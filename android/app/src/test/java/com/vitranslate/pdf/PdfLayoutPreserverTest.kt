@@ -25,11 +25,20 @@ class PdfLayoutPreserverTest {
     }
 
     @Test
-    fun testCollapseVerticalFractions() {
+    fun testCollapseVerticalFractions_withBar() {
         val top = PdfLayoutPreserver.TextBlock(
             text = "ax² + bx + c",
             x = 150f,
             y = 120f,
+            fontSize = 10f,
+            width = 70f,
+            ascent = 8f,
+            descent = 2f
+        )
+        val bar = PdfLayoutPreserver.TextBlock(
+            text = "────────",
+            x = 150f,
+            y = 115f,
             fontSize = 10f,
             width = 70f,
             ascent = 8f,
@@ -45,10 +54,45 @@ class PdfLayoutPreserverTest {
             descent = 2f
         )
 
-        val collapsed = PdfLayoutPreserver.collapseVerticalFractions(listOf(top, bot))
+        val collapsed = PdfLayoutPreserver.collapseVerticalFractions(listOf(top, bar, bot))
         assertEquals(1, collapsed.size)
         assertEquals("(ax² + bx + c) / (x - d)", collapsed[0].text)
         assertEquals(115f, collapsed[0].y, 0.1f)
+    }
+
+    @Test
+    fun testCollapseVerticalFractions_withoutBar_noMerge() {
+        // Without a fraction bar, blocks should NOT be merged
+        val top = PdfLayoutPreserver.TextBlock(
+            text = "Question 1",
+            x = 50f,
+            y = 500f,
+            fontSize = 10f,
+            width = 100f,
+            ascent = 8f,
+            descent = 2f
+        )
+        val bot = PdfLayoutPreserver.TextBlock(
+            text = "A. 0.",
+            x = 50f,
+            y = 490f,
+            fontSize = 10f,
+            width = 30f,
+            ascent = 8f,
+            descent = 2f
+        )
+        val extra = PdfLayoutPreserver.TextBlock(
+            text = "B. 2.",
+            x = 150f,
+            y = 490f,
+            fontSize = 10f,
+            width = 30f,
+            ascent = 8f,
+            descent = 2f
+        )
+
+        val collapsed = PdfLayoutPreserver.collapseVerticalFractions(listOf(top, bot, extra))
+        assertEquals(3, collapsed.size)  // all blocks preserved, nothing merged
     }
 
     @Test

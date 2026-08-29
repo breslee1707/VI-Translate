@@ -84,7 +84,8 @@ class PdfLayoutPreserver(private val context: Context) {
                         val page = document.getPage(pageIndex)
                         val textCollector = PageTextCollector()
                         textCollector.extractPageText(document, page, pageIndex)
-                        val textBlocks = groupIntoLineRuns(textCollector.blocks)
+                        val collapsedBlocks = collapseVerticalFractions(textCollector.blocks)
+                        val textBlocks = groupIntoLineRuns(collapsedBlocks)
 
                         if (textBlocks.isNotEmpty()) {
                             val translations = mutableListOf<BlockTranslation>()
@@ -282,42 +283,12 @@ class PdfLayoutPreserver(private val context: Context) {
         }
     }
 
-    private val MATH_FUNCTION_WORDS = Regex(
-        "\\b(?:ln|log|lim|sin|cos|tan|cot|sec|csc|exp|max|min|mod|sqrt)\\b",
-        RegexOption.IGNORE_CASE
-    )
-    private val MATH_SYMBOL_ONLY_PATTERN = Pattern.compile(
-        "^[0-9+\\-*/=()<>\\[\\]{},._:;^√∫∑∞≤≥≠±∓×÷%'\"\\\\|\\s]*$"
-    )
-    private val LETTER_RUN_PATTERN = Regex("[A-Za-z]+")
-
-    /**
-     * Checks if text consists of mathematical expressions, variables, or functions rather than plain prose sentences.
-     */
-    private fun isPureMathOrFormula(text: String): Boolean {
-        val trimmed = text.trim()
-        if (trimmed.isEmpty()) return false
-
-        val withoutFunctionWords = trimmed.replace(MATH_FUNCTION_WORDS, " ")
-
-        val hasRealWord = LETTER_RUN_PATTERN.findAll(withoutFunctionWords)
-            .any { it.value.length > 2 }
-        if (hasRealWord) return false
-
-        val withoutVariableLetters = withoutFunctionWords.replace(Regex("[A-Za-z]"), "")
-        return MATH_SYMBOL_ONLY_PATTERN.matcher(withoutVariableLetters).matches()
-    }
-
     private fun stripTagsAndPlaceholders(text: String): String {
         return text
             .replace(Regex("</?b\\d+>"), "")
             .replace(Regex("</?s[123]>"), "")
             .replace(Regex("\\{\\s*v\\d+\\s*\\}"), "")
     }
-
-    // A "fraction bar" that survives as an extracted text fragment usually looks like a
-    // run of hyphen/underscore/dash-like characters rather than real prose.
-    private val FRACTION_BAR_PATTERN = Regex("^[-_–—―─═]{2,}$")
 
     /**
      * Groups raw text fragments into horizontal lines and runs, retaining superscript
@@ -327,10 +298,6 @@ class PdfLayoutPreserver(private val context: Context) {
     private fun groupIntoLineRuns(raw: List<TextBlock>): List<TextBlock> {
         if (raw.isEmpty()) return emptyList()
 
-        // Pass 1: cluster fragments into lines using a *tight* baseline tolerance. Normal
-        // same-line baseline jitter is tiny; a vertical fraction's numerator and denominator
-        // sit much further apart than this and correctly start new lines instead of being
-        // flattened into one broken horizontal run.
         val lines = mutableListOf<MutableList<TextBlock>>()
         for (frag in raw) {
             val lastLine = lines.lastOrNull()
@@ -345,12 +312,8 @@ class PdfLayoutPreserver(private val context: Context) {
             lines.add(mutableListOf(frag))
         }
 
-        // Pass 2: detect numerator/[bar]/denominator stacks among the resulting lines and
-        // collapse each match into a single line so it survives as one atomic text block.
-        val mergedLines = mergeFractionLines(lines)
-
         val result = mutableListOf<TextBlock>()
-        for (line in mergedLines) {
+        for (line in lines) {
             val lineSorted = line.sortedBy { it.x }
             var runFrags = mutableListOf<TextBlock>()
             var prev: TextBlock? = null
@@ -382,113 +345,17 @@ class PdfLayoutPreserver(private val context: Context) {
         return result
     }
 
-    /**
-     * Scans consecutive line-groups (top-to-bottom) for the numerator / [bar] / denominator
-     * shape of a vertical fraction — two (or three) short, similarly-sized, horizontally
-     * overlapping lines stacked closely together — and flattens a match into one line
-     * containing "(numerator) / (denominator)".
-     *
-     * The bar itself is optional: many PDFs draw the fraction rule as a vector line rather
-     * than a text glyph, in which case it never reaches this function as a TextBlock at all;
-     * the numerator line simply sits directly above the denominator line.
-     */
-    private fun mergeFractionLines(lines: List<MutableList<TextBlock>>): List<MutableList<TextBlock>> {
-        if (lines.size < 2) return lines
-
-        fun bounds(line: List<TextBlock>): Triple<Float, Float, Float> {
-            val minX = line.minOf { it.x }
-            val maxX = line.maxOf { it.x + it.width }
-            val avgFont = line.map { it.fontSize }.average().toFloat()
-            return Triple(minX, maxX, avgFont)
-        }
-
-        fun overlapRatio(aMin: Float, aMax: Float, bMin: Float, bMax: Float): Float {
-            val overlap = minOf(aMax, bMax) - maxOf(aMin, bMin)
-            if (overlap <= 0f) return 0f
-            val smaller = minOf(aMax - aMin, bMax - bMin)
-            return if (smaller <= 0f) 0f else overlap / smaller
-        }
-
-        fun lineText(line: List<TextBlock>) = line.sortedBy { it.x }.joinToString(" ") { it.text }.trim()
-        fun isBarLine(line: List<TextBlock>) = FRACTION_BAR_PATTERN.matches(lineText(line))
-
-        // Guards to avoid misfiring on two ordinary, closely-set lines of prose: fraction
-        // rows are short expressions and share a similar font size with their neighbour.
-        fun looksLikeFractionRow(line: List<TextBlock>, fontSize: Float, neighborFont: Float): Boolean {
-            val text = lineText(line)
-            return text.length in 1..40 && abs(fontSize - neighborFont) <= maxOf(fontSize, neighborFont) * 0.3f
-        }
-
-        val result = mutableListOf<MutableList<TextBlock>>()
-        var i = 0
-        while (i < lines.size) {
-            val current = lines[i]
-            val (curMinX, curMaxX, curFont) = bounds(current)
-            val refY = current.first().y
-
-            var barIdx = -1
-            var denIdx = -1
-
-            var cursor = i + 1
-            if (cursor < lines.size) {
-                val next = lines[cursor]
-                val (nMinX, nMaxX, nFont) = bounds(next)
-                val gap = abs(refY - next.first().y)
-                val overlaps = overlapRatio(curMinX, curMaxX, nMinX, nMaxX) > 0.5f
-                if (overlaps && gap < maxOf(curFont, nFont) * 1.8f && isBarLine(next)) {
-                    barIdx = cursor
-                    cursor++
-                }
-            }
-            if (cursor < lines.size) {
-                val next = lines[cursor]
-                val (nMinX, nMaxX, nFont) = bounds(next)
-                val prevRefY = if (barIdx != -1) lines[barIdx].first().y else refY
-                val gap = abs(prevRefY - next.first().y)
-                val overlaps = overlapRatio(curMinX, curMaxX, nMinX, nMaxX) > 0.5f
-                if (overlaps && gap < maxOf(curFont, nFont) * 1.8f && !isBarLine(next) &&
-                    looksLikeFractionRow(current, curFont, nFont) && looksLikeFractionRow(next, nFont, curFont)
-                ) {
-                    denIdx = cursor
-                }
-            }
-
-            if (denIdx != -1) {
-                val numerator = lineText(current)
-                val denominator = lineText(lines[denIdx])
-                val needsParensNum = Regex("[+\\-]").containsMatchIn(numerator)
-                val needsParensDen = Regex("[+\\-]").containsMatchIn(denominator)
-                val fractionText = "${if (needsParensNum) "($numerator)" else numerator} / " +
-                    if (needsParensDen) "($denominator)" else denominator
-
-                val allFrags = current + (if (barIdx != -1) lines[barIdx] else emptyList()) + lines[denIdx]
-                val minX = allFrags.minOf { it.x }
-                val maxRight = allFrags.maxOf { it.x + it.width }
-                val maxFont = allFrags.maxOf { it.fontSize }
-                val topFrag = current.maxByOrNull { it.y }!!
-                val bottomFrag = lines[denIdx].minByOrNull { it.y }!!
-
-                val fractionBlock = TextBlock(
-                    text = fractionText,
-                    x = minX,
-                    y = (topFrag.y + bottomFrag.y) / 2f,
-                    fontSize = maxFont,
-                    width = maxRight - minX,
-                    ascent = topFrag.ascent,
-                    descent = bottomFrag.descent
-                )
-                result.add(mutableListOf(fractionBlock))
-                i = denIdx + 1
-                continue
-            }
-
-            result.add(current)
-            i++
-        }
-        return result
-    }
-
     companion object {
+        private val MATH_FUNCTION_WORDS = Regex(
+            "\\b(?:ln|log|lim|sin|cos|tan|cot|sec|csc|exp|max|min|mod|sqrt|rad|deg|fnc|fnt|fn)\\b",
+            RegexOption.IGNORE_CASE
+        )
+        private val MATH_SYMBOL_ONLY_PATTERN = Pattern.compile(
+            "^[0-9+\\-*/=()<>\\[\\]{},._:;^√∫∑∞≤≥≠±∓×÷%'\"\\\\|\\s]*$"
+        )
+        private val LETTER_RUN_PATTERN = Regex("[A-Za-z]+")
+        private val FRACTION_BAR_PATTERN = Regex("^[-_–—―─═]{2,}$")
+
         private val SUPERSCRIPT_DIGIT_MAP = mapOf(
             '0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴',
             '5' to '⁵', '6' to '⁶', '7' to '⁷', '8' to '⁸', '9' to '⁹',
@@ -511,6 +378,125 @@ class PdfLayoutPreserver(private val context: Context) {
             val trimmed = raw.trim()
             if (trimmed.isEmpty()) return trimmed
             return trimmed.map { SUBSCRIPT_DIGIT_MAP[it] ?: it }.joinToString("")
+        }
+
+        /**
+         * Checks if text consists of mathematical expressions, variables, or functions rather than plain prose sentences.
+         */
+        fun isPureMathOrFormula(text: String): Boolean {
+            val trimmed = text.trim()
+            if (trimmed.isEmpty()) return false
+
+            val withoutFunctionWords = trimmed.replace(MATH_FUNCTION_WORDS, " ")
+            val letterRuns = LETTER_RUN_PATTERN.findAll(withoutFunctionWords).map { it.value }.toList()
+
+            val hasLongProseWord = letterRuns.any { it.length > 2 }
+            if (!hasLongProseWord) {
+                val withoutVariableLetters = withoutFunctionWords.replace(Regex("[A-Za-z]"), "")
+                if (MATH_SYMBOL_ONLY_PATTERN.matcher(withoutVariableLetters).matches()) {
+                    return true
+                }
+            }
+
+            val hasMathOperators = Regex("[=/^√≤≥≠±∈∉⊂⊃∩∪]").containsMatchIn(trimmed)
+            if (hasMathOperators && trimmed.length <= 60 && letterRuns.count { it.length > 2 } <= 2) {
+                return true
+            }
+
+            return false
+        }
+
+        /**
+         * Scans raw extracted text blocks across a page and merges vertical fraction stacks
+         * (numerator over denominator) into a single inline block "(numerator) / (denominator)"
+         * placed at the baseline midpoint before horizontal line grouping occurs.
+         */
+        fun collapseVerticalFractions(raw: List<TextBlock>): List<TextBlock> {
+            if (raw.size < 2) return raw
+
+            fun overlapRatio(aMin: Float, aMax: Float, bMin: Float, bMax: Float): Float {
+                val overlap = minOf(aMax, bMax) - maxOf(aMin, bMin)
+                if (overlap <= 0f) return 0f
+                val smaller = minOf(aMax - aMin, bMax - bMin)
+                return if (smaller <= 0f) 0f else overlap / smaller
+            }
+
+            fun isBar(text: String) = FRACTION_BAR_PATTERN.matches(text.trim())
+
+            val unused = raw.sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x }).toMutableList()
+            val collapsed = mutableListOf<TextBlock>()
+
+            while (unused.isNotEmpty()) {
+                val top = unused.removeAt(0)
+                if (isBar(top.text)) {
+                    continue
+                }
+
+                val topFont = top.fontSize
+                val topRight = top.x + top.width
+
+                var barCandidate: TextBlock? = null
+                var botCandidate: TextBlock? = null
+
+                val barMatch = unused.firstOrNull { candidate ->
+                    val gap = top.y - candidate.y
+                    gap > 0f && gap <= topFont * 1.6f &&
+                        overlapRatio(top.x, topRight, candidate.x, candidate.x + candidate.width) > 0.3f &&
+                        isBar(candidate.text)
+                }
+                if (barMatch != null) {
+                    barCandidate = barMatch
+                }
+
+                val refYForBot = barCandidate?.y ?: top.y
+                val maxGap = if (barCandidate != null) topFont * 2.2f else topFont * 1.8f
+
+                val botMatch = unused.firstOrNull { candidate ->
+                    val gap = refYForBot - candidate.y
+                    gap > 0f && gap <= maxGap &&
+                        overlapRatio(top.x, topRight, candidate.x, candidate.x + candidate.width) > 0.3f &&
+                        !isBar(candidate.text) &&
+                        abs(candidate.fontSize - topFont) <= maxOf(topFont, candidate.fontSize) * 0.45f &&
+                        top.text.trim().length <= 40 && candidate.text.trim().length <= 40
+                }
+                if (botMatch != null) {
+                    botCandidate = botMatch
+                }
+
+                if (botCandidate != null) {
+                    if (barCandidate != null) unused.remove(barCandidate)
+                    unused.remove(botCandidate)
+
+                    val numText = top.text.trim()
+                    val denText = botCandidate.text.trim()
+                    val numNeedsParens = numText.contains(" ") || Regex("[+\\-]").containsMatchIn(numText)
+                    val denNeedsParens = denText.contains(" ") || Regex("[+\\-]").containsMatchIn(denText)
+
+                    val formattedNum = if (numNeedsParens && !numText.startsWith("(")) "($numText)" else numText
+                    val formattedDen = if (denNeedsParens && !denText.startsWith("(")) "($denText)" else denText
+                    val fracText = "$formattedNum / $formattedDen"
+
+                    val minX = minOf(top.x, botCandidate.x)
+                    val maxR = maxOf(topRight, botCandidate.x + botCandidate.width)
+                    val avgY = (top.y + botCandidate.y) / 2f
+                    val maxFont = maxOf(top.fontSize, botCandidate.fontSize)
+
+                    collapsed.add(
+                        TextBlock(
+                            text = fracText,
+                            x = minX,
+                            y = avgY,
+                            fontSize = maxFont,
+                            width = maxR - minX,
+                            ascent = top.ascent,
+                            descent = botCandidate.descent
+                        )
+                    )
+                } else {
+                    collapsed.add(top)
+                }
+            }
+            return collapsed.sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x })
         }
     }
 
@@ -537,6 +523,7 @@ class PdfLayoutPreserver(private val context: Context) {
             when {
                 index == 0 -> sb.append(piece)
                 isSuperscript || isSubscript -> sb.append(piece)
+                sb.endsWith("sqrt") || sb.endsWith("√") -> sb.append(piece)
                 else -> sb.append(' ').append(piece)
             }
         }
@@ -869,7 +856,7 @@ class PdfLayoutPreserver(private val context: Context) {
         val translated: String
     )
 
-    private class TextBlock(
+    class TextBlock(
         val text: String,
         val x: Float,
         val y: Float,

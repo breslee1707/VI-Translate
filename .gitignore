@@ -28,5 +28,7 @@ pdf-translate.log
 Thumbs.db
 desktop.ini
 
-# Local contributor instructions; keep them out of the repository.
-/AGENTS.md
+# Personal agent overrides stay local. Shared Codex/Claude instructions are
+# tracked in AGENTS.md, CLAUDE.md, .claude/skills/, and agent-knowledge/.
+/CLAUDE.local.md
+/.claude/settings.local.json

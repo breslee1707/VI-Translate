@@ -8,6 +8,12 @@ license: AGPL-3.0-only
 
 Translate a PDF with the bundled Code4Life engine. Keep the source file unchanged and produce a separate PDF with the same page structure.
 
+When this skill runs inside the repository, first read
+[`agent-knowledge/index.md`](agent-knowledge/index.md). For preservation or
+layout work, load its PDF engine, regression, and validation routes. These are
+the shared project instructions for Codex and Claude; do not duplicate them in
+this entrypoint.
+
 ## Resolve the skill root
 
 This skill may be installed globally while the user's files live elsewhere. Resolve the absolute directory containing this `SKILL.md` before running anything. Call its scripts and dependency files by absolute path; do not assume the current working directory is the skill directory.

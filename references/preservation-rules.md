@@ -53,7 +53,8 @@ These classifications preserve the complete page layout instead of reflowing num
 ## Scan and source safety
 
 - A rendered image covering more than half the page marks the page as scanned; translated text regions receive white backing rectangles so source pixels do not show through.
-- The core does not perform OCR. A scan without an extractable text layer remains untranslated.
+- The core does not perform OCR. A page that carries an image but yields no translatable text is named as image-only in the result, and a document with no translatable text anywhere is refused with an instruction to run OCR first, never handed over as a finished translation.
+- A segment left in the source language is reported with the reason it was left: it did not fit at the smallest allowed size, the translation came back with damaged formula markers, or the engine failed.
 - Structural PDF repair uses a temporary copy. The source file is never
   overwritten. Repair is triggered by the engine failing to rewrite the
   document, not by a second library's willingness to open it, and a document

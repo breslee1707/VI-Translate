@@ -19,7 +19,12 @@ tqdm==4.70.0
 # Imported directly by the bundled core but previously reached only through
 # babeldoc, so nothing pinned them. Not the headless opencv build: babeldoc
 # requires the full package, and installing both just shadows one with the other.
-onnx==1.17.0
+# onnx is the exception: nothing here imports it any more - doclayout reads the
+# model metadata off the onnxruntime session instead - but babeldoc still pulls
+# it in, and every release through 1.21.0 carries a path-traversal or
+# malicious-model advisory. Pinned to hold that transitive dependency at the
+# first version clear of all of them.
+onnx==1.22.0
 onnxruntime==1.20.1
 opencv-python==5.0.0.93
 peewee==3.17.9

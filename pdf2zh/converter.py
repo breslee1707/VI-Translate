@@ -3,6 +3,7 @@ import logging
 import math
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from enum import Enum, IntEnum
 from string import Template
@@ -32,6 +33,7 @@ from pdf2zh.translator import (
 
 log = logging.getLogger(__name__)
 STYLE_TAG_PATTERN = re.compile(r"<(/?)s([123])>", re.IGNORECASE)
+PLACEHOLDER_ONLY_PATTERN = re.compile(r"\{v\d+\}")
 IDENTITY_ORIENTATION = (1.0, 0.0, 0.0, 1.0)
 BASE14_STYLE_FONTS = {0: "tiro", 1: "tibo", 2: "tiit", 3: "tibi"}
 
@@ -133,6 +135,20 @@ def matrix_font_size(matrix) -> float:
 
 def strip_style_tags(text: str) -> str:
     return STYLE_TAG_PATTERN.sub("", text)
+
+
+def is_translatable_segment(segment: str, preserved: Iterable[str]) -> bool:
+    """Whether the translator should actually be asked for this segment.
+
+    Preserved runs, blank space, and bare formula placeholders are copied
+    through untouched. They are not failures and they are not work, so a page
+    made only of those is a page with nothing to translate rather than a page
+    the translator gave up on.
+    """
+    if segment in preserved:
+        return False
+    visible = strip_style_tags(segment).strip()
+    return bool(visible) and PLACEHOLDER_ONLY_PATTERN.fullmatch(visible) is None
 
 
 def styled_character_text(characters: list[LTChar]) -> str:
@@ -385,6 +401,18 @@ class TranslateConverter(PDFConverterEx):
         self.scanned_pages: set = set()
         # Segments whose retries ran out; reported as a partial translation.
         self.translation_failures: list[str] = []
+        # Why each of those was left alone. The caller used to see only a count
+        # and told every user their network was down, including when the real
+        # reason was a line that could not be made to fit or a formula the
+        # translator would have mangled.
+        self.failure_reasons: Counter[str] = Counter()
+        # Segments the translator was actually asked for. Zero across a whole
+        # document means there was no text to translate, not that translation
+        # failed - the difference between "run OCR first" and "try again".
+        self.translatable_segments: int = 0
+        # Pages carrying a raster image, filled in by the caller.
+        self.pages_with_images: set[int] = set()
+        self.segments_by_page: Counter[int] = Counter()
         # e.g. "handoff:model" -> ["handoff", "model"]; model is unused by both engines
         param = service.split(":", 1)
         service_name = param[0]
@@ -405,8 +433,24 @@ class TranslateConverter(PDFConverterEx):
             ignore_cache=ignore_cache,
         )
 
+    @property
+    def image_only_pages(self) -> set[int]:
+        """Pages that carry an image and no text this run could translate.
+
+        Decided once at the end, never as each page arrives: receive_layout
+        runs many times for a single page - once per nested container - and
+        every call but the last sees an empty stack, so a page judged on
+        arrival looks empty no matter what is printed on it.
+        """
+        return {
+            page
+            for page in self.pages_with_images
+            if not self.segments_by_page[page]
+        }
+
     def record_translation_failure(self, segment: str, reason: str) -> None:
         self.translation_failures.append(segment)
+        self.failure_reasons[reason] += 1
         log.warning(
             "Leaving segment in source language (%s): %r",
             reason,
@@ -702,12 +746,7 @@ class TranslateConverter(PDFConverterEx):
             return restore_formula_placeholders(s, translated)
 
         def worker(s: str) -> str:
-            visible = strip_style_tags(s).strip()
-            if (
-                s in preserved_segments
-                or not visible
-                or re.fullmatch(r"\{v\d+\}", visible)
-            ):
+            if not is_translatable_segment(s, preserved_segments):
                 return s
             try:
                 return translate_segment(s)
@@ -721,6 +760,14 @@ class TranslateConverter(PDFConverterEx):
                     log.exception(e, exc_info=False)
                 self.record_translation_failure(s, type(e).__name__)
                 return s
+        # Counted here rather than inside worker: worker runs on the pool, and
+        # "+= 1" from several threads drops updates.
+        translatable = sum(
+            1 for s in sstk if is_translatable_segment(s, preserved_segments)
+        )
+        self.translatable_segments += translatable
+        self.segments_by_page[ltpage.pageid] += translatable
+
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=self.thread
         ) as executor:

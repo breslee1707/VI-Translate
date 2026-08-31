@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from pdfminer.pdfinterp import PDFResourceManager
 
-from pdf2zh.converter import TranslateConverter
+from pdf2zh.converter import TranslateConverter, is_translatable_segment
 from pdf2zh.rules import (
     BULLET_CHARACTERS,
     classify_preserved_page,
@@ -15,6 +15,7 @@ from pdf2zh.rules import (
     is_formula_font,
     is_scanned_page,
     line_height_for_language,
+    page_has_image,
     matching_table_cells,
     min_line_height_for_language,
     should_translate_table_cell,
@@ -219,6 +220,58 @@ class PreservationRuleTests(unittest.TestCase):
         bounds[0] = {7: (1, 2, 3, 4)}
         self.assertIs(converter.layout_bounds, bounds)
         self.assertEqual(converter.layout_bounds[0][7], (1, 2, 3, 4))
+
+
+class TranslatableSegmentTests(unittest.TestCase):
+    """The count these drive decides whether a document is called a scan."""
+
+    def test_real_text_is_translatable(self):
+        self.assertTrue(is_translatable_segment("Chapter 1", set()))
+        self.assertTrue(is_translatable_segment("<s1>Bold</s1> text", set()))
+
+    def test_blank_and_placeholder_only_runs_are_not_work(self):
+        for empty in ("", "   ", "<s1></s1>", "{v3}", " {v12} "):
+            with self.subTest(segment=empty):
+                self.assertFalse(is_translatable_segment(empty, set()))
+
+    def test_preserved_segments_are_not_counted(self):
+        self.assertFalse(is_translatable_segment("E = mc2", {"E = mc2"}))
+
+    def test_a_figure_caption_beside_a_formula_still_counts(self):
+        """A page of diagrams that carries one real line is not an image-only
+        page, so a scan-heavy textbook is never refused for needing OCR."""
+        self.assertTrue(is_translatable_segment("Figure 3: the lever arm", {"{v1}"}))
+
+
+class ImageOnlyPageTests(unittest.TestCase):
+    def test_any_image_counts_even_when_no_single_tile_is_large(self):
+        """Scanners emit a page as dozens of tiles, so the half-page rule that
+        drives backing rectangles misses most scanned pages entirely."""
+        tiles = [{"type": 1, "bbox": (0, 0, 60, 60)} for _ in range(12)]
+        self.assertTrue(page_has_image(tiles))
+        self.assertFalse(is_scanned_page(tiles, page_area=600 * 800))
+
+    def test_a_page_of_text_alone_carries_no_image(self):
+        self.assertFalse(page_has_image([{"type": 0, "bbox": (0, 0, 10, 10)}]))
+        self.assertFalse(page_has_image([]))
+
+    def test_a_page_is_judged_on_everything_it_contributed(self):
+        """receive_layout runs once per nested container and only the last call
+        carries the text, so judging a page as each call arrives reported a
+        fully translated page as an untranslated scan."""
+        converter = TranslateConverter(PDFResourceManager(), service="google")
+        converter.pages_with_images.update({0, 1})
+        for count in (0, 0, 0, 14):  # one page, four calls
+            converter.segments_by_page[0] += count
+        converter.segments_by_page[1] += 0
+
+        self.assertEqual(converter.image_only_pages, {1})
+
+    def test_a_blank_page_is_not_called_a_scan(self):
+        converter = TranslateConverter(PDFResourceManager(), service="google")
+        converter.segments_by_page[3] += 0
+
+        self.assertEqual(converter.image_only_pages, set())
 
 
 if __name__ == "__main__":

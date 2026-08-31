@@ -23,7 +23,11 @@ class LargeDocumentFinalizationTests(unittest.TestCase):
                 mock.patch.object(
                     high_level,
                     "translate_stream",
-                    return_value=(b"%PDF-1.7\ntranslated", None, []),
+                    return_value=(
+                        b"%PDF-1.7\ntranslated",
+                        None,
+                        high_level.TranslationReport(translatable_segments=1),
+                    ),
                 ) as stream,
             ):
                 high_level.translate([str(source)], output=str(root))
@@ -61,7 +65,11 @@ class LargeDocumentFinalizationTests(unittest.TestCase):
                 mock.patch.object(
                     high_level,
                     "translate_stream",
-                    return_value=(b"%PDF-1.7\ntranslated", None, []),
+                    return_value=(
+                        b"%PDF-1.7\ntranslated",
+                        None,
+                        high_level.TranslationReport(translatable_segments=1),
+                    ),
                 ),
             ):
                 high_level.translate([str(source)], output=str(root))

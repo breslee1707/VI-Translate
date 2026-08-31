@@ -11,10 +11,12 @@ Date: 2026-08-31 · branch `research/ocr-spike` · Python 3.12.10 · Windows 11
 ## Verdict in one line
 
 The sidecar approach works and the recogniser is already in the dependency
-tree, but a scanned page with a coloured background is destroyed by the
-existing backing-rectangle code, and formulas are lost. **Shippable as an
-opt-in mode for plain black-on-white prose scans only, and not before
-`converter.py:831-849` learns to sample the background it is covering.**
+tree. But on a real scan every page is delivered wrong: the pages the backing
+rectangles miss get the translation printed on top of the original, and the
+pages they reach lose their background. Sampling a fill colour was measured and
+rescues under half the damage. **Not shippable without replacing the
+cover-with-a-rectangle strategy outright — the tractable route is erasing the
+original text from the raster and drawing onto the cleaned page.**
 
 ---
 
@@ -233,21 +235,25 @@ in a technical manual a wrong digit is worse than a missing sentence.
 
 ## Recommendation
 
-**Do not ship OCR as a general mode.** Ship it, if at all, as opt-in and
-narrowed, with three preconditions:
+**Do not ship OCR as a mode yet.** Session 2 moved this from "narrow it" to
+"the covering strategy has to change first". In order:
 
-1. **Fix the backing rectangle first.** `converter.py:831-849` should sample
-   the pixels it is about to cover and fill with that colour instead of white,
-   or skip the rectangle where the background is not near-white. Until then any
-   scan with a tint panel is delivered damaged. This is app code, so it is
-   outside this spike's scope and needs its own change.
-2. **Refuse formula-dense and tiled pages rather than OCR them.** Detect and
-   report, matching how `report.image_only_pages` is already surfaced at
-   `translate_pdf.py:427-430`.
-3. **Keep the current refusal as the default** for everything not explicitly
+1. **Drive the backing rectangles off `image_only_pages`, not
+   `is_scanned_page`.** Correct on all sixteen pages tested, no false
+   positives, no new heuristic. This alone fixes the overprint on three of
+   tk.pdf's four pages, and it is a small change.
+2. **Replace the white rectangle before shipping anything.** Sampling a flat
+   colour rescues only 42 % of affected regions, so it is not the answer.
+   Erasing the recognised glyphs from the raster and drawing onto the cleaned
+   image is what the measurements support. This is the real cost of the
+   feature and it should be scoped before any UI work.
+3. **Refuse formula-dense pages rather than OCR them**, reporting why, the way
+   `report.image_only_pages` is already surfaced at `translate_pdf.py:427-430`.
+4. **Keep the current refusal as the default** for everything not explicitly
    opted in.
 
-And carry the tiled-scan defect (below) as a known blocker.
+Steps 1 and 3 are cheap. Step 2 is the feature's actual price, and until it is
+paid, an OCR mode delivers damaged pages on anything but plain white paper.
 
 ---
 
@@ -275,6 +281,92 @@ This also exposes the ceiling of the synthetic corpus, which produces exactly
 one image per page and can never surface this.
 
 ---
+
+## Session 2 — a real scan end to end, and whether the fixes work
+
+### The real scan fails both ways at once
+
+`tk.pdf` run through OCR → sidecar → unmodified pipeline. Four pages, and not
+one of them is delivered correctly.
+
+| Page | Backing rects | ink before → after | whited out | ink added | colour lost |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **none** | 0.059 → 0.069 | 0.000 | 0.010 | — |
+| 2 | painted | 0.074 → 0.026 | 0.060 | 0.012 | **74.7 %** |
+| 3 | **none** | 0.054 → 0.065 | 0.000 | 0.011 | — |
+| 4 | **none** | 0.030 → 0.032 | 0.000 | 0.002 | — |
+
+Pages 1, 3 and 4 remove *nothing* and add ink: the translation is printed
+straight over the original. Rendering confirms it — every line reads twice,
+the original with diacritics and the OCR'd version without, offset by a few
+points. Page 2, the only one the backing rectangles reached, loses three
+quarters of its colour instead.
+
+So the two defects are not alternatives. On a single ordinary scan, whichever
+branch a page takes, it is wrong.
+
+### Vietnamese diacritics do not survive the Chinese recogniser
+
+`tk.pdf` is a Vietnamese document, and `ch_PP-OCRv4_rec` strips the tone and
+vowel marks wholesale — `Người mua` comes back as `Ngudi mua`, `Nhập nội dung
+cần tìm` as `Nhap noi dung can tim` — at confidence 0.955–0.974. High
+confidence, wrong text.
+
+This matters less than it looks for the product, whose job is foreign →
+Vietnamese, so the source is rarely Vietnamese. It matters a lot for a
+re-translation or verification workflow, and it is one more reason the English
+recogniser has to be measured before any decision.
+
+*(That file is a personal purchase receipt containing account credentials. It
+is used here only for structural measurement — tiling, geometry, ink — and its
+content appears in no report or artifact.)*
+
+### Fix 1 — tile-aware detection: superseded by a simpler and better rule
+
+The proposal was to replace "one image covering half the page" with the same
+question asked of the tiles' union. Measured, it is not enough:
+
+| Document | `is_scanned_page` | union-coverage | image-only |
+| --- | --- | --- | --- |
+| tk-scan (tiled) | 1/4 | 2/4 | **4/4** |
+| conveyor raster | 6/6 | 6/6 | **6/6** |
+| born-digital control | 0/6 | 0/6 | **0/6** |
+
+Union coverage rescues only tk p1 (0.67); pages 3 and 4 cover 0.21 and 0.10 and
+stay missed, because those pages genuinely are sparse. No threshold on coverage
+separates "sparse scan" from "born-digital page with a figure".
+
+**The right discriminator is not geometry at all.** A page that has an image and
+yields no text is a page the OCR mode just recognised — the pipeline already
+computes exactly this as `image_only_pages` at `converter.py:437`. Driving the
+backing rectangles off that instead of `is_scanned_page` is correct on all
+sixteen pages tested, with no false positives, and needs no new heuristic.
+
+### Fix 2 — sampling the background: insufficient, and this is the blocker
+
+The proposal was for the backing rectangle to sample the colour it is about to
+cover rather than filling white. Measured over 637 recogniser line boxes:
+
+| | |
+| --- | --- |
+| Regions sitting on a non-white background | 269 / 637 = **42.2 %** |
+| Of those, flat enough for one solid fill | 113 / 269 = **42.0 %** |
+
+(Anti-aliased glyph edges bias this measurement pessimistically; the figures
+above already exclude the darker half of each region's surviving pixels to
+compensate. Without that correction the second row reads 28.3 %.)
+
+So a flat fill rescues well under half of the damaged regions. The rest sit on
+gradients, rules and picture content that no single colour reproduces.
+**Recommendation 1 from session 1 does not survive measurement.**
+
+What the numbers point to instead: do not paint over the page at all. Since the
+raster is in hand and the recogniser has already located every glyph, the
+tractable route is to erase the original text *from the image* once per page —
+inpainting the stroke pixels with the surrounding background, which the already
+bundled OpenCV can do — and then draw the translation onto that cleaned raster.
+That is a substantially bigger change than sampling a fill colour, and it is
+the honest price of OCR on anything but plain white paper.
 
 ## Open items
 

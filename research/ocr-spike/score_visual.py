@@ -59,10 +59,19 @@ def compare(before: np.ndarray, after: np.ndarray) -> dict:
     spread = before.max(axis=2).astype(int) - before.min(axis=2).astype(int)
     coloured_before = spread > SATURATION
 
+    inked_after = np.any(after < WHITE, axis=2)
+    bare_before = np.all(before >= WHITE, axis=2)
+
     total = float(rows * cols)
     return {
         "ink_before": round(float(inked_before.sum()) / total, 4),
+        "ink_after": round(float(inked_after.sum()) / total, 4),
         "whited_out": round(float((inked_before & bare_after).sum()) / total, 4),
+        # Ink laid onto bare paper. On a page the backing rectangles never
+        # covered, the translation is drawn straight over the original instead
+        # of replacing it, and this is where that shows up: ink is added while
+        # almost none is removed.
+        "ink_added": round(float((bare_before & inked_after).sum()) / total, 4),
         "colour_before": round(float(coloured_before.sum()) / total, 4),
         "colour_lost": round(float((coloured_before & bare_after).sum()) / total, 4),
     }
@@ -96,20 +105,24 @@ def main(argv: list[str] | None = None) -> int:
     for label, source, output in args.pair:
         rows += score(label, paths.work_path(source), paths.work_path(output))
 
-    print(f"{'label':<22} {'pg':>3} {'ink':>7} {'whited':>8} {'colour':>8} {'lost':>7} {'lost%':>7}")
+    header = f"{'label':<22} {'pg':>3} {'ink>':>7} {'ink<':>7} {'whited':>7} {'added':>7} {'lost%':>7}"
+    print(header)
     for row in rows:
         print(
             f"{row['label'][:22]:<22} {row['page']:>3} {row['ink_before']:>7.3f} "
-            f"{row['whited_out']:>8.3f} {row['colour_before']:>8.3f} "
-            f"{row['colour_lost']:>7.3f} {row['colour_lost_share']:>6.1%}"
+            f"{row['ink_after']:>7.3f} {row['whited_out']:>7.3f} "
+            f"{row['ink_added']:>7.3f} {row['colour_lost_share']:>6.1%}"
         )
 
     print()
     for label in dict.fromkeys(r["label"] for r in rows):
         group = [r for r in rows if r["label"] == label]
-        whited = sum(r["whited_out"] for r in group) / len(group)
-        lost = sum(r["colour_lost_share"] for r in group) / len(group)
-        print(f"  {label:<22} mean whited-out {whited:.3f}   mean colour lost {lost:.1%}")
+        mean = lambda key: sum(r[key] for r in group) / len(group)  # noqa: E731
+        print(
+            f"  {label:<22} whited-out {mean('whited_out'):.3f}   "
+            f"ink-added {mean('ink_added'):.3f}   "
+            f"colour lost {mean('colour_lost_share'):.1%}"
+        )
 
     out = paths.run_dir("visual") / "visual.json"
     out.write_text(json.dumps(rows, indent=2), encoding="utf-8")

@@ -11,6 +11,13 @@
    safe translations.
 5. `pdf2zh/pdfinterp.py` retains source graphics while replacing selected text.
 
+Each run returns a `TranslationReport`: the segments left in the source
+language, why each was left, the image-only pages, and how much text was
+translatable at all. Callers must report the reason rather than the count -
+a fit failure, a damaged formula marker, and a dead connection each need the
+user to do something different. The layout model's stride and class names
+come from the onnxruntime session, so nothing imports `onnx` directly.
+
 ## Preservation Invariants
 
 - Formula glyphs and rules retain source fonts and relative geometry. Ordinary
@@ -40,7 +47,13 @@
 - A paragraph takes its size from the first characters that draw ink, so an
   oversized bullet and its tab cannot set the size for a whole list item.
 - Scanned image-only pages are not OCRed. Source pixels under translated text
-  receive backing only where required by the scan path.
+  receive backing only where required by the scan path. A page carrying an
+  image that yields no translatable segment is reported as image-only, and a
+  document with no translatable segment at all is refused rather than
+  delivered as a translation of nothing. Note the two different questions:
+  `is_scanned_page` (one image over half the page) drives backing rectangles;
+  `page_has_image` (any image at all) drives the image-only report, because a
+  scanner routinely emits one page as dozens of small tiles.
 
 ## Large Documents
 

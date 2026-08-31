@@ -383,6 +383,18 @@ def cluster_table_words(
     return result
 
 
+def page_has_image(blocks: Iterable[Mapping[str, Any]]) -> bool:
+    """Return whether the page draws any raster image at all.
+
+    is_scanned_page asks whether one image covers half the page, which is the
+    right question for backing rectangles but the wrong one for deciding a page
+    held nothing to translate: scanners routinely emit a page as dozens of
+    tiles, none of them large on its own. A page with no text and no image is
+    simply blank, and saying so would be noise.
+    """
+    return any(block.get("type") == 1 for block in blocks)
+
+
 def is_scanned_page(blocks: Iterable[Mapping[str, Any]], page_area: float) -> bool:
     """Return whether a rendered image covers more than half of the page."""
     if page_area <= 0:

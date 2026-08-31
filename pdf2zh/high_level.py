@@ -8,6 +8,8 @@ import re
 import sys
 import tempfile
 from asyncio import CancelledError
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 from typing import Any, BinaryIO, Dict, List, Optional
@@ -32,8 +34,29 @@ from pdf2zh.rules import (
     formula_regions,
     is_scanned_page,
     matching_table_cells,
+    page_has_image,
     should_translate_table_cell,
 )
+
+@dataclass(frozen=True)
+class TranslationReport:
+    """What a run could not translate, and why.
+
+    The count on its own was ambiguous: a page of diagrams, a document that is
+    all scans, and a dropped connection all arrived as the same number, and the
+    caller had to guess. Each of those needs the user to do something
+    different, so the reasons travel with the count.
+    """
+
+    failures: list[str] = field(default_factory=list)
+    reasons: Counter = field(default_factory=Counter)
+    image_only_pages: set[int] = field(default_factory=set)
+    translatable_segments: int = 0
+    pages_processed: int = 0
+
+    def __len__(self) -> int:
+        return len(self.failures)
+
 
 NOTO_NAME = "noto"
 STYLE_FONT_NAMES = {
@@ -190,6 +213,7 @@ def translate_patch(
     layout = {}
     layout_bounds = {}
     scanned_pages = set()
+    pages_with_images = set()
     device = TranslateConverter(
         rsrcmgr,
         vfont,
@@ -235,6 +259,8 @@ def translate_patch(
             page_blocks = doc_zh[page.pageno].get_text("dict")["blocks"]
             if is_scanned_page(page_blocks, page_area):
                 scanned_pages.add(pageno)
+            if page_has_image(page_blocks):
+                pages_with_images.add(pageno)
             pix = doc_zh[page.pageno].get_pixmap()
             image = np.frombuffer(pix.samples, np.uint8).reshape(
                 pix.height, pix.width, 3
@@ -476,6 +502,8 @@ def translate_patch(
             layout[page.pageno] = box
             if pageno in scanned_pages:
                 device.scanned_pages.add(pageno)
+            if pageno in pages_with_images:
+                device.pages_with_images.add(pageno)
             page.page_xref = doc_zh.get_new_xref()
             doc_zh.update_object(page.page_xref, "<<>>")
             doc_zh.update_stream(page.page_xref, b"")
@@ -483,7 +511,13 @@ def translate_patch(
             interpreter.process_page(page)
 
     device.close()
-    return obj_patch, device.translation_failures
+    return obj_patch, TranslationReport(
+        failures=device.translation_failures,
+        reasons=device.failure_reasons,
+        image_only_pages=device.image_only_pages,
+        translatable_segments=device.translatable_segments,
+        pages_processed=total_pages,
+    )
 
 
 def translate_stream(
@@ -563,7 +597,7 @@ def translate_stream(
     fp = io.BytesIO()
 
     doc_zh.save(fp)
-    obj_patch, translation_failures = translate_patch(fp, **locals())
+    obj_patch, report = translate_patch(fp, **locals())
 
     for obj_id, ops_new in obj_patch.items():
         # ops_old=doc_en.xref_stream(obj_id)
@@ -594,7 +628,7 @@ def translate_stream(
     return (
         mono,
         dual,
-        translation_failures,
+        report,
     )
 
 
@@ -722,23 +756,27 @@ def translate(
             temporary_path.unlink(missing_ok=True)
 
         try:
-            s_mono, _s_dual, translation_failures = translate_stream(
+            s_mono, _s_dual, report = translate_stream(
                 s_raw,
                 create_dual=False,
                 **locals(),
             )
-            if translation_failures:
+            if report.failures:
                 logger.warning(
                     "%d of the segments in %s could not be translated and were left "
-                    "in the source language",
-                    len(translation_failures),
+                    "in the source language (%s)",
+                    len(report.failures),
                     source_path,
+                    ", ".join(
+                        f"{reason} x{count}"
+                        for reason, count in report.reasons.most_common()
+                    ),
                 )
             file_mono = Path(output) / f"{filename}-mono.pdf"
             doc_mono = open(file_mono, "wb")
             doc_mono.write(s_mono)
             doc_mono.close()
-            result_files.append((str(file_mono), len(translation_failures)))
+            result_files.append((str(file_mono), report))
         except Exception as error:
             raise PDFValueError(f"Failed to translate {source_path}") from error
 

@@ -96,5 +96,22 @@ class ReportTextTests(unittest.TestCase):
         self.assertNotIn("Log", report_text(failure, Path("a.pdf"), "0.2.2"))
 
 
+class ScannedDocumentTests(unittest.TestCase):
+    def test_the_ocr_refusal_reaches_the_scan_advice(self):
+        """E-PDF-03 was written for this case but nothing ever raised it, so a
+        scan was reported to the user as a finished translation."""
+        failure = describe_failure(
+            raised(
+                RuntimeError(
+                    "No text could be extracted from tk.pdf: the selected pages are "
+                    "image-only scans. This tool does not perform OCR, so run OCR on "
+                    "the PDF first and translate the result."
+                )
+            )
+        )
+        self.assertEqual(failure.code, "E-PDF-03")
+        self.assertIn("scan", failure.summary.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

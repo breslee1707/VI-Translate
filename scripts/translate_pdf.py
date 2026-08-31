@@ -11,9 +11,13 @@ import shutil
 import sys
 import tempfile
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import NamedTuple
+from types import MappingProxyType
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from pdf2zh.high_level import TranslationReport
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 BUNDLED_CORE = (SKILL_ROOT / "pdf2zh").resolve()
@@ -53,6 +57,52 @@ class Translation(NamedTuple):
 
     path: Path | None
     untranslated: int = 0
+    reasons: Mapping[str, int] = MappingProxyType({})
+    image_only_pages: tuple[int, ...] = ()
+
+
+# record_translation_failure passes up either an exception class name or one of
+# the converter's fit rules. Reporting them as one sentence sent users to check
+# a network that was never the problem, so they are separated here.
+_FIT_MARKERS = ("font size", "cannot fit")
+_FORMULA_REASON = "FormulaPlaceholderError"
+
+
+def _count_of_segments(count: int) -> str:
+    return f"{count} segment" if count == 1 else f"{count} segments"
+
+
+def _describe_failures(reasons: Mapping[str, int]) -> list[str]:
+    """Turn raw skip reasons into lines that say what the user can do."""
+    def is_fit(reason: str) -> bool:
+        return any(marker in reason for marker in _FIT_MARKERS)
+
+    fit = sum(count for reason, count in reasons.items() if is_fit(reason))
+    formula = reasons.get(_FORMULA_REASON, 0)
+    engine = {
+        reason: count
+        for reason, count in reasons.items()
+        if reason != _FORMULA_REASON and not is_fit(reason)
+    }
+
+    lines: list[str] = []
+    if fit:
+        lines.append(
+            f"{_count_of_segments(fit)} stayed in the source language because the "
+            "translation did not fit the original line at the smallest allowed size"
+        )
+    if formula:
+        lines.append(
+            f"{_count_of_segments(formula)} stayed in the source language because the "
+            "translation came back with damaged formula markers"
+        )
+    if engine:
+        names = ", ".join(f"{name} x{count}" for name, count in sorted(engine.items()))
+        lines.append(
+            f"{_count_of_segments(sum(engine.values()))} stayed in the source language "
+            f"because the translation engine failed ({names})"
+        )
+    return lines
 
 
 def _positive_threads(value: str) -> int:
@@ -272,8 +322,8 @@ def _run_engine(
     engine: str,
     envs: dict[str, str],
     on_progress: Callable[[int, int], None] | None = None,
-) -> int:
-    """Run the core and return how many segments were left untranslated."""
+) -> "TranslationReport":
+    """Run the core and return what it could not translate, and why."""
     from pdf2zh.high_level import translate
 
     # A packaged build ships the layout model so the first run needs no network.
@@ -300,7 +350,7 @@ def _run_engine(
     )
     if len(result) != 1:
         raise TranslationError("PDF core did not report one translated result")
-    return int(result[0][1] or 0)
+    return result[0][1]
 
 
 def translate_pdf(
@@ -338,7 +388,7 @@ def translate_pdf(
     with tempfile.TemporaryDirectory(prefix="pdf-translate-", dir=destination_dir) as temp:
         temp_output = Path(temp)
         try:
-            untranslated = _run_engine(
+            report = _run_engine(
                 source,
                 temp_output,
                 target_language,
@@ -355,8 +405,22 @@ def translate_pdf(
         except Exception as error:
             raise TranslationError(f"PDF translation core failed: {_describe(error)}") from error
 
+        # Nothing was translatable, so the engine produced a copy of the source
+        # with no translated text in it. Handing that over as a finished
+        # translation is the one outcome the preservation rules forbid outright:
+        # say what the document actually needs instead. The message carries the
+        # words app/errors.py matches for E-PDF-03.
+        if report.translatable_segments == 0:
+            raise TranslationError(
+                f"No text could be extracted from {source.name}: the selected pages are "
+                "image-only scans. This tool does not perform OCR, so run OCR on the "
+                "PDF first and translate the result."
+            )
+
+        untranslated = len(report.failures)
+        image_only = tuple(sorted(report.image_only_pages))
         if destination is None:
-            return Translation(None, untranslated)
+            return Translation(None, untranslated, report.reasons, image_only)
 
         generated = temp_output / f"{source.stem}-mono.pdf"
         if not generated.is_file():
@@ -373,7 +437,7 @@ def translate_pdf(
         finally:
             staged.unlink(missing_ok=True)
 
-    return Translation(destination, untranslated)
+    return Translation(destination, untranslated, report.reasons, image_only)
 
 
 def _use_utf8_output() -> None:
@@ -410,12 +474,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if result.path is not None:
         print(f"Translated PDF: {result.path}")
-    if result.untranslated:
+    if result.image_only_pages:
+        numbers = ", ".join(str(page + 1) for page in result.image_only_pages)
         print(
-            f"warning: {result.untranslated} segments stayed in the source language "
-            "because the translation service could not be reached",
+            f"warning: page {numbers} is an image-only scan and was left untranslated; "
+            "this tool has no OCR"
+            if len(result.image_only_pages) == 1
+            else f"warning: pages {numbers} are image-only scans and were left "
+            "untranslated; this tool has no OCR",
             file=sys.stderr,
         )
+    for line in _describe_failures(result.reasons):
+        print(f"warning: {line}", file=sys.stderr)
     if args.emit_segments is not None:
         emitted = args.emit_segments.expanduser().resolve()
         pending = sum(1 for line in emitted.open(encoding="utf-8") if line.strip())

@@ -19,6 +19,7 @@ Use this as a cause map, not a substitute for inspecting the failing PDF.
 | A paragraph prints over the one below it | Only its own box was the budget, and prose had no ink guard | `available_height_below` plus the prose fit loop; `test_inline_formula_layout.py` |
 | A whole bullet list stays in English and sprawls over its neighbours | The bullet's tab set the paragraph size, so the body looked like a subscript and was preserved as a formula | `size_should_follow_body`; `test_inline_formula_layout.py` |
 | A structurally damaged PDF fails while pikepdf opens it fine | Repair was gated on pikepdf rather than on the engine's own round trip | `pymupdf_can_round_trip`; `test_large_document_finalization.py` |
+| The packaged macOS Intel app dies before the first page | cryptography 49.0.0 dropped the macOS universal2 wheel, so Intel compiles it against Homebrew's OpenSSL while PyInstaller bundles Python's older `libssl.3.dylib` (`Symbol not found: _SSL_get0_group_name`) | Intel-only pin in `requirements.txt`; `verify_engine()` in the packaged `--smoke-test` |
 | A user cannot read or report the error they were shown | The detail label starved the filename column and clipped; no code, no log pointer | `app/errors.py` codes and the row detail dialog; `test_app_errors.py` |
 
 When adding a new guard, reproduce the smallest failing geometry in a unit test

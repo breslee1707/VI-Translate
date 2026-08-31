@@ -2,7 +2,8 @@
 
 ## Structure
 
-- `app/`: CustomTkinter GUI, update checks, UI fonts, icons, bundled assets.
+- `app/`: CustomTkinter GUI, the self-updater, UI fonts, icons, bundled assets.
+  `app/update.py` also carries the PowerShell helper that performs the swap.
 - `scripts/translate_pdf.py`: supported CLI and stable output staging.
 - `scripts/fetch_assets.py`: downloads the layout model and Unicode PDF font.
 - `pdf2zh/`: bundled extraction, translation, preservation, and PDF rendering.

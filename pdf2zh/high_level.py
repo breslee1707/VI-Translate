@@ -59,8 +59,16 @@ def is_large_document(page_count: int, source_size: int = 0) -> bool:
 def should_subset_fonts(
     page_count: int, skip_subset_fonts: bool, source_size: int = 0
 ) -> bool:
-    """Avoid the blocking whole-document font scan on large PDFs."""
-    return not skip_subset_fonts and not is_large_document(page_count, source_size)
+    """Never subset: the converter writes raw glyph IDs into Identity-H fonts.
+
+    `raw_string()` emits `font.has_glyph(ord(c))` as the CID, so any pass that
+    renumbers glyphs repoints every translated character at a different
+    outline. It cost Vietnamese every stacked-diacritic letter ("Viet Nam"
+    where "Viet" needed U+1EC7) on documents small enough to fall under the old
+    page/size threshold. The parameters are kept so the call site still reads
+    as a decision rather than a silent omission.
+    """
+    return False
 
 
 def pdf_write_options(page_count: int, source_size: int = 0) -> dict[str, int | bool]:
@@ -118,6 +126,30 @@ noto_list = [
     "ur",  # Urdu
     "uk",  # Ukrainian
 ]
+
+
+def pymupdf_can_round_trip(path: Path) -> bool:
+    """Report whether the engine can both read and rewrite this document.
+
+    pikepdf tolerates structural damage that MuPDF later refuses on write, so
+    probing with pikepdf let a malformed 517-page book reach `translate_stream`
+    and die there with "invalid key in dict". The engine's own round trip is
+    the only probe that predicts the failure it is meant to prevent, and it
+    costs under a second even on a 48 MB book.
+    """
+    document = None
+    try:
+        document = Document(str(path))
+        document.save(io.BytesIO())
+    except Exception:
+        return False
+    finally:
+        if document is not None:
+            try:
+                document.close()
+            except Exception:
+                pass  # a document that failed to save also fails to close
+    return True
 
 
 def check_files(files: List[str]) -> List[str]:
@@ -545,12 +577,10 @@ def translate_stream(
         for id in range(page_count):
             doc_en.move_page(page_count + id, id * 2 + 1)
 
-    # PyMuPDF's whole-document font scan is disproportionately expensive for
-    # textbooks and holds the GIL while it runs.  The output fonts are already
-    # embedded and valid without subsetting, so favour a responsive, reliable
-    # export for large documents over shaving a few megabytes from the result.
-    subset_fonts = should_subset_fonts(page_count, skip_subset_fonts, source_size)
-    if subset_fonts:
+    # Off for every document; see should_subset_fonts. It was also the
+    # expensive half of finalizing a textbook, so dropping it costs nothing but
+    # the size of the four embedded output faces.
+    if should_subset_fonts(page_count, skip_subset_fonts, source_size):
         doc_zh.subset_fonts(fallback=True)
         if create_dual:
             doc_en.subset_fonts(fallback=True)
@@ -658,9 +688,7 @@ def translate(
         processing_path = source_path
         temporary_paths: list[Path] = []
 
-        try:
-            pikepdf.open(source_path).close()
-        except Exception:
+        if not pymupdf_can_round_trip(source_path):
             logger.warning(
                 "PDF structure issue detected in %s; translating a repaired temporary copy",
                 source_path,
@@ -674,6 +702,13 @@ def translate(
                 temporary_paths.append(fixed_path)
             except Exception as error:
                 raise PDFValueError(f"Could not repair PDF structure: {source_path}") from error
+            if not pymupdf_can_round_trip(processing_path):
+                # Say so here rather than letting the same MuPDF syntax error
+                # resurface from deep inside the conversion, where it reads as
+                # an engine bug instead of an unreadable source document.
+                raise PDFValueError(
+                    f"PDF structure is damaged beyond repair: {source_path}"
+                )
 
         if compatible:
             with tempfile.NamedTemporaryFile(suffix="-pdfa.pdf", delete=False) as temporary:

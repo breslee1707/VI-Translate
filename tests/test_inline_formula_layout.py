@@ -15,6 +15,7 @@ from pdf2zh.converter import (
     IDENTITY_ORIENTATION,
     OpType,
     TextStyle,
+    available_height_below,
     line_offsets,
     matrix_font_size,
     normalised_text_matrix,
@@ -22,6 +23,7 @@ from pdf2zh.converter import (
     paragraph_width_budget,
     preferred_translation,
     should_translate_rotated_text,
+    size_should_follow_body,
     styled_text_matrix,
     styled_character_text,
     text_fits_box_at_minimum_size,
@@ -186,6 +188,98 @@ class LineOffsetTests(unittest.TestCase):
         self.assertEqual(
             vertical_shift_to_bounds(20.0, ink, [0.0], 10.0, 22.0),
             -2.0,
+        )
+
+
+class AvailableHeightTests(unittest.TestCase):
+    """A translated paragraph is often a line or two longer than its source.
+
+    Charging that to the source box alone made paragraphs shrink even with white
+    space under them, and - once shrinking hit its floor - draw over the
+    paragraph below instead. Boxes are (x0, y0, x1, y1) with y increasing upward.
+    """
+
+    PARAGRAPH = (50.0, 700.0, 500.0, 740.0)  # 40pt tall, near the top of a page
+
+    def test_a_clear_page_below_lends_its_whole_gap(self):
+        self.assertAlmostEqual(
+            available_height_below(self.PARAGRAPH, [], floor=100.0), 640.0
+        )
+
+    def test_a_paragraph_directly_below_lends_only_the_real_gap(self):
+        below = (50.0, 600.0, 500.0, 680.0)  # its top is 20pt under our bottom
+        self.assertAlmostEqual(
+            available_height_below(self.PARAGRAPH, [below], floor=0.0), 60.0
+        )
+
+    def test_a_touching_paragraph_lends_nothing(self):
+        below = (50.0, 600.0, 500.0, 700.0)  # top exactly at our bottom edge
+        self.assertAlmostEqual(
+            available_height_below(self.PARAGRAPH, [below], floor=0.0), 40.0
+        )
+
+    def test_a_neighbour_in_another_column_is_not_an_obstacle(self):
+        beside = (520.0, 400.0, 560.0, 690.0)
+        self.assertAlmostEqual(
+            available_height_below(self.PARAGRAPH, [beside], floor=0.0), 740.0
+        )
+
+    def test_the_paragraph_itself_is_never_its_own_obstacle(self):
+        self.assertAlmostEqual(
+            available_height_below(self.PARAGRAPH, [self.PARAGRAPH], floor=0.0), 740.0
+        )
+
+    def test_the_nearest_of_several_obstacles_wins(self):
+        far = (50.0, 200.0, 500.0, 300.0)
+        near = (50.0, 600.0, 500.0, 680.0)
+        self.assertAlmostEqual(
+            available_height_below(self.PARAGRAPH, [far, near], floor=0.0), 60.0
+        )
+
+    def test_a_paragraph_never_gets_less_than_its_own_box(self):
+        overlapping = (50.0, 600.0, 500.0, 760.0)
+        self.assertGreaterEqual(
+            available_height_below(self.PARAGRAPH, [overlapping], floor=0.0), 40.0
+        )
+
+
+class ParagraphSizeTests(unittest.TestCase):
+    """A textbook list item is a 14pt bullet, a tab in the bullet's font, then
+    8.75pt body text. Taking the size from that tab typeset the whole item at
+    14pt; worse, the body then looked like a subscript against it, so the item
+    was preserved as a formula, never translated, and drawn over its
+    neighbours."""
+
+    BULLET = 14.0
+    BODY = 8.75
+
+    def test_the_first_real_letter_after_a_bullet_sets_the_size(self):
+        self.assertTrue(
+            size_should_follow_body(self.BULLET, self.BODY, visible_length=0, character="T")
+        )
+
+    def test_a_tab_or_space_never_sets_the_size(self):
+        for character in (" ",):
+            with self.subTest(character=character):
+                self.assertFalse(
+                    size_should_follow_body(
+                        self.BODY, self.BULLET, visible_length=0, character=character
+                    )
+                )
+
+    def test_the_second_letter_may_still_correct_the_first(self):
+        self.assertTrue(
+            size_should_follow_body(self.BULLET, self.BODY, visible_length=1, character="h")
+        )
+
+    def test_body_text_no_longer_moves_the_size_once_the_paragraph_has_started(self):
+        self.assertFalse(
+            size_should_follow_body(self.BODY, self.BODY, visible_length=9, character="e")
+        )
+
+    def test_a_larger_glyph_mid_paragraph_still_raises_the_size(self):
+        self.assertTrue(
+            size_should_follow_body(self.BODY, 20.0, visible_length=40, character="Q")
         )
 
 

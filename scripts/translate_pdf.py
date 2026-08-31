@@ -133,6 +133,11 @@ def _require_core() -> None:
     try:
         import pdf2zh
         importlib.import_module("pdf2zh.doclayout")
+        # high_level pulls in the native stack - pikepdf/qpdf, PyMuPDF, onnx.
+        # Without it a broken install slipped past this check and surfaced as a
+        # raw ImportError from the engine, once per file in the queue, instead
+        # of one actionable message before any work started.
+        importlib.import_module("pdf2zh.high_level")
     except ImportError as error:
         requirements = SKILL_ROOT / "requirements.txt"
         install = f'"{sys.executable}" -m pip install -r "{requirements}"'
@@ -233,6 +238,16 @@ def _layout_model(bundled_path: str | None) -> object:
         return _LAYOUT_MODEL[bundled_path]
 
 
+def load_layout_model() -> object:
+    """Build the inference session, raising if the native stack is unusable.
+
+    The packaged smoke test calls this: onnxruntime and its model are the
+    heaviest thing a frozen build has to load, and a bundle that cannot do it
+    is broken for every document, not just the first.
+    """
+    return _layout_model(os.environ.get("PDF_TRANSLATE_MODEL"))
+
+
 def preload_layout_model() -> None:
     """Build the inference session ahead of the first translation.
 
@@ -241,7 +256,7 @@ def preload_layout_model() -> None:
     it used to pay anyway.
     """
     try:
-        _layout_model(os.environ.get("PDF_TRANSLATE_MODEL"))
+        load_layout_model()
     except Exception:  # noqa: BLE001 - a warm-up failure must stay invisible
         pass
 

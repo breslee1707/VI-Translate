@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <sub>Việt hóa bởi <a href="https://www.tiktok.com/@huyg.ai">Lê Ngọc Gia Huy · huyg.ai</a></sub>
+  <sub>Xây dựng và duy trì bởi <a href="https://www.tiktok.com/@huyg.ai">Lê Ngọc Gia Huy · huyg.ai</a></sub>
 </p>
 
 <p align="center">
@@ -35,6 +35,7 @@
   <a href="#điểm-nổi-bật">Điểm nổi bật</a> ·
   <a href="#bắt-đầu-trong-1-phút">Cài đặt</a> ·
   <a href="#cách-sử-dụng">Cách dùng</a> ·
+  <a href="#được-phát-triển-ở-đây">Phát triển</a> ·
   <a href="#dùng-như-agent-skill">Agent Skill</a> ·
   <a href="#giới-hạn-hiện-tại">Giới hạn</a>
 </p>
@@ -43,6 +44,8 @@
 
 PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows và macOS. Công cụ phân tích bố cục từng trang, bảo vệ công thức và code, dịch phần văn xuôi rồi đặt nội dung trở lại đúng vị trí trong tài liệu gốc — không biến PDF của bạn thành một trang chữ trắng đơn giản.
 
+Đây không phải bản dịch giao diện của một công cụ có sẵn. Dự án mượn ý tưởng và phần nhân đọc/ghi PDF từ hai dự án mã nguồn mở, rồi tự xây phần quyết định chất lượng đầu ra: ứng dụng desktop, bộ quy tắc bảo toàn bố cục, lớp xử lý tiếng Việt và hàng loạt bản sửa lỗi ngay trong nhân. Chi tiết ở mục [Được phát triển ở đây](#được-phát-triển-ở-đây).
+
 ## Điểm nổi bật
 
 - **Giữ nguyên bố cục:** bảo toàn vị trí của đoạn văn, công thức, bảng, hình, mục lục và tài liệu tham khảo.
@@ -50,7 +53,7 @@ PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows và ma
 - **Xử lý hàng loạt:** kéo thả nhiều file PDF hoặc cả thư mục vào ứng dụng.
 - **36 ngôn ngữ đích:** mặc định là tiếng Việt, cùng nhiều ngôn ngữ sử dụng chữ Latin.
 - **Không dừng cả hàng đợi:** một file lỗi không làm gián đoạn các file còn lại.
-- **Tự báo bản mới:** khi mở ứng dụng, nếu có phiên bản mới trên GitHub thì góc trên bên phải hiện một dòng bấm được để mở trang tải.
+- **Tự cập nhật (Windows):** có bản mới thì ứng dụng tự tải ngầm, bạn chỉ cần bấm một lần để khởi động lại. Trên macOS vẫn là dòng nhắc mở trang tải.
 - **Có chế độ dành cho AI agent:** dùng model trong Codex, Claude Code hoặc Copilot để dịch tài liệu chuyên ngành tốt hơn.
 
 ## Bắt đầu trong 1 phút
@@ -78,7 +81,11 @@ PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows và ma
 
 Bạn cũng có thể mở [trang Releases](https://github.com/breslee1707/VI-Translate/releases/latest) để xem ghi chú thay đổi và các tệp của phiên bản mới nhất.
 
-Ứng dụng cũng tự kiểm tra phiên bản mới mỗi lần mở. Có bản mới thì góc trên bên phải hiện dòng **● Có bản mới vX.Y.Z**, bấm vào là mở trang tải. Ứng dụng không tự tải và không tự cài đè — bạn vẫn tự giải nén như lần đầu. Máy không có mạng thì bỏ qua, không báo lỗi.
+Ứng dụng cũng tự kiểm tra phiên bản mới mỗi lần mở. Máy không có mạng thì bỏ qua, không báo lỗi.
+
+Trên **Windows**, bản mới được tải ngầm ngay trong lúc bạn vẫn dịch bình thường; góc trên bên phải hiện **↓ Đang tải vX.Y.Z**, tải xong đổi thành **● Cài vX.Y.Z & khởi động lại**. Bấm vào đó, ứng dụng đóng lại, thay thư mục cài đặt rồi tự mở lại — khoảng mười giây, không phải giải nén gì. Đang dịch dở thì nút chờ đến khi xong. Tải xong mà bạn tắt ứng dụng luôn cũng không mất: lần mở sau vẫn là nút khởi động lại, không tải lại từ đầu. Nếu bước thay thư mục hỏng giữa chừng, bản cũ được đưa lại nguyên vẹn và bạn tải thủ công như trước.
+
+Trên **macOS**, và khi ứng dụng nằm ở thư mục không có quyền ghi, dòng đó vẫn là **● Có bản mới vX.Y.Z** và bấm vào sẽ mở trang tải.
 
 ## Cách sử dụng
 
@@ -108,6 +115,48 @@ TaiLieu/
 ```
 
 Mặc định, ứng dụng không ghi đè kết quả đã có. Bật **Ghi đè file đã dịch trước đó** khi bạn muốn dịch lại.
+
+## Được phát triển ở đây
+
+Phần kế thừa từ dự án gốc là nhân đọc, phân tích bố cục và render PDF. Mọi thứ
+quyết định việc một trang tiếng Việt in ra có đọc được hay không đều được viết
+cho dự án này:
+
+**Ứng dụng desktop — 1.620 dòng trong [`app/`](app/)**
+Giao diện, kéo thả, hàng đợi nhiều file không dừng vì một file lỗi, mã lỗi đọc
+được kèm log để người dùng báo lỗi được, cơ chế tự cập nhật tự thay thư mục cài
+đặt rồi mở lại app, đóng gói PyInstaller cho Windows và cả hai kiến trúc macOS,
+workflow phát hành tự động. Không một dòng nào trong thư mục này đến từ dự án
+gốc.
+
+**Bộ quy tắc bảo toàn — [`pdf2zh/rules.py`](pdf2zh/rules.py) (519 dòng) và [contract sản phẩm](references/preservation-rules.md)**
+Đây là thứ phân biệt dự án với một công cụ dịch PDF thông thường: nhận diện vùng
+công thức và ký hiệu kỹ thuật để không dịch nhầm thành văn xuôi, giữ in đậm và
+in nghiêng qua vòng dịch, dựng lại chữ xoay 90 độ đúng chiều thay vì bẻ ngang,
+giữ bullet Wingdings/Symbol mà font Unicode không có glyph, tính chiều cao dòng
+tối thiểu cho chữ tiếng Việt nhiều dấu chồng.
+
+**Những lỗi tự tìm và tự sửa trong nhân**
+Mỗi lỗi dưới đây được phát hiện từ tài liệu thật, truy ra nguyên nhân trong nhân
+và sửa tại đây:
+
+- Tiếng Việt mất sạch chữ có dấu chồng — *"Việt"* in ra thành *"Vi t"* — vì
+  `subset_fonts` đánh số lại glyph trong khi content stream gọi theo ID gốc.
+- Sách dài dừng ngay trước trang cuối vì tài liệu bị nhân đôi rồi nén lại toàn bộ
+  ở bước kết thúc.
+- Cả trang lộn ngược vì ma trận chữ phản chiếu `1 0 0 -1` bị hiểu nhầm là xoay.
+- Đoạn văn in đè lên đoạn bên dưới vì ngân sách chiều cao chỉ tính hộp của chính nó.
+
+Bảng nguyên nhân đầy đủ: [agent-knowledge/regressions.md](agent-knowledge/regressions.md).
+
+**162 test hồi quy — 1.825 dòng trong [`tests/`](tests/)**
+Mỗi lỗi đã sửa đều bị khoá lại bằng một test dựng đúng hình học nhỏ nhất gây ra nó,
+nên bản sửa không âm thầm mất đi ở lần thay đổi sau.
+
+**Chế độ Handoff và Agent Skill**
+Một engine dịch thứ hai đưa các đoạn văn sang JSONL cho AI agent dịch theo ngữ
+cảnh chuyên ngành rồi dựng lại PDF, cùng chuẩn `SKILL.md` để gọi trực tiếp trong
+Codex, Claude Code hay Copilot.
 
 ## Ngôn ngữ hỗ trợ
 
@@ -215,9 +264,9 @@ Nên kiểm tra lại tài liệu đầu ra trước khi dùng cho xuất bản 
 
 PDF Translate được phát hành theo giấy phép [AGPL-3.0](LICENSE). Nếu phát hành lại ứng dụng hoặc cung cấp nó như một dịch vụ qua mạng, bạn phải kèm theo mã nguồn tương ứng theo điều khoản của giấy phép.
 
-Dự án được phát triển từ [PDFMathTranslate](https://github.com/Byaidu/PDFMathTranslate) 1.9.11 và [BabelDOC](https://github.com/funstory-ai/BabelDOC). Xem [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) để biết đầy đủ thông tin ghi công.
+Thư mục [`pdf2zh/`](pdf2zh/) là bản fork của nhân xử lý PDF từ [PDFMathTranslate](https://github.com/Byaidu/PDFMathTranslate) 1.9.11, dùng model bố cục và font đã ghim của [BabelDOC](https://github.com/funstory-ai/BabelDOC). Hai dự án đó cho công việc này một điểm khởi đầu và được ghi công đầy đủ tại [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Bản Việt hóa và phần đóng gói ứng dụng desktop được thực hiện và duy trì bởi **Lê Ngọc Gia Huy** ([@huyg.ai trên TikTok](https://www.tiktok.com/@huyg.ai)).
+Ứng dụng desktop, bộ quy tắc bảo toàn, các bản sửa lỗi trong nhân, bộ test hồi quy, chế độ Handoff và toàn bộ phần đóng gói — mọi thứ liệt kê ở [Được phát triển ở đây](#được-phát-triển-ở-đây) — do **Lê Ngọc Gia Huy** ([@huyg.ai trên TikTok](https://www.tiktok.com/@huyg.ai)) phát triển và duy trì.
 
 ---
 
@@ -226,5 +275,5 @@ Bản Việt hóa và phần đóng gói ứng dụng desktop được thực hi
 </p>
 
 <p align="center">
-  <sub>Việt hóa &amp; duy trì bởi <a href="https://www.tiktok.com/@huyg.ai">Lê Ngọc Gia Huy (huyg.ai)</a></sub>
+  <sub>Xây dựng &amp; duy trì bởi <a href="https://www.tiktok.com/@huyg.ai">Lê Ngọc Gia Huy (huyg.ai)</a></sub>
 </p>

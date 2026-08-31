@@ -3,7 +3,7 @@ import logging
 import math
 import re
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from enum import Enum, IntEnum
 from string import Template
 from typing import Dict
@@ -17,7 +17,12 @@ from pdfminer.utils import apply_matrix_pt, mult_matrix
 from pymupdf import Font
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from pdf2zh.rules import is_bullet_character, is_formula_font, line_height_for_language
+from pdf2zh.rules import (
+    is_bullet_character,
+    is_formula_font,
+    line_height_for_language,
+    min_line_height_for_language,
+)
 from pdf2zh.translator import (
     ENGINES,
     BaseTranslator,
@@ -148,6 +153,24 @@ def styled_character_text(characters: list[LTChar]) -> str:
     return "".join(parts)
 
 
+def size_should_follow_body(
+    paragraph_size: float, character_size: float, visible_length: int, character: str
+) -> bool:
+    """Whether a paragraph should take its font size from this character.
+
+    A list item opens with an oversized bullet and a tab set in the bullet's
+    font, so the paragraph inherited 14pt for 8.75pt body text. Counting that
+    tab made the old rule believe the paragraph had already started, and
+    against 14pt the body then satisfied the subscript test: whole list items
+    were preserved as formulas, left untranslated, and redrawn at the bullet's
+    size straight over their neighbours. Only characters that draw ink count as
+    the paragraph having started.
+    """
+    if character == " ":
+        return False
+    return character_size > paragraph_size or visible_length <= 1
+
+
 def preferred_translation(text: str, language: str) -> str | None:
     """Return stable Vietnamese terminology for the three rotated table headers."""
     if language.lower() != "vi":
@@ -259,6 +282,9 @@ class Paragraph:
         self.rotated_chars: list[LTChar] = []
         self.open_style = TextStyle.REGULAR
         self.text_length = 0
+        # Characters that actually draw ink. Spacing inserted between source
+        # glyphs must not count, or it hides how much text a paragraph holds.
+        self.visible_length = 0
         self.anchor: tuple[float, float] = (x, y)
 
 
@@ -451,6 +477,9 @@ class TranslateConverter(PDFConverterEx):
                 paragraph.open_style = style
             sstk[index] += text
             paragraph.text_length += len(text)
+            paragraph.visible_length += sum(
+                1 for character in text if not character.isspace()
+            )
 
         def append_formula(index: int, identifier: int) -> None:
             close_style(index)
@@ -567,10 +596,12 @@ class TranslateConverter(PDFConverterEx):
                         pstk[-1].rotated_chars.append(child)
                         pstk[-1].text_length += len(child.get_text())
                     else:
-                        if (
-                            child.size > pstk[-1].size
-                            or pstk[-1].text_length == 1
-                        ) and child.get_text() != " ":
+                        if size_should_follow_body(
+                            pstk[-1].size,
+                            child.size,
+                            pstk[-1].visible_length,
+                            child.get_text(),
+                        ):
                             pstk[-1].y -= child.size - pstk[-1].size
                             pstk[-1].size = child.size
                         append_styled(
@@ -917,6 +948,34 @@ class TranslateConverter(PDFConverterEx):
             flush()
             return operations
 
+        # What sits below a paragraph decides how far it may grow. Table cells
+        # are excluded: a cell owns exactly its cell and must never lean into
+        # the row beneath it.
+        obstacles = [
+            (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1)
+            for paragraph in pstk
+        ]
+        obstacles.extend(
+            (
+                min(character.x0 for character in characters),
+                min(character.y0 for character in characters),
+                max(character.x1 for character in characters),
+                max(character.y1 for character in characters),
+            )
+            for characters in var
+            if characters
+        )
+        fit_budgets = [
+            paragraph.y1 - paragraph.y0
+            if paragraph.layout_bound is not None
+            else available_height_below(
+                (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1),
+                obstacles,
+            )
+            for paragraph in pstk
+        ]
+        minimum_line_height = min_line_height_for_language(self.translator.lang_out)
+
         for id, new in enumerate(news):
             x: float = pstk[id].x
             y: float = pstk[id].y
@@ -950,56 +1009,66 @@ class TranslateConverter(PDFConverterEx):
                     )
                     new = sstk[id]
 
-            # Auto-scale translated text to the footprint of the source. This is
-            # also required for a single-line title: without it a longer target
-            # string ignores x1 completely and runs into the neighbouring column.
-            if new != sstk[id]:
-                # Count how many lines the original text occupied
-                orig_lines = (
-                    max(1, round(height / (pstk[id].size * default_line_height)))
-                    if brk
-                    else 1
-                )
-                total_avail = paragraph_width_budget(x, x0, x1, orig_lines)
-                # Measure actual width of translated text (excluding formula tags)
-                total_new_width = 0
-                tmp_ptr = 0
-                plain_new = new
-                measure_style = TextStyle.REGULAR
-                while tmp_ptr < len(plain_new):
-                    style_tag = STYLE_TAG_PATTERN.match(plain_new, tmp_ptr)
-                    if style_tag:
-                        closing, identifier = style_tag.groups()
-                        measure_style = (
-                            TextStyle.REGULAR
-                            if closing
-                            else TextStyle(int(identifier))
-                        )
-                        tmp_ptr = style_tag.end()
-                        continue
-                    vm = re.match(r"\{\s*v([\d\s]+)\}", plain_new[tmp_ptr:], re.IGNORECASE)
-                    if vm:
-                        try:
-                            vid_tmp = int(vm.group(1).replace(" ", ""))
-                            total_new_width += vlen[vid_tmp]
-                        except Exception:
-                            pass
-                        tmp_ptr += len(vm.group(0))
-                    else:
-                        ch = plain_new[tmp_ptr]
-                        total_new_width += output_font(
-                            ch, int(measure_style), pstk[id].size
-                        )[1]
-                        tmp_ptr += 1
-                if total_avail > 0 and total_new_width > total_avail * 1.05:
-                    ratio = total_avail / total_new_width
-                    if not brk and ratio < 0.5:
-                        self.record_translation_failure(
-                            sstk[id], "single line needs less than 50% font size"
-                        )
-                        new = sstk[id]
-                    else:
-                        size = pstk[id].size * max(ratio, 0.5)
+            # Auto-scale text to the footprint of the source. This is also
+            # required for a single-line title: without it a longer target
+            # string ignores x1 completely and runs into the neighbouring
+            # column.
+            #
+            # A paragraph left in the source language is measured too. It is
+            # still re-drawn in the output font, which is wider than many
+            # source faces, so skipping the fit let untranslated English grow
+            # an extra line and print straight over the paragraph below it -
+            # in a textbook whose paragraph boxes are stacked half a point
+            # apart, there is nowhere else for that line to go.
+            # Count how many lines the original text occupied
+            orig_lines = (
+                max(1, round(height / (pstk[id].size * default_line_height)))
+                if brk
+                else 1
+            )
+            total_avail = paragraph_width_budget(x, x0, x1, orig_lines)
+            # Measure actual width of translated text (excluding formula tags)
+            total_new_width = 0
+            tmp_ptr = 0
+            plain_new = new
+            measure_style = TextStyle.REGULAR
+            while tmp_ptr < len(plain_new):
+                style_tag = STYLE_TAG_PATTERN.match(plain_new, tmp_ptr)
+                if style_tag:
+                    closing, identifier = style_tag.groups()
+                    measure_style = (
+                        TextStyle.REGULAR
+                        if closing
+                        else TextStyle(int(identifier))
+                    )
+                    tmp_ptr = style_tag.end()
+                    continue
+                vm = re.match(r"\{\s*v([\d\s]+)\}", plain_new[tmp_ptr:], re.IGNORECASE)
+                if vm:
+                    try:
+                        vid_tmp = int(vm.group(1).replace(" ", ""))
+                        total_new_width += vlen[vid_tmp]
+                    except Exception:
+                        pass
+                    tmp_ptr += len(vm.group(0))
+                else:
+                    ch = plain_new[tmp_ptr]
+                    total_new_width += output_font(
+                        ch, int(measure_style), pstk[id].size
+                    )[1]
+                    tmp_ptr += 1
+            if total_avail > 0 and total_new_width > total_avail * 1.05:
+                ratio = total_avail / total_new_width
+                if not brk and ratio < 0.5 and new != sstk[id]:
+                    # Only a translation can fall back; source text has
+                    # nowhere to fall back to, and reporting it as an
+                    # untranslated segment twice would overstate the loss.
+                    self.record_translation_failure(
+                        sstk[id], "single line needs less than 50% font size"
+                    )
+                    new = sstk[id]
+                else:
+                    size = pstk[id].size * max(ratio, 0.5)
 
             # Pre-compute word-boundary line breaks to avoid mid-word splits
             if brk:
@@ -1230,16 +1299,24 @@ class TranslateConverter(PDFConverterEx):
                 })
 
             line_height = default_line_height
+            fit_height = fit_budgets[id]
 
             # Fit the prose to the box on its own. Charging the formula's extra
             # room to this loop drops the leading for every line in the
             # paragraph, until they collide with each other instead.
-            while (lidx + 1) * size * line_height > height and line_height >= 0.8:
-                line_height -= 0.05
+            #
+            # The floor is the measured ink of the target script, not a round
+            # number: Vietnamese stacked tone marks need 1.10 em, so the old
+            # 0.75 floor bought room by drawing lines through each other.
+            while (
+                (lidx + 1) * size * line_height > fit_height
+                and line_height > minimum_line_height
+            ):
+                line_height = max(minimum_line_height, line_height - 0.05)
 
             # If still overflowing after reducing line_height, shrink font to fit
-            if lidx > 0 and (lidx + 1) * size * line_height > height:
-                shrink = height / ((lidx + 1) * size * line_height)
+            if lidx > 0 and (lidx + 1) * size * line_height > fit_height:
+                shrink = fit_height / ((lidx + 1) * size * line_height)
                 shrink = max(shrink, 0.5)  # Don't go below 50%
                 size *= shrink
                 for vals in ops_vals:
@@ -1251,11 +1328,13 @@ class TranslateConverter(PDFConverterEx):
             # cells used smaller glyphs but still crossed the row below.
             ink = operation_ink(ops_vals)
 
-            if pstk[id].layout_bound is not None and ink:
+            if ink:
                 # Preserved codes and formula placeholders can be larger than
                 # the surrounding translated prose.  The prose-only line count
                 # above cannot see that, so fit the union of the actual glyph
-                # extents to the cell as a final guard.
+                # extents to the available room as a final guard.  The formula
+                # slack stays tied to the paragraph's own box; only the
+                # collision test may use the room borrowed from below.
                 for _attempt in range(3):
                     preview_offsets = line_offsets(
                         ink,
@@ -1265,7 +1344,7 @@ class TranslateConverter(PDFConverterEx):
                         budget=height - (lidx + 1) * size * line_height,
                     )
                     occupied = vertical_ink_extent(ink, preview_offsets)
-                    available_height = max(0.0, height - 1.0)
+                    available_height = max(0.0, fit_height - 1.0)
                     if occupied <= available_height + 0.01 or occupied <= 0:
                         break
                     minimum_size = pstk[id].size * 0.5
@@ -1279,9 +1358,9 @@ class TranslateConverter(PDFConverterEx):
                             vals["size"] *= scale
                     ink = operation_ink(ops_vals)
 
-            # ponytail: the paragraph's own box is the whole budget, so a
-            # formula in an already tight paragraph stays somewhat cramped.
-            # Measuring the gap down to the next paragraph would buy the rest.
+            # Formula slack stays charged to the paragraph's own box, so a
+            # formula in an already tight paragraph is still somewhat cramped.
+            # The room borrowed from below is only spent on not colliding.
             offsets = line_offsets(ink, lidx, size, line_height,
                                    budget=height - (lidx + 1) * size * line_height)
 
@@ -1316,6 +1395,32 @@ class TranslateConverter(PDFConverterEx):
 
         ops = f"{white_rects}BT {''.join(ops_list)}ET "
         return ops
+
+
+def available_height_below(
+    bounds: tuple[float, float, float, float],
+    obstacles: Iterable[tuple[float, float, float, float]],
+    floor: float = 0.0,
+) -> float:
+    """Return the height a paragraph may fill before it reaches what is below.
+
+    A translation is often a line or two longer than its source, and charging
+    that to the source box alone made paragraphs shrink even with white space
+    underneath them - or, once shrinking hit its floor, draw straight over the
+    next paragraph. Only what actually sits below and shares this paragraph's
+    column counts; a neighbour in another column is not an obstacle.
+    """
+    x0, y0, x1, y1 = bounds
+    width = x1 - x0
+    limit = floor
+    for ox0, _oy0, ox1, oy1 in obstacles:
+        if oy1 > y0 + 0.5:
+            continue  # beside or above this paragraph, so it cannot be hit
+        overlap = min(x1, ox1) - max(x0, ox0)
+        if width > 0 and overlap <= 0.1 * width:
+            continue  # a hairline touch is a different column, not a collision
+        limit = max(limit, oy1)
+    return max(y1 - limit, y1 - y0)
 
 
 def line_offsets(

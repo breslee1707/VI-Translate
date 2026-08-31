@@ -16,6 +16,7 @@ from pdf2zh.rules import (
     is_scanned_page,
     line_height_for_language,
     matching_table_cells,
+    min_line_height_for_language,
     should_translate_table_cell,
 )
 
@@ -123,6 +124,20 @@ class PreservationRuleTests(unittest.TestCase):
     def test_vietnamese_line_height_and_extended_bullets_are_preserved(self):
         self.assertEqual(line_height_for_language("vi"), 1.2)
         self.assertTrue({"•", "■", "▸", "◆", "⬤"}.issubset(BULLET_CHARACTERS))
+
+    def test_vietnamese_leading_never_goes_below_its_measured_ink(self):
+        """Rendering every letter of the output font gives 0.890 em above the
+        baseline for stacked tone marks and 0.210 em below for dot-below vowels,
+        so lines closer than 1.10 em are drawn through each other. The leading
+        used to be compressed to 0.75 to buy room for a longer translation."""
+        self.assertGreaterEqual(min_line_height_for_language("vi"), 1.10)
+
+    def test_every_target_can_be_typeset_without_lines_touching(self):
+        for language in ("vi", "en", "fr", "de", "unknown-code"):
+            with self.subTest(language=language):
+                minimum = min_line_height_for_language(language)
+                self.assertGreaterEqual(minimum, 0.9)
+                self.assertLessEqual(minimum, line_height_for_language(language))
 
     def test_office_private_use_bullets_keep_their_dingbat_font(self):
         for character, font in (

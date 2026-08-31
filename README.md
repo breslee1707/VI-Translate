@@ -77,6 +77,9 @@ PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows và ma
 > Windows SmartScreen có thể cảnh báo vì ứng dụng chưa được ký số. Chọn **More info** → **Run anyway** nếu bạn tải file từ trang Releases chính thức của repo này.
 
 > [!WARNING]
+> Nếu máy bạn bật **Smart App Control** (mặc định trên các máy Windows 11 cài mới), ứng dụng sẽ bị **chặn hẳn** với thông báo *"An Application Control policy has blocked this file"* — không có nút Run anyway. Kiểm tra tại **Windows Security → App & browser control → Smart App Control**. Đây là hệ quả của việc ứng dụng chưa có chữ ký số, không phải lỗi của ứng dụng. Microsoft chỉ cho bật lại Smart App Control bằng cách cài lại Windows, nên hãy cân nhắc kỹ trước khi tắt nó; giải pháp đúng là ký số ứng dụng, và việc đó đang được xử lý.
+
+> [!WARNING]
 > Bản macOS hiện dùng chữ ký ad-hoc, chưa được Apple notarize. Gatekeeper có thể chặn thao tác mở thông thường; hãy dùng cách bấm chuột phải → **Open** ở trên nếu bạn tải từ trang Releases chính thức.
 
 Bạn cũng có thể mở [trang Releases](https://github.com/breslee1707/VI-Translate/releases/latest) để xem ghi chú thay đổi và các tệp của phiên bản mới nhất.

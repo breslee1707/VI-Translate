@@ -1,15 +1,7 @@
-babeldoc==0.2.33
+babeldoc==0.6.3
 fonttools==4.63.0
 numpy==2.2.6
 pdfminer-six==20250416
-# pdfminer pulls cryptography in and imports it while opening any document, so
-# a broken build cannot even reach the first page. cryptography 49.0.0 dropped
-# the macOS universal2 wheel: an Intel build then compiles it against Homebrew's
-# OpenSSL while PyInstaller bundles Python's older libssl.3.dylib, and the
-# packaged app dies on "Symbol not found: _SSL_get0_group_name". 48.0.1 is the
-# last release whose wheel still covers Intel. Other platforms resolve it
-# transitively, as before.
-cryptography==48.0.1; sys_platform == "darwin" and platform_machine == "x86_64"
 pikepdf==10.12.0
 pymupdf==1.25.2
 requests==2.34.2
@@ -19,7 +11,7 @@ tqdm==4.70.0
 # Imported directly by the bundled core but previously reached only through
 # babeldoc, so nothing pinned them. Not the headless opencv build: babeldoc
 # requires the full package, and installing both just shadows one with the other.
-onnx==1.17.0
+onnx==1.21.0
 onnxruntime==1.20.1
 opencv-python==5.0.0.93
 peewee==3.17.9

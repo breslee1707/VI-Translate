@@ -30,11 +30,21 @@ These classifications preserve the complete page layout instead of reflowing num
 
 ## Vietnamese typesetting
 
-- Vietnamese text uses a `1.2` line-height multiplier.
+- Vietnamese text uses a `1.2` line-height multiplier and is never typeset
+  tighter than `1.10`. That floor is the measured ink of the output font:
+  stacked tone marks reach `0.890` em above the baseline and dot-below vowels
+  `0.210` em beneath it, against `0.695`/`0.210` for English. Below it, lines
+  are drawn through each other.
 - Windows uses Times New Roman when available; other environments use the downloaded Unicode font fallback.
-- Long translations scale down before rendering, wrap at word boundaries, reduce line height when necessary, and shrink again only when the paragraph still exceeds its original box.
+- Long translations scale down before rendering, wrap at word boundaries,
+  reduce line height to the language floor, then take up any clear vertical gap
+  below the paragraph, and only shrink the font again when it still does not
+  fit. Text left in the source language is fitted the same way, because it is
+  redrawn in the output font rather than replayed from the source.
 - Width fitting deducts first-line indentation from the available line budget so justified or indented translations cannot cross the source right edge.
-- Extended bullets remain anchored, and vertically separated list items start new paragraphs.
+- Extended bullets remain anchored, and vertically separated list items start
+  new paragraphs. A list item takes its font size from its own body text: the
+  oversized bullet and the tab set in the bullet's font do not decide it.
 - Symbol and Wingdings private-use bullets stay in their original embedded dingbat font instead of being emitted as missing glyphs by the macOS or Windows prose font.
 - Quarter-turn text keeps its source orientation. Rotated table headings are translated and fitted along their logical baseline instead of wrapping one glyph per line.
 - Reflected text matrices paired with negative font sizes are normalized from their baseline direction; this prevents technically mirrored but visually upright source text from being replayed upside down.
@@ -44,9 +54,16 @@ These classifications preserve the complete page layout instead of reflowing num
 
 - A rendered image covering more than half the page marks the page as scanned; translated text regions receive white backing rectangles so source pixels do not show through.
 - The core does not perform OCR. A scan without an extractable text layer remains untranslated.
-- Structural PDF repair uses a temporary copy. The source file is never overwritten.
+- Structural PDF repair uses a temporary copy. The source file is never
+  overwritten. Repair is triggered by the engine failing to rewrite the
+  document, not by a second library's willingness to open it, and a document
+  that still cannot be rewritten afterwards is reported rather than translated.
 - The translated PDF retains the source page canvas and page count; a requested page subset limits translation rather than removing pages.
-- The app emits only the mono translation. Documents of 200 pages or 50 MB and larger skip whole-document font subsetting and use light PDF serialization to avoid a long, UI-blocking finalization pass.
+- The app emits only the mono translation. Output fonts are never subset: the
+  content stream addresses glyphs by raw ID, so any pass that renumbers them
+  repoints every translated character. Documents of 200 pages or 50 MB and
+  larger also use light PDF serialization to avoid a long, UI-blocking
+  finalization pass.
 
 ## Known limits
 

@@ -30,16 +30,31 @@
 - Text fitting accounts for first-line indentation, final glyph ink, formula
   offsets, and cell borders. The minimum translated size is 50% of source;
   unsafe overflow falls back to source text and records a partial result.
+- Leading is never compressed below `min_line_height_for_language`, measured
+  from real glyph ink (`vi` = 1.10 em). A paragraph short of room reduces
+  leading to that floor, then borrows the clear gap below it
+  (`available_height_below`), and only then shrinks the font.
+- Output fonts are never subset. `raw_string` writes glyph IDs into Identity-H
+  fonts, so renumbering them silently repoints every translated character.
+  A glyph-stable alternative would be a fontTools subset with `retain_gids`.
+- A paragraph takes its size from the first characters that draw ink, so an
+  oversized bullet and its tab cannot set the size for a whole list item.
 - Scanned image-only pages are not OCRed. Source pixels under translated text
   receive backing only where required by the scan path.
 
 ## Large Documents
 
 The app requests mono output only; do not construct the unused interleaved
-dual-language document. A PDF is large at 200 pages or 50 MiB. Large PDFs skip
-whole-document font subsetting and use light serialization
-(`garbage=1`, no recompression/object streams) because aggressive cleanup can
-hold the GIL for tens of seconds after page progress reaches 100%.
+dual-language document. A PDF is large at 200 pages or 50 MiB. Large PDFs use
+light serialization (`garbage=1`, no recompression/object streams) because
+aggressive cleanup can hold the GIL for tens of seconds after page progress
+reaches 100%. Font subsetting is off for every size, not just large documents.
+
+## Damaged Sources
+
+`pymupdf_can_round_trip` decides whether a document needs repair, because
+pikepdf opens damage that MuPDF only refuses on write. The repaired copy is
+re-checked; a document that still fails is reported, never silently translated.
 
 The product-level authority is
 [`references/preservation-rules.md`](../references/preservation-rules.md).

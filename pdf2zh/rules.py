@@ -49,6 +49,12 @@ LANGUAGE_LINE_HEIGHT = {
     "vi": 1.2,
 }
 
+# Measured ink extents, not preferences: see min_line_height_for_language.
+DEFAULT_MIN_LINE_HEIGHT = 0.95
+LANGUAGE_MIN_LINE_HEIGHT = {
+    "vi": 1.10,
+}
+
 
 @dataclass(frozen=True)
 class PreservationDecision:
@@ -90,6 +96,24 @@ def is_bullet_character(text: str, font_name: str | bytes = "") -> bool:
 def line_height_for_language(language: str) -> float:
     """Return the translation line-height multiplier for a target language."""
     return LANGUAGE_LINE_HEIGHT.get(language.lower(), 1.1)
+
+
+def min_line_height_for_language(language: str) -> float:
+    """Return the tightest leading that still keeps two lines from touching.
+
+    A paragraph that grew in translation used to buy room by crushing its
+    leading to 0.75, which is below the ink of the glyphs being drawn. Measured
+    by rendering every letter in the output font and reading the real ink
+    extent, in em above and below the baseline:
+
+        English lowercase   0.695 up + 0.210 down = 0.905
+        Vietnamese          0.890 up + 0.210 down = 1.100
+
+    Stacked tone marks (e-circumflex-acute, o-horn-grave) reach far higher than
+    a plain ascender, so Vietnamese needs more room than English rather than
+    less. Below these values the lines overlap no matter what else is right.
+    """
+    return LANGUAGE_MIN_LINE_HEIGHT.get(language.lower(), DEFAULT_MIN_LINE_HEIGHT)
 
 
 def _rect(value: Sequence[Any]) -> tuple[float, float, float, float] | None:

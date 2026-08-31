@@ -14,6 +14,12 @@ Use this as a cause map, not a substitute for inspecting the failing PDF.
 | Last table line crosses a row | Font shrank after ink was measured, or preserved code remained larger than prose | Recompute final ink, fit union, then shift inside cell bounds |
 | Bullets vanish on Mac or Windows | Office encoded Wingdings/Symbol bullets as PUA characters absent from Go Noto and Times New Roman | `is_bullet_character()` preserves the embedded dingbat glyph; preservation tests |
 | Translation service corrupts style/formula tags | Tags are translated, dropped, duplicated, or cross-nested | Reject segment, keep source, report partial; handoff translator tests |
+| Vietnamese loses every stacked-diacritic letter ("Việt" renders as "Vi t") | `subset_fonts(fallback=True)` renumbered glyphs while the content stream addresses them by raw ID; only bit documents under the 200-page/50 MiB threshold | `should_subset_fonts` returns False; `test_large_document_finalization.py` |
+| Lines of one paragraph print through each other | Leading was compressed to 0.75 against Vietnamese ink needing 1.10 em | `min_line_height_for_language`; `test_preservation_rules.py` |
+| A paragraph prints over the one below it | Only its own box was the budget, and prose had no ink guard | `available_height_below` plus the prose fit loop; `test_inline_formula_layout.py` |
+| A whole bullet list stays in English and sprawls over its neighbours | The bullet's tab set the paragraph size, so the body looked like a subscript and was preserved as a formula | `size_should_follow_body`; `test_inline_formula_layout.py` |
+| A structurally damaged PDF fails while pikepdf opens it fine | Repair was gated on pikepdf rather than on the engine's own round trip | `pymupdf_can_round_trip`; `test_large_document_finalization.py` |
+| A user cannot read or report the error they were shown | The detail label starved the filename column and clipped; no code, no log pointer | `app/errors.py` codes and the row detail dialog; `test_app_errors.py` |
 
 When adding a new guard, reproduce the smallest failing geometry in a unit test
 and validate the real document visually. Do not encode a filename-specific fix.

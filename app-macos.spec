@@ -40,6 +40,10 @@ hiddenimports = [
     "pdf2zh.high_level",
     "pdf2zh.converter",
     "pdf2zh.translator",
+    # Reached only through pdf2zh.high_level; naming them keeps the compiled
+    # extension and its vendored qpdf in the bundle even if that trail changes.
+    "pikepdf",
+    "pikepdf._core",
 ]
 
 analysis = Analysis(
@@ -50,7 +54,7 @@ analysis = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(ROOT / "app" / "runtime_hook_dlls.py")],
     excludes=[
         "matplotlib",
         "PyQt5",

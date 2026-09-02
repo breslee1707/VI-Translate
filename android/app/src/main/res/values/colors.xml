@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The mark is drawn on white in every other place it appears, and the
+         page in the logo is a pale blue that needs a light ground to read. -->
+    <color name="ic_launcher_background">#FFFFFF</color>
+
+    <!-- Must track LightBackground in Color.kt: this is what the window shows
+         between the activity starting and Compose drawing its first frame. -->
+    <color name="window_background">#F6F8FA</color>
+</resources>

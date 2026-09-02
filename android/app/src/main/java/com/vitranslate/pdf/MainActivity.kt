@@ -189,7 +189,7 @@ fun MainScreen(
             }
         )
 
-        DropZoneView(
+        FilePickerView(
             hasFiles = queueItems.isNotEmpty(),
             onPickFiles = onPickFiles,
             onPickDirectory = onPickDirectory

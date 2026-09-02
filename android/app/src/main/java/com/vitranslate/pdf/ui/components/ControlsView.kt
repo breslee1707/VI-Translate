@@ -4,10 +4,13 @@ import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,122 +53,104 @@ fun ControlsView(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 12.dp),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        )
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "Dịch sang",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(6.dp))
+
+            // The language picker used to share a row with the action button,
+            // which left it about half the screen wide on a phone. Full width
+            // here, with the action below it.
+            ExposedDropdownMenuBox(
+                expanded = expanded,
+                onExpandedChange = { if (!isTranslating) expanded = !expanded }
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Dịch sang",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.padding(bottom = 6.dp)
-                    )
-
-                    ExposedDropdownMenuBox(
-                        expanded = expanded,
-                        onExpandedChange = { if (!isTranslating) expanded = !expanded }
-                    ) {
-                        OutlinedTextField(
-                            value = selectedLanguage.name,
-                            onValueChange = {},
-                            readOnly = true,
-                            enabled = !isTranslating,
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                            modifier = Modifier
-                                .menuAnchor()
-                                .fillMaxWidth(0.9f),
-                            shape = RoundedCornerShape(8.dp)
-                        )
-
-                        ExposedDropdownMenu(
-                            expanded = expanded,
-                            onDismissRequest = { expanded = false }
-                        ) {
-                            TargetLanguage.SUPPORTED_LANGUAGES.forEach { language ->
-                                DropdownMenuItem(
-                                    text = { Text(language.name) },
-                                    onClick = {
-                                        onLanguageSelected(language)
-                                        expanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // A long run is the normal case, so the same button has to be
-                // the way out of it; a disabled "Đang dịch…" left no way to stop.
-                Button(
-                    onClick = { if (isTranslating) onCancelTranslation() else onStartTranslation() },
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isTranslating) {
-                            MaterialTheme.colorScheme.error
-                        } else {
-                            MaterialTheme.colorScheme.primary
-                        }
-                    ),
+                OutlinedTextField(
+                    value = selectedLanguage.name,
+                    onValueChange = {},
+                    readOnly = true,
+                    enabled = !isTranslating,
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium,
+                    trailingIcon = {
+                        ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
+                    },
                     modifier = Modifier
-                        .height(48.dp)
-                        .padding(start = 8.dp)
+                        .menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = !isTranslating)
+                        .fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                ExposedDropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false }
                 ) {
-                    Text(
-                        text = if (isTranslating) "Huỷ" else "Dịch",
-                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
-                    )
+                    TargetLanguage.SUPPORTED_LANGUAGES.forEach { language ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(language.name, style = MaterialTheme.typography.bodyMedium)
+                            },
+                            onClick = {
+                                onLanguageSelected(language)
+                                expanded = false
+                            }
+                        )
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(Modifier.height(12.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                Icon(
+                    imageVector = Icons.Default.FolderOpen,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(8.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Thư mục lưu file:",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        text = "Lưu vào",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
                         text = folderDisplayName,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-
-                OutlinedButton(
+                TextButton(
                     onClick = onPickSaveDirectory,
-                    enabled = !isTranslating,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.padding(start = 8.dp)
+                    enabled = !isTranslating
                 ) {
-                    Text("Chọn thư mục", style = MaterialTheme.typography.bodySmall)
+                    Text("Đổi", style = MaterialTheme.typography.labelLarge)
                 }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
-
+            // The whole row is the target rather than just the checkbox, and it
+            // is tall enough to hit without aiming.
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .clip(RoundedCornerShape(8.dp))
                     .clickable(enabled = !isTranslating) { onOverwriteChange(!overwrite) }
             ) {
                 Checkbox(
@@ -177,6 +162,30 @@ fun ControlsView(
                     text = "Ghi đè file đã dịch trước đó",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            Spacer(Modifier.height(4.dp))
+
+            // A long run is the normal case, so the same button has to be the
+            // way out of it; a disabled "Đang dịch…" left no way to stop.
+            Button(
+                onClick = { if (isTranslating) onCancelTranslation() else onStartTranslation() },
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isTranslating) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    }
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp)
+            ) {
+                Text(
+                    text = if (isTranslating) "Huỷ dịch" else "Bắt đầu dịch",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
                 )
             }
         }

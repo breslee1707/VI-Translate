@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
+import androidx.documentfile.provider.DocumentFile
 import java.io.File
 
 /**
@@ -25,6 +26,25 @@ fun translatedPdfExists(context: Context, pathOrUri: String?): Boolean {
         }
     } else {
         File(pathOrUri).exists()
+    }
+}
+
+/**
+ * A name a person can read. The footer used to print the raw output location,
+ * which for a folder chosen through the storage access framework is a
+ * `content://com.android.externalstorage.documents/tree/primary%3A...` string
+ * that wraps over three lines and says nothing.
+ */
+fun translatedPdfDisplayName(context: Context, pathOrUri: String): String {
+    if (!pathOrUri.startsWith("content://")) {
+        return File(pathOrUri).name
+    }
+    return try {
+        DocumentFile.fromSingleUri(context, Uri.parse(pathOrUri))?.name
+            ?: Uri.parse(pathOrUri).lastPathSegment?.substringAfterLast('/')
+            ?: pathOrUri
+    } catch (_: Exception) {
+        pathOrUri
     }
 }
 

@@ -414,4 +414,23 @@ class PdfLayoutPreserverTest {
         )
         assertEquals("The take-up range for load-dependent systems", joined)
     }
+
+    @Test
+    fun testStripTagsAndPlaceholders_survivesATagTheTranslatorPutASpaceIn() {
+        // Google returned "<b 9002>" for the "<b9002>" it was sent. The strict
+        // pattern did not match it, so a formula on page 3 of a delivered PDF
+        // read "muR.<b 9002" -- markup published as if it were content.
+        val drawn = PdfLayoutPreserver.stripTagsAndPlaceholders(
+            "F = mu R . g . <b 9002>(m + mB)</ b9002> and < s1 >bold</s1> {v 3}"
+        )
+        assertEquals("F = mu R . g . (m + mB) and bold ", drawn)
+    }
+
+    @Test
+    fun testStripTagsAndPlaceholders_stillRemovesTheOrdinaryForms() {
+        assertEquals(
+            "x + 1",
+            PdfLayoutPreserver.stripTagsAndPlaceholders("<b0>x</b0> + <s1>1</s1>{v2}")
+        )
+    }
 }

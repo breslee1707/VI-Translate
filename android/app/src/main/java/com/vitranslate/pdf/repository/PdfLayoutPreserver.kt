@@ -135,8 +135,8 @@ class PdfLayoutPreserver(private val context: Context) {
                                             translatedRemainder = FormulaPlaceholder.restoreFormulaPlaceholders(textToTranslate, translatedRaw)
                                         } catch (_: Exception) {
                                             translatedRemainder = FormulaPlaceholder.removeControlCharacters(translatedRaw)
-                                                .replace(Regex("</?b\\d+>"), "")
-                                                .replace(Regex("</?s[123]>"), "")
+                                                .replace(STRAY_FORMULA_TAG, "")
+                                                .replace(STRAY_STYLE_TAG, "")
                                         }
                                     }
 
@@ -346,12 +346,6 @@ class PdfLayoutPreserver(private val context: Context) {
         }
     }
 
-    private fun stripTagsAndPlaceholders(text: String): String {
-        return text
-            .replace(Regex("</?b\\d+>"), "")
-            .replace(Regex("</?s[123]>"), "")
-            .replace(Regex("\\{\\s*v\\d+\\s*\\}"), "")
-    }
 
     /**
      * Groups raw text fragments into horizontal lines and runs, retaining superscript
@@ -457,6 +451,16 @@ class PdfLayoutPreserver(private val context: Context) {
         /** Floor for the drawn length of a rotated run, in points. */
         private const val MIN_ROTATED_LENGTH = 8f
 
+        // Written to match a tag a translation service has handled, not
+        // only the tag as it was sent: a space appears inside one often
+        // enough that a strict pattern leaves markup in the finished PDF.
+        private val STRAY_FORMULA_TAG =
+            Regex("<\\s*/?\\s*b\\s*\\d+\\s*>", RegexOption.IGNORE_CASE)
+        private val STRAY_STYLE_TAG =
+            Regex("<\\s*/?\\s*s\\s*[123]\\s*>", RegexOption.IGNORE_CASE)
+        private val STRAY_CONVERTER_MARKER =
+            Regex("\\{\\s*v\\s*\\d+\\s*\\}", RegexOption.IGNORE_CASE)
+
         /**
          * Lines a paragraph may run on past the ones its source used, when the
          * space below it is free. A cap rather than the whole gap, so a
@@ -557,6 +561,21 @@ class PdfLayoutPreserver(private val context: Context) {
             }
 
             return false
+        }
+
+        /**
+         * Remove every protective marker before the text is drawn.
+         *
+         * The patterns tolerate whitespace inside a tag because a translator
+         * will put it there. Google returned "<b 9002>" for "<b9002>", the
+         * exact-match pattern did not recognise it, and a formula on page 3 was
+         * published reading "µR.<b 9002" -- markup in a delivered document.
+         */
+        fun stripTagsAndPlaceholders(text: String): String {
+            return text
+                .replace(STRAY_FORMULA_TAG, "")
+                .replace(STRAY_STYLE_TAG, "")
+                .replace(STRAY_CONVERTER_MARKER, "")
         }
 
         /** What a column was set to, and whether it is prose at all. */
@@ -685,7 +704,16 @@ class PdfLayoutPreserver(private val context: Context) {
                 }
                 // Wrap to the measure the source set, but never past the point
                 // where the next column starts.
-                val collisionLimit = current.minOf { limitOf(it) }
+                //
+                // The widest of the per-line limits, not the narrowest. A line's
+                // limit is floored at its own right edge -- that is what stops a
+                // single block being squeezed narrower than the source drew it --
+                // so the short last line of a paragraph reports a limit of only
+                // its own few words. Taking the minimum handed a three-line
+                // paragraph whose last line was "range:" a measure of 24 points,
+                // and it came out as one word per line running down the page
+                // over everything beneath it.
+                val collisionLimit = current.maxOf { limitOf(it) }
                 val measured = current.minOf { it.x } +
                     (columns[current.first()]?.measure ?: (collisionLimit - current.first().x))
                 paragraphs.add(Paragraph(current, minOf(collisionLimit, measured)))

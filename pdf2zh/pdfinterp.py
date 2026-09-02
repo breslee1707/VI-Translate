@@ -29,6 +29,7 @@ from pdfminer.pdftypes import (
 from pdfminer.psexceptions import PSEOF
 from pdfminer.psparser import (
     PSKeyword,
+    PSLiteral,
     keyword_name,
     literal_name,
 )
@@ -42,12 +43,93 @@ from pdfminer.utils import (
 
 log = logging.getLogger(__name__)
 
+# Colour operators worth replaying in front of translated text, grouped by the
+# piece of state each one sets. `g`, `rg`, `k`, `sc` and `scn` all write the
+# same non-stroking colour, so only the last of them is in force; replaying one
+# of each kind lets a stale `0 g` from earlier in the stream paint over the
+# `rg` that is actually current. `cs` selects a space and resets its colour,
+# and `sc`/`scn` name components within whatever space is selected, so the two
+# travel together.
+#
+# An ExtGState (`gs`) sets no colour of its own but decides how one composites:
+# a brochure whose text is a CMYK black prints pure black only because its
+# state turns overprint on. It is replayed only when it cannot hide the text -
+# see extgstate_is_safe.
+COLOUR_SLOTS = {
+    "gs": "ext_state",
+    "ri": "intent",
+    "cs": "fill_space",
+    "CS": "stroke_space",
+    "g": "fill_colour",
+    "rg": "fill_colour",
+    "k": "fill_colour",
+    "sc": "fill_colour",
+    "scn": "fill_colour",
+    "G": "stroke_colour",
+    "RG": "stroke_colour",
+    "K": "stroke_colour",
+    "SC": "stroke_colour",
+    "SCN": "stroke_colour",
+}
+# These name their own space, so any space selected earlier no longer applies.
+SELF_CONTAINED_COLOUR_OPERATORS = frozenset({"g", "rg", "k", "G", "RG", "K"})
+# A space is replayed before the colour that names components within it.
+COLOUR_SLOT_ORDER = (
+    "ext_state",
+    "intent",
+    "fill_space",
+    "fill_colour",
+    "stroke_space",
+    "stroke_colour",
+)
 
-def safe_float(o: Any) -> Optional[float]:
-    try:
-        return float(o)
-    except (TypeError, ValueError):
-        return None
+# `sc` and `scn` name components inside whichever space is current, so they say
+# nothing on their own. Replayed without one, a four-component CMYK black is
+# read as the single component of DeviceGray - and DeviceGray 1 is white, which
+# is how a chemistry textbook's blue headings turned into blank paper. When the
+# space in force is a device space the operand count identifies it exactly;
+# when it cannot be identified the colour is dropped rather than guessed, and
+# the run falls back to plain black.
+DEVICE_SPACE_BY_COMPONENTS = {
+    1: "/DeviceGray",
+    3: "/DeviceRGB",
+    4: "/DeviceCMYK",
+}
+COMPONENT_COLOUR_OPERATORS = frozenset({"sc", "scn", "SC", "SCN"})
+
+
+# An ExtGState carrying any of these can make the text invisible or invert it,
+# which is never what replaying a colour is meant to do.
+CONCEALING_EXTGSTATE_KEYS = ("SMask", "TR", "TR2")
+HARMLESS_EXTGSTATE_VALUES = ("None", "Identity", "Default")
+
+
+def extgstate_is_safe(state: Dict[Any, Any]) -> bool:
+    """Whether replaying this graphics state can only affect how colour mixes.
+
+    Overprint and blend mode belong to the text and have to travel with it.
+    A soft mask, a transfer function or partial alpha do not: replaying one in
+    front of the translation could leave the page blank, and a page that reads
+    as empty is worse than one whose black is a shade off.
+    """
+    for key in CONCEALING_EXTGSTATE_KEYS:
+        value = resolve1(state.get(key))
+        if value is None:
+            continue
+        if (
+            isinstance(value, PSLiteral)
+            and literal_name(value) in HARMLESS_EXTGSTATE_VALUES
+        ):
+            continue
+        return False
+    for key in ("ca", "CA"):
+        value = resolve1(state.get(key, 1))
+        try:
+            if float(value) < 1:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 class PDFPageInterpreterEx(PDFPageInterpreter):
@@ -65,6 +147,61 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
 
     def dup(self) -> "PDFPageInterpreterEx":
         return self.__class__(self.rsrcmgr, self.device, self.obj_patch)
+
+    def record_graphic(self, name: str, args: Sequence[object]) -> None:
+        """Hand one colour operator to the device, verbatim.
+
+        Replaying the operator text is the only way to carry a colour across
+        faithfully: a `scn` in an ICCBased or Separation space means nothing
+        without the `cs` that selected it, and reducing everything to RGB would
+        guess at the conversion the document never asked for. BabelDOC carries
+        colour the same way.
+        """
+        slot = COLOUR_SLOTS.get(name)
+        if slot is None:
+            return
+        if name == "gs" and not self.named_extgstate_is_safe(args):
+            return
+        if name in COMPONENT_COLOUR_OPERATORS and not self.device.knows_colour_space(
+            slot.replace("_colour", "_space")
+        ):
+            space = DEVICE_SPACE_BY_COMPONENTS.get(len(args))
+            if space is None or any(isinstance(value, PSLiteral) for value in args):
+                # A pattern, or a component count no device space explains.
+                # Emitting it against the wrong space would be worse than
+                # drawing the run in the colour a page starts in.
+                self.device.forget_colour(slot)
+                return
+            self.device.record_graphic_operator(
+                slot.replace("_colour", "_space"),
+                f"{space} {'cs' if slot.startswith('fill') else 'CS'}",
+                False,
+            )
+        text = " ".join(
+            f"{value:f}" if isinstance(value, float) else str(value).replace("'", "")
+            for value in args
+        )
+        self.device.record_graphic_operator(
+            slot, f"{text} {name}".strip(), name in SELF_CONTAINED_COLOUR_OPERATORS
+        )
+
+    def named_extgstate_is_safe(self, args: Sequence[object]) -> bool:
+        try:
+            states = dict_value(self.resources.get("ExtGState"))
+            state = dict_value(states[literal_name(args[0])])
+        except Exception:
+            return False
+        return extgstate_is_safe(state)
+
+    def do_q(self) -> None:
+        """Save graphics state"""
+        super().do_q()
+        self.device.push_graphic_state()
+
+    def do_Q(self) -> None:
+        """Restore graphics state"""
+        super().do_Q()
+        self.device.pop_graphic_state()
 
     def init_resources(self, resources: Dict[object, object]) -> None:
         """Prepare the fonts and XObjects listed in the Resource attribute."""
@@ -327,6 +464,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                         # log.debug("exec: %s %r", name, args)
                         if len(args) == nargs:
                             func(*args)
+                            self.record_graphic(name, args)
                             if not (
                                 name[0] == "T"
                                 or name in ['"', "'", "EI", "MP", "DP", "BMC", "BDC"]
@@ -347,6 +485,9 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                         targs = func()
                         if targs is None:
                             targs = []
+                        # `sc`/`scn` pop their own operands, so they arrive
+                        # here rather than in the branch above.
+                        self.record_graphic(name, targs)
                         if not (name[0] == "T" or name in ["BI", "ID", "EMC"]):
                             p = " ".join(
                                 [

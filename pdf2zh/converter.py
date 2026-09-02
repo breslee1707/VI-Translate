@@ -46,12 +46,20 @@ class TextStyle(IntEnum):
 
 
 def text_style_from_font(font_name: str | bytes) -> TextStyle:
-    """Infer PDF text emphasis from common PostScript font face names."""
+    """Infer PDF text emphasis from common PostScript font face names.
+
+    The Adobe Pro families abbreviate the slanted face, so `MinionPro-It` and
+    `MyriadPro-BoldIt` have to be read as italic even though they never spell
+    the word out. Only a trailing abbreviation counts, or ordinary words that
+    happen to end in those letters would be matched.
+    """
     if isinstance(font_name, bytes):
         font_name = font_name.decode("utf-8", errors="ignore")
     face = font_name.split("+")[-1]
     bold = re.search(r"bold|semibold|demi|black|heavy", face, re.IGNORECASE)
-    italic = re.search(r"italic|oblique|slanted", face, re.IGNORECASE)
+    italic = re.search(r"italic|oblique|slanted", face, re.IGNORECASE) or re.search(
+        r"(?:^|[^A-Za-z])(?:It|Ital)$|[a-z](?:It|Ital)$", face
+    )
     if bold and italic:
         return TextStyle.BOLD_ITALIC
     if bold:
@@ -59,6 +67,55 @@ def text_style_from_font(font_name: str | bytes) -> TextStyle:
     if italic:
         return TextStyle.ITALIC
     return TextStyle.REGULAR
+
+
+# PDF 32000-1 table 123: the font descriptor's own account of its face.
+FLAG_ITALIC = 1 << 6
+FLAG_FORCE_BOLD = 1 << 18
+
+
+def text_style_from_descriptor(descriptor: Dict | None) -> TextStyle | None:
+    """Read emphasis from the font descriptor, or None if it does not say.
+
+    The embedded font declares what it is, so this beats guessing from a name
+    that a producer is free to abbreviate or subset-prefix. BabelDOC reads the
+    same properties out of the embedded font program; the descriptor carries
+    them without unpacking the font, and is what pdfminer already parsed.
+    """
+    if not descriptor:
+        return None
+    try:
+        flags = int(descriptor.get("Flags") or 0)
+    except (TypeError, ValueError):
+        flags = 0
+    try:
+        angle = float(descriptor.get("ItalicAngle") or 0)
+    except (TypeError, ValueError):
+        angle = 0.0
+    try:
+        weight = float(descriptor.get("FontWeight") or 0)
+    except (TypeError, ValueError):
+        weight = 0.0
+    if not flags and not angle and not weight:
+        return None
+    italic = bool(flags & FLAG_ITALIC) or angle != 0.0
+    bold = bool(flags & FLAG_FORCE_BOLD) or weight >= 600
+    if bold and italic:
+        return TextStyle.BOLD_ITALIC
+    if bold:
+        return TextStyle.BOLD
+    if italic:
+        return TextStyle.ITALIC
+    return TextStyle.REGULAR
+
+
+def text_style_of(character: LTChar) -> TextStyle:
+    """Emphasis for one glyph: what the font declares, else what it is called."""
+    descriptor = getattr(getattr(character, "font", None), "descriptor", None)
+    style = text_style_from_descriptor(descriptor)
+    if style is not None:
+        return style
+    return text_style_from_font(character.fontname)
 
 
 def text_orientation(matrix) -> tuple[float, float, float, float] | None:
@@ -103,12 +160,151 @@ def normalised_text_matrix(matrix) -> tuple[float, float, float, float]:
     return (a / x_scale, b / x_scale, c / y_scale, d / y_scale)
 
 
+def is_outside_page(
+    character: LTChar, page: tuple[float, float, float, float] | None
+) -> bool:
+    """Whether a glyph falls entirely off the paper, and so is never seen.
+
+    Some producers park stray glyphs above the page between the styled runs of
+    a paragraph - a 23rd-edition physiology textbook emits a space at y=823 on a
+    792-point page between every bold term and the prose around it. Those
+    glyphs land in no layout region, so they take the catch-all class, and the
+    class change breaks the real paragraph in two at each of them. Every bold
+    term then became its own paragraph, reflowed inside its own width, and the
+    fragments printed over each other once the translation stopped being the
+    length of the English.
+
+    A glyph that only overlaps the edge is kept: it is clipped, not invisible.
+    """
+    if page is None:
+        return False
+    x0, y0, x1, y1 = page
+    return (
+        character.x1 <= x0
+        or character.x0 >= x1
+        or character.y1 <= y0
+        or character.y0 >= y1
+    )
+
+
+def output_font_lacks_glyph(text: str, font: Font | None) -> bool:
+    """Whether the prose font has no outline at all for this character.
+
+    `raw_string` writes `font.has_glyph(ord(c))` straight into an Identity-H
+    font, and a missing glyph is glyph 0. The character then draws as .notdef -
+    a blank or a hollow box - and extracts as U+0000, so it is lost twice over.
+    A physical chemistry textbook lost the arrowhead and ballot-box markers that
+    open its list items this way, and a physiology textbook lost the apostrophe
+    in its own title.
+
+    Keeping the source glyph instead is what the bullet rule already does. It
+    is also the only thing that can be right in general: the character exists in
+    the source document, drawn by a font that does have it.
+    """
+    if font is None or not text:
+        return False
+    character = text[0]
+    if character.isspace():
+        return False
+    try:
+        return font.has_glyph(ord(character)) == 0
+    except Exception:
+        return False
+
+
+# A line that stops well short of its column is the last line of a paragraph.
+# Justified prose reaches the right edge on every line but the last, and even
+# ragged-right prose rarely gives up a quarter of the measure mid-paragraph.
+PARAGRAPH_END_RATIO = 0.75
+
+
+def line_ends_paragraph(
+    line_end: float,
+    bounds: tuple[float, float, float, float] | None,
+    ratio: float = PARAGRAPH_END_RATIO,
+) -> bool:
+    """Whether a line finishing here is the last line of its paragraph.
+
+    Without this a whole column of prose is one paragraph, because the layout
+    model returns the column as a single region and nothing else in the source
+    says where one paragraph stops. The translation then reflows as one
+    continuous block: first-line indents disappear, the blank line between
+    paragraphs goes, and short lines such as the four answers to a
+    multiple-choice question run together on one line.
+
+    BabelDOC splits on the same signal, comparing against the median line
+    width of the page. The column the layout model already found is a steadier
+    reference: it is the measure those lines were set to.
+    """
+    if bounds is None:
+        return False
+    x0, _y0, x1, _y1 = bounds
+    width = x1 - x0
+    if width <= 0:
+        return False
+    return line_end < x0 + width * ratio
+
+
+# A subscript or a superscript is a character or two. Anything this long that
+# reads as words is body text that merely happens to be set smaller than what
+# opened its paragraph.
+MINIMUM_PROSE_RUN = 12
+
+
+def run_is_prose(text: str) -> bool:
+    """Whether a run held back for being small is really body text.
+
+    A caption whose bold label is set larger than its body makes the whole body
+    look like a subscript against it, so an entire figure caption was preserved
+    as source glyphs and never translated. Size alone cannot tell the two
+    apart, but length and shape can: a run this long, made of words, is prose.
+
+    Runs preserved for any other reason never reach this test. A formula font,
+    a protected layout region, a character the output font cannot draw and a
+    rotated baseline all still keep their source glyphs however long they run.
+    """
+    visible = text.strip()
+    if len(visible) < MINIMUM_PROSE_RUN:
+        return False
+    return re.search(r"[a-z]{3,}", visible) is not None
+
+
 def paragraph_width_budget(x: float, x0: float, x1: float, lines: int) -> float:
     """Return usable width while accounting for a first-line indentation."""
     if lines <= 0 or x1 <= x0:
         return 0.0
     first_line = max(0.0, x1 - max(x, x0))
     return first_line + max(0, lines - 1) * (x1 - x0)
+
+
+# Setting a colour leaves it in force for everything drawn after it, so a run
+# that states no colour of its own takes the colour of whatever ran before it -
+# a gold list bullet repainted the whole item that followed it. Every run
+# states its colour, and black is stated explicitly when the source never set
+# one, which is the colour a content stream starts in anyway.
+DEFAULT_COLOUR_INSTRUCTION = "0 g 0 G"
+FILL_TO_STROKE_OPERATORS = {
+    "g": "G",
+    "rg": "RG",
+    "k": "K",
+    "sc": "SC",
+    "scn": "SCN",
+    "cs": "CS",
+}
+
+
+def stroke_colour_from_fill(instruction: str) -> str:
+    """Mirror a fill colour onto the stroking colour.
+
+    Synthetic bold thickens a glyph by stroking its outline. That stroke is our
+    own device rather than something the source drew, so it has to use the
+    colour the glyph is filled with, or a red heading comes out red with a
+    black outline. Only the operator tokens change; operands and colourspace
+    names pass through untouched.
+    """
+    return " ".join(
+        FILL_TO_STROKE_OPERATORS.get(token, token) for token in instruction.split()
+    )
 
 
 def styled_text_matrix(
@@ -156,7 +352,7 @@ def styled_character_text(characters: list[LTChar]) -> str:
     parts: list[str] = []
     active = TextStyle.REGULAR
     for character in characters:
-        style = text_style_from_font(character.fontname)
+        style = text_style_of(character)
         if style != active:
             if active:
                 parts.append(f"</s{int(active)}>")
@@ -223,23 +419,73 @@ class PDFConverterEx(PDFConverter):
         rsrcmgr: PDFResourceManager,
     ) -> None:
         PDFConverter.__init__(self, rsrcmgr, None, "utf-8", 1, None)
+        self.page_clip: tuple[float, float, float, float] | None = None
+        # One entry per piece of colour state, and a saved stack for q/Q.
+        self.graphic_operators: dict[str, str] = {}
+        self.graphic_stack: list[dict[str, str]] = []
+
+    def record_graphic_operator(
+        self, slot: str, text: str, self_contained: bool
+    ) -> None:
+        self.graphic_operators[slot] = text
+        if self_contained:
+            # `rg` and friends name their own space, so a space selected
+            # earlier must not be replayed in front of them.
+            self.graphic_operators.pop(slot.replace("_colour", "_space"), None)
+        elif slot.endswith("_space"):
+            # A new space resets its colour; the components that follow will
+            # arrive as their own operator.
+            self.graphic_operators.pop(slot.replace("_space", "_colour"), None)
+
+    def knows_colour_space(self, slot: str) -> bool:
+        return slot in self.graphic_operators
+
+    def forget_colour(self, slot: str) -> None:
+        """Drop a colour that cannot be replayed, so the run falls back to black."""
+        self.graphic_operators.pop(slot, None)
+        self.graphic_operators.pop(slot.replace("_colour", "_space"), None)
+
+    def push_graphic_state(self) -> None:
+        self.graphic_stack.append(dict(self.graphic_operators))
+
+    def pop_graphic_state(self) -> None:
+        if self.graphic_stack:
+            self.graphic_operators = self.graphic_stack.pop()
+
+    @property
+    def graphic_instruction(self) -> str:
+        """The colour in force, as operators to replay before drawing text."""
+        from pdf2zh.pdfinterp import COLOUR_SLOT_ORDER
+
+        return " ".join(
+            self.graphic_operators[slot]
+            for slot in COLOUR_SLOT_ORDER
+            if slot in self.graphic_operators
+        )
 
     def begin_page(self, page, ctm) -> None:
         x0, y0, x1, y1 = page.cropbox
         x0, y0 = apply_matrix_pt(ctm, (x0, y0))
         x1, y1 = apply_matrix_pt(ctm, (x1, y1))
         mediabox = (0, 0, abs(x0 - x1), abs(y0 - y1))
+        # A figure reports its own bbox, so the page rectangle has to be kept
+        # here: it is what decides whether a glyph is on the paper at all.
+        self.page_clip = mediabox
+        self.graphic_operators = {}
+        self.graphic_stack = []
         self.cur_item = LTPage(page.pageno, mediabox)
 
     def end_page(self, page):
         return self.receive_layout(self.cur_item)
 
     def begin_figure(self, name, bbox, matrix) -> None:
+        self.push_graphic_state()
         self._stack.append(self.cur_item)
         self.cur_item = LTFigure(name, bbox, mult_matrix(matrix, self.ctm))
         self.cur_item.pageid = self._stack[-1].pageid
 
     def end_figure(self, _: str) -> None:
+        self.pop_graphic_state()
         fig = self.cur_item
         assert isinstance(self.cur_item, LTFigure), str(type(self.cur_item))
         self.cur_item = self._stack.pop()
@@ -279,6 +525,7 @@ class PDFConverterEx(PDFConverter):
         self.cur_item.add(item)
         item.cid = cid
         item.font = font
+        item.graphic_instruction = self.graphic_instruction
         return item.adv
 
 
@@ -297,11 +544,24 @@ class Paragraph:
         self.orientation = text_orientation(matrix or (1, 0, 0, 1))
         self.rotated_chars: list[LTChar] = []
         self.open_style = TextStyle.REGULAR
+        # Replayed in front of this paragraph's runs. A translation cannot
+        # carry a colour change through the translator the way it carries a
+        # style marker, so the paragraph gets the colour most of its own ink is
+        # drawn in; a short coloured term inside black prose then leaves the
+        # prose alone instead of repainting all of it.
+        self.graphic_ink: Counter[str] = Counter()
         self.text_length = 0
         # Characters that actually draw ink. Spacing inserted between source
         # glyphs must not count, or it hides how much text a paragraph holds.
         self.visible_length = 0
         self.anchor: tuple[float, float] = (x, y)
+
+    @property
+    def graphic_instruction(self) -> str:
+        """The colour most of this paragraph's own ink is drawn in."""
+        if not self.graphic_ink:
+            return ""
+        return self.graphic_ink.most_common(1)[0][0]
 
 
 def text_fits_box_at_minimum_size(
@@ -379,6 +639,7 @@ class TranslateConverter(PDFConverterEx):
         style_font_names: Dict | None = None,
         style_fonts: Dict | None = None,
         synthetic_styles: set[int] | None = None,
+        class_bounds: Dict | None = None,
     ) -> None:
         super().__init__(rsrcmgr)
         self.vfont = vfont
@@ -388,6 +649,7 @@ class TranslateConverter(PDFConverterEx):
         # high_level fills this mapping after the converter is constructed.
         # Preserve an empty mapping by identity instead of replacing it.
         self.layout_bounds = layout_bounds if layout_bounds is not None else {}
+        self.class_bounds = class_bounds if class_bounds is not None else {}
         self.noto_name = noto_name
         self.noto = noto
         self.style_font_names = style_font_names or {0: noto_name}
@@ -413,6 +675,8 @@ class TranslateConverter(PDFConverterEx):
         # Pages carrying a raster image, filled in by the caller.
         self.pages_with_images: set[int] = set()
         self.segments_by_page: Counter[int] = Counter()
+        # One lookup per distinct character rather than per glyph drawn.
+        self.unrenderable_characters: dict[str, bool] = {}
         # e.g. "handoff:model" -> ["handoff", "model"]; model is unused by both engines
         param = service.split(":", 1)
         service_name = param[0]
@@ -463,6 +727,9 @@ class TranslateConverter(PDFConverterEx):
         vbkt: int = 0
         vstk: list[LTChar] = []
         vlstk: list[LTLine] = []
+        # Whether everything held back so far was held back only for being
+        # smaller than the text that opened its paragraph.
+        vstk_size_only: bool = True
         vfix: float = 0
         var: list[list[LTChar]] = []
         varl: list[list[LTLine]] = []
@@ -472,6 +739,7 @@ class TranslateConverter(PDFConverterEx):
         xt: LTChar = None
         xt_cls: int = -1
         vmax: float = ltpage.width / 4
+        page_class_bounds = self.class_bounds.get(ltpage.pageid, {})
         ops: str = ""
         preserved_segments: set[str] = set()
 
@@ -484,6 +752,13 @@ class TranslateConverter(PDFConverterEx):
             font = font.split("+")[-1]
             if re.match(r"\(cid:", char):
                 return True
+            if char:
+                lacks = self.unrenderable_characters.get(char[0])
+                if lacks is None:
+                    lacks = output_font_lacks_glyph(char, self.noto)
+                    self.unrenderable_characters[char[0]] = lacks
+                if lacks:
+                    return True
             if self.vfont:
                 if re.match(self.vfont, font):
                     return True
@@ -525,6 +800,26 @@ class TranslateConverter(PDFConverterEx):
                 1 for character in text if not character.isspace()
             )
 
+        def adopt_graphic(paragraph: Paragraph, child: LTChar) -> None:
+            """Count this glyph's colour towards the paragraph's own."""
+            text = child.get_text()
+            if text.isspace():
+                return
+            paragraph.graphic_ink[
+                getattr(child, "graphic_instruction", "")
+            ] += len(text)
+
+        def adopt_prose_run(index: int, characters: list[LTChar]) -> None:
+            """Put a run back into the paragraph as the body text it is."""
+            paragraph = pstk[index]
+            size = min(character.size for character in characters)
+            if size < paragraph.size:
+                paragraph.y -= size - paragraph.size
+                paragraph.size = size
+            for character in characters:
+                adopt_graphic(paragraph, character)
+                append_styled(index, character.get_text(), text_style_of(character))
+
         def append_formula(index: int, identifier: int) -> None:
             close_style(index)
             sstk[index] += f"{{v{identifier}}}"
@@ -555,6 +850,8 @@ class TranslateConverter(PDFConverterEx):
         ############################################################
         for child in ltpage:
             if isinstance(child, LTChar):
+                if is_outside_page(child, self.page_clip):
+                    continue
                 cur_v = False
                 layout = self.layout[ltpage.pageid]
                 h, w = layout.shape
@@ -563,17 +860,21 @@ class TranslateConverter(PDFConverterEx):
                 if is_bullet_character(child.get_text(), child.fontname):
                     cls = 0
                 orientation = text_orientation(child.matrix)
-                if (
+                # Kept apart because they are not equally final. Small text may
+                # turn out to be body text set under a larger label; a formula
+                # font or a protected region never does.
+                smaller_than_body = (
+                    cls == xt_cls
+                    and pstk[-1].text_length > 1
+                    and orientation == IDENTITY_ORIENTATION
+                    and child.size < pstk[-1].size * 0.79
+                )
+                must_preserve = (
                     cls == 0
-                    or (
-                        cls == xt_cls
-                        and pstk[-1].text_length > 1
-                        and orientation == IDENTITY_ORIENTATION
-                        and child.size < pstk[-1].size * 0.79
-                    )
                     or vflag(child.fontname, child.get_text())
                     or orientation is None
-                ):
+                )
+                if smaller_than_body or must_preserve:
                     cur_v = True
                 if not cur_v:
                     # Keep brackets with a formula only when the formula starts
@@ -582,9 +883,11 @@ class TranslateConverter(PDFConverterEx):
                     # bracket then strands it at its source coordinate.
                     if vstk and not pstk[-1].text_length and child.get_text() == "(":
                         cur_v = True
+                        must_preserve = True
                         vbkt += 1
                     if vbkt and child.get_text() == ")":
                         cur_v = True
+                        must_preserve = True
                         vbkt -= 1
                 if (
                     not cur_v
@@ -592,21 +895,28 @@ class TranslateConverter(PDFConverterEx):
                     or (pstk[-1].text_length and abs(child.x0 - xt.x0) > vmax)
                 ):
                     if vstk:
-                        if (
-                            not cur_v
-                            and cls == xt_cls
-                            and child.x0 > max([vch.x0 for vch in vstk])
+                        if vstk_size_only and run_is_prose(
+                            "".join(vch.get_text() for vch in vstk)
                         ):
-                            vfix = vstk[0].y0 - child.y0
-                        if not pstk[-1].text_length:
-                            xt_cls = -1
-                        append_formula(len(sstk) - 1, len(var))
-                        var.append(vstk)
-                        varl.append(vlstk)
-                        varf.append(vfix)
+                            adopt_prose_run(len(sstk) - 1, vstk)
+                            lstk.extend(vlstk)
+                        else:
+                            if (
+                                not cur_v
+                                and cls == xt_cls
+                                and child.x0 > max([vch.x0 for vch in vstk])
+                            ):
+                                vfix = vstk[0].y0 - child.y0
+                            if not pstk[-1].text_length:
+                                xt_cls = -1
+                            append_formula(len(sstk) - 1, len(var))
+                            var.append(vstk)
+                            varl.append(vlstk)
+                            varf.append(vfix)
                         vstk = []
                         vlstk = []
                         vfix = 0
+                        vstk_size_only = True
                 if not vstk:
                     if cls == xt_cls:
                         # Force paragraph break for list items: when text wraps back
@@ -621,21 +931,28 @@ class TranslateConverter(PDFConverterEx):
                                 append_styled(
                                     len(sstk) - 1,
                                     " ",
-                                    text_style_from_font(child.fontname),
+                                    text_style_of(child),
                                 )
                         elif child.x1 < xt.x0:
-                            if pstk[-1].orientation == IDENTITY_ORIENTATION:
-                                append_styled(
-                                    len(sstk) - 1,
-                                    " ",
-                                    text_style_from_font(child.fontname),
-                                )
-                            pstk[-1].brk = True
+                            if pstk[-1].text_length > 1 and line_ends_paragraph(
+                                xt.x1, page_class_bounds.get(int(cls))
+                            ):
+                                close_style(len(sstk) - 1)
+                                new_paragraph(child, cls)
+                            else:
+                                if pstk[-1].orientation == IDENTITY_ORIENTATION:
+                                    append_styled(
+                                        len(sstk) - 1,
+                                        " ",
+                                        text_style_of(child),
+                                    )
+                                pstk[-1].brk = True
                     else:
                         if sstk:
                             close_style(len(sstk) - 1)
                         new_paragraph(child, cls)
                 if not cur_v:
+                    adopt_graphic(pstk[-1], child)
                     if pstk[-1].orientation != IDENTITY_ORIENTATION:
                         pstk[-1].rotated_chars.append(child)
                         pstk[-1].text_length += len(child.get_text())
@@ -651,7 +968,7 @@ class TranslateConverter(PDFConverterEx):
                         append_styled(
                             len(sstk) - 1,
                             child.get_text(),
-                            text_style_from_font(child.fontname),
+                            text_style_of(child),
                         )
                 else:
                     if (
@@ -660,6 +977,8 @@ class TranslateConverter(PDFConverterEx):
                         and child.x0 > xt.x0
                     ):
                         vfix = child.y0 - xt.y0
+                    if must_preserve:
+                        vstk_size_only = False
                     vstk.append(child)
                 pstk[-1].x0 = min(pstk[-1].x0, child.x0)
                 pstk[-1].x1 = max(pstk[-1].x1, child.x1)
@@ -681,10 +1000,16 @@ class TranslateConverter(PDFConverterEx):
             else:
                 pass
         if vstk:
-            append_formula(len(sstk) - 1, len(var))
-            var.append(vstk)
-            varl.append(vlstk)
-            varf.append(vfix)
+            if vstk_size_only and run_is_prose(
+                "".join(vch.get_text() for vch in vstk)
+            ):
+                adopt_prose_run(len(sstk) - 1, vstk)
+                lstk.extend(vlstk)
+            else:
+                append_formula(len(sstk) - 1, len(var))
+                var.append(vstk)
+                varl.append(vlstk)
+                varf.append(vfix)
 
         for index, paragraph in enumerate(pstk):
             close_style(index)
@@ -856,6 +1181,7 @@ class TranslateConverter(PDFConverterEx):
             rtxt,
             style=TextStyle.REGULAR,
             orientation=IDENTITY_ORIENTATION,
+            graphic="",
         ):
             synthetic = int(style) in self.synthetic_styles
             a, b, c, d = styled_text_matrix(orientation, int(style), synthetic)
@@ -864,8 +1190,12 @@ class TranslateConverter(PDFConverterEx):
             if uses_synthetic_bold(int(style), synthetic):
                 render = f"2 Tr {max(0.15, size * 0.025):f} w "
                 reset = "0 Tr "
+            colour = graphic or DEFAULT_COLOUR_INSTRUCTION
+            if uses_synthetic_bold(int(style), synthetic):
+                colour = f"{colour} {stroke_colour_from_fill(colour)}"
+            colour = f"{colour} "
             return (
-                f"/{font} {size:f} Tf {render}{a:f} {b:f} {c:f} {d:f} "
+                f"{colour}/{font} {size:f} Tf {render}{a:f} {b:f} {c:f} {d:f} "
                 f"{x:f} {y:f} Tm [<{rtxt}>] TJ {reset}"
             )
 
@@ -933,6 +1263,7 @@ class TranslateConverter(PDFConverterEx):
                         raw_string(run_font, run_text),
                         run_style,
                         paragraph.orientation,
+                        paragraph.graphic_instruction,
                     )
                 )
                 run_text = ""
@@ -977,6 +1308,7 @@ class TranslateConverter(PDFConverterEx):
                                 ),
                                 TextStyle.REGULAR,
                                 normalised_text_matrix(formula_char.matrix),
+                                getattr(formula_char, "graphic_instruction", ""),
                             )
                         )
                     cursor += vlen[vid]
@@ -1182,6 +1514,12 @@ class TranslateConverter(PDFConverterEx):
             cstyle = TextStyle.REGULAR
             log.debug(f"< {y} {x} {x0} {x1} {size} {brk} > {sstk[id]} | {new}")
 
+            # Where each line begins.  A font size chosen after these
+            # operations are built has to put every run back at the coordinate
+            # the new size implies; without an origin to measure from, the runs
+            # keep the old size's positions and the line pulls apart.  Line 0
+            # may be indented, every later line starts at x0.
+            first_line_x = x
             ops_vals: list[dict] = []
 
             while ptr < len(new):
@@ -1197,6 +1535,7 @@ class TranslateConverter(PDFConverterEx):
                             "rtxt": raw_string(fcur, cstk),
                             "lidx": lidx,
                             "style": cstyle,
+                            "graphic": pstk[id].graphic_instruction,
                         })
                         cstk = ""
                     closing, identifier = style_tag.groups()
@@ -1233,6 +1572,7 @@ class TranslateConverter(PDFConverterEx):
                                 "rtxt": raw_string(fcur, cstk),
                                 "lidx": lidx,
                                 "style": cstyle,
+                                "graphic": pstk[id].graphic_instruction,
                             })
                             cstk = ""
                         x = x0
@@ -1262,6 +1602,7 @@ class TranslateConverter(PDFConverterEx):
                                     "rtxt": raw_string(fcur, before),
                                     "lidx": lidx,
                                     "style": cstyle,
+                                    "graphic": pstk[id].graphic_instruction,
                                 })
                             # Move remainder to new line
                             lidx += 1
@@ -1281,6 +1622,7 @@ class TranslateConverter(PDFConverterEx):
                                 "rtxt": raw_string(fcur, cstk),
                                 "lidx": lidx,
                                 "style": cstyle,
+                                "graphic": pstk[id].graphic_instruction,
                             })
                             cstk = ""
                 if brk and x + adv > x1 + 0.1 * size:
@@ -1302,6 +1644,7 @@ class TranslateConverter(PDFConverterEx):
                             "lidx": lidx,
                             "style": TextStyle.REGULAR,
                             "orientation": normalised_text_matrix(vch.matrix),
+                            "graphic": getattr(vch, "graphic_instruction", ""),
                         })
                         if log.isEnabledFor(logging.DEBUG):
                             lstk.append(LTLine(0.1, (_x, _y), (x + vch.x0 - var[vid][0].x0, fix + y + vch.y0 - var[vid][0].y0)))
@@ -1343,6 +1686,7 @@ class TranslateConverter(PDFConverterEx):
                     "rtxt": raw_string(fcur, cstk),
                     "lidx": lidx,
                     "style": cstyle,
+                    "graphic": pstk[id].graphic_instruction,
                 })
 
             line_height = default_line_height
@@ -1366,9 +1710,7 @@ class TranslateConverter(PDFConverterEx):
                 shrink = fit_height / ((lidx + 1) * size * line_height)
                 shrink = max(shrink, 0.5)  # Don't go below 50%
                 size *= shrink
-                for vals in ops_vals:
-                    if vals["type"] == OpType.TEXT:
-                        vals["size"] *= shrink
+                rescale_operations(ops_vals, shrink, first_line_x, x0)
 
             # Measure ink only after the final font-size adjustment.  Measuring
             # before shrinking left the old line gaps in place, so dense table
@@ -1400,9 +1742,7 @@ class TranslateConverter(PDFConverterEx):
                     if scale >= 0.999:
                         break
                     size *= scale
-                    for vals in ops_vals:
-                        if vals["type"] == OpType.TEXT:
-                            vals["size"] *= scale
+                    rescale_operations(ops_vals, scale, first_line_x, x0)
                     ink = operation_ink(ops_vals)
 
             # Formula slack stays charged to the paragraph's own box, so a
@@ -1431,6 +1771,7 @@ class TranslateConverter(PDFConverterEx):
                             vals["rtxt"],
                             vals.get("style", TextStyle.REGULAR),
                             vals.get("orientation", IDENTITY_ORIENTATION),
+                            vals.get("graphic", ""),
                         )
                     )
                 elif vals["type"] == OpType.LINE:
@@ -1531,6 +1872,39 @@ def operation_ink(
             max(previous_high, high),
         )
     return ink
+
+
+def rescale_operations(
+    operations: list[dict],
+    factor: float,
+    first_line_x: float,
+    left_x: float,
+) -> None:
+    """Re-place built operations after their font size changed.
+
+    Every advance this converter measures is linear in the font size, so a
+    paragraph that shrinks by `factor` needs each run at `factor` of its former
+    distance from the start of its line.  Scaling only the size left each run at
+    the old size's coordinate: the gap in front of it grew by the width the run
+    no longer occupies, and the gaps accumulated along the line.  Vietnamese
+    showed it worst, because every accented letter starts a new run in the
+    Unicode font while the ASCII around it stays in the base-14 face, so a
+    shrunk paragraph pulled apart between the letters of single words.
+
+    Formula glyphs are moved the same way.  Their size was already being scaled
+    while the offsets holding them together were not, which spread a shrunk
+    inline formula out over its original width.
+    """
+    for values in operations:
+        origin = first_line_x if values["lidx"] == 0 else left_x
+        values["x"] = origin + (values["x"] - origin) * factor
+        values["dy"] *= factor
+        if values["type"] == OpType.TEXT:
+            values["size"] *= factor
+        else:
+            values["xlen"] *= factor
+            values["ylen"] *= factor
+            values["linewidth"] *= factor
 
 
 def vertical_ink_extent(

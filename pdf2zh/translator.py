@@ -27,6 +27,17 @@ class FormulaPlaceholderError(ValueError):
     """Raised when a translator damages or reorders protected formula tags."""
 
 
+class SegmentTooLongError(ValueError):
+    """Raised when a segment exceeds what the translation service accepts.
+
+    Upstream truncates to the limit and returns the short answer as if it were
+    the whole translation, so the tail of a long paragraph disappears with
+    nothing said. A segment carrying formula or style markers is caught later
+    by the marker check, but plain prose is silently cut in half. Refusing the
+    segment keeps the source text and lets the caller say what happened.
+    """
+
+
 def remove_control_characters(value: str) -> str:
     """Remove control characters that cannot be emitted safely into PDF text."""
     return "".join(character for character in value if unicodedata.category(character)[0] != "C")
@@ -116,10 +127,19 @@ class GoogleTranslator(BaseTranslator):
             )
         }
 
+    # The /m endpoint carries the text in the query string and rejects more
+    # than this; it is the service's limit, not a preference.
+    MAXIMUM_SEGMENT_CHARACTERS = 5000
+
     def do_translate(self, text: str) -> str:
+        if len(text) > self.MAXIMUM_SEGMENT_CHARACTERS:
+            raise SegmentTooLongError(
+                f"segment of {len(text)} characters exceeds the "
+                f"{self.MAXIMUM_SEGMENT_CHARACTERS} the service accepts"
+            )
         response = self.session.get(
             self.endpoint,
-            params={"tl": self.lang_out, "sl": self.lang_in, "q": text[:5000]},
+            params={"tl": self.lang_out, "sl": self.lang_in, "q": text},
             headers=self.headers,
             timeout=30,
         )

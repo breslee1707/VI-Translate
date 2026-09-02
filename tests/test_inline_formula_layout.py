@@ -25,6 +25,7 @@ from pdf2zh.converter import (
     paragraph_width_budget,
     is_outside_page,
     output_font_lacks_glyph,
+    stroke_colour_from_fill,
     preferred_translation,
     rescale_operations,
     should_translate_rotated_text,
@@ -33,12 +34,14 @@ from pdf2zh.converter import (
     styled_character_text,
     text_fits_box_at_minimum_size,
     text_orientation,
+    text_style_from_descriptor,
     text_style_from_font,
     uses_synthetic_bold,
     vertical_ink_extent,
     vertical_shift_to_bounds,
 )
 from pdf2zh.high_level import output_style_font_paths
+from pdf2zh.converter import PDFConverterEx
 from pdf2zh.pdfinterp import PDFPageInterpreterEx
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
 
@@ -484,6 +487,72 @@ class OrientationAndStyleTests(unittest.TestCase):
         self.assertFalse(output_font_lacks_glyph(" ", font))
         self.assertFalse(output_font_lacks_glyph("", font))
         self.assertFalse(output_font_lacks_glyph("➤", None))
+
+    def test_adobe_pro_abbreviates_the_slanted_face(self):
+        """MinionPro-It never spells the word, but it is italic all the same."""
+        self.assertEqual(text_style_from_font("MELNNC+MinionPro-It"), TextStyle.ITALIC)
+        self.assertEqual(text_style_from_font("MyriadPro-It"), TextStyle.ITALIC)
+        self.assertEqual(
+            text_style_from_font("MyriadPro-BoldIt"), TextStyle.BOLD_ITALIC
+        )
+        self.assertEqual(text_style_from_font("Times-Italic"), TextStyle.ITALIC)
+
+    def test_a_name_merely_ending_in_those_letters_is_not_italic(self):
+        for name in ("Bandit", "ABCUnit", "Inherit", "Univers-Light"):
+            self.assertEqual(text_style_from_font(name), TextStyle.REGULAR, name)
+
+    def test_the_font_descriptor_outranks_the_font_name(self):
+        """The embedded font says what it is; the name is only a label."""
+        self.assertEqual(
+            text_style_from_descriptor({"Flags": 68, "ItalicAngle": -11}),
+            TextStyle.ITALIC,
+        )
+        self.assertEqual(
+            text_style_from_descriptor({"Flags": 262148}), TextStyle.BOLD
+        )
+        self.assertEqual(
+            text_style_from_descriptor({"Flags": 262148 | 64}), TextStyle.BOLD_ITALIC
+        )
+        self.assertEqual(text_style_from_descriptor({"Flags": 4}), TextStyle.REGULAR)
+        self.assertIsNone(text_style_from_descriptor({}))
+        self.assertIsNone(text_style_from_descriptor(None))
+
+    def test_only_the_newest_colour_of_each_kind_is_replayed(self):
+        """`rg` and `g` write the same slot, so replaying both lets the older win."""
+        device = PDFConverterEx(PDFResourceManager())
+        interpreter = PDFPageInterpreterEx(PDFResourceManager(), device, {})
+        interpreter.record_graphic("rg", [0.137, 0.122, 0.125])
+        interpreter.record_graphic("g", [0.0])
+        self.assertEqual(device.graphic_instruction, "0.000000 g")
+
+    def test_a_colourspace_is_replayed_in_front_of_its_components(self):
+        device = PDFConverterEx(PDFResourceManager())
+        interpreter = PDFPageInterpreterEx(PDFResourceManager(), device, {})
+        interpreter.record_graphic("cs", ["/CS0"])
+        interpreter.record_graphic("scn", [1.0, 0.0, 0.0])
+        self.assertEqual(device.graphic_instruction, "/CS0 cs 1.000000 0.000000 0.000000 scn")
+        # `rg` names its own space, so the stale one must not travel with it.
+        interpreter.record_graphic("rg", [0.0, 0.0, 1.0])
+        self.assertEqual(device.graphic_instruction, "0.000000 0.000000 1.000000 rg")
+
+    def test_a_saved_colour_comes_back_with_the_graphics_state(self):
+        device = PDFConverterEx(PDFResourceManager())
+        interpreter = PDFPageInterpreterEx(PDFResourceManager(), device, {})
+        interpreter.record_graphic("rg", [0.1, 0.1, 0.1])
+        device.push_graphic_state()
+        interpreter.record_graphic("rg", [0.9, 0.6, 0.0])
+        self.assertEqual(device.graphic_instruction, "0.900000 0.600000 0.000000 rg")
+        device.pop_graphic_state()
+        self.assertEqual(device.graphic_instruction, "0.100000 0.100000 0.100000 rg")
+
+    def test_synthetic_bold_strokes_in_the_colour_it_fills_with(self):
+        """The stroke is our own thickening, not something the source drew."""
+        self.assertEqual(
+            stroke_colour_from_fill("0.690000 0.020000 0.227000 rg"),
+            "0.690000 0.020000 0.227000 RG",
+        )
+        self.assertEqual(stroke_colour_from_fill("/CS0 cs 1.000000 scn"),
+                         "/CS0 CS 1.000000 SCN")
 
     def test_first_line_indent_is_deducted_from_width_budget(self):
         self.assertEqual(paragraph_width_budget(20, 10, 110, 1), 90)

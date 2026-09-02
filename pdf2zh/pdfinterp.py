@@ -42,12 +42,36 @@ from pdfminer.utils import (
 
 log = logging.getLogger(__name__)
 
-
-def safe_float(o: Any) -> Optional[float]:
-    try:
-        return float(o)
-    except (TypeError, ValueError):
-        return None
+# Colour operators worth replaying in front of translated text, grouped by the
+# piece of state each one sets. `g`, `rg`, `k`, `sc` and `scn` all write the
+# same non-stroking colour, so only the last of them is in force; replaying one
+# of each kind lets a stale `0 g` from earlier in the stream paint over the
+# `rg` that is actually current. `cs` selects a space and resets its colour,
+# and `sc`/`scn` name components within whatever space is selected, so the two
+# travel together.
+#
+# ExtGState (`gs`) is deliberately not captured. It cannot set a fill colour,
+# so it buys no fidelity here, and it can carry alpha and soft masks that would
+# make the translated text invisible or composite it in ways the source never
+# applied to this text.
+COLOUR_SLOTS = {
+    "cs": "fill_space",
+    "CS": "stroke_space",
+    "g": "fill_colour",
+    "rg": "fill_colour",
+    "k": "fill_colour",
+    "sc": "fill_colour",
+    "scn": "fill_colour",
+    "G": "stroke_colour",
+    "RG": "stroke_colour",
+    "K": "stroke_colour",
+    "SC": "stroke_colour",
+    "SCN": "stroke_colour",
+}
+# These name their own space, so any space selected earlier no longer applies.
+SELF_CONTAINED_COLOUR_OPERATORS = frozenset({"g", "rg", "k", "G", "RG", "K"})
+# A space is replayed before the colour that names components within it.
+COLOUR_SLOT_ORDER = ("fill_space", "fill_colour", "stroke_space", "stroke_colour")
 
 
 class PDFPageInterpreterEx(PDFPageInterpreter):
@@ -65,6 +89,36 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
 
     def dup(self) -> "PDFPageInterpreterEx":
         return self.__class__(self.rsrcmgr, self.device, self.obj_patch)
+
+    def record_graphic(self, name: str, args: Sequence[object]) -> None:
+        """Hand one colour operator to the device, verbatim.
+
+        Replaying the operator text is the only way to carry a colour across
+        faithfully: a `scn` in an ICCBased or Separation space means nothing
+        without the `cs` that selected it, and reducing everything to RGB would
+        guess at the conversion the document never asked for. BabelDOC carries
+        colour the same way.
+        """
+        slot = COLOUR_SLOTS.get(name)
+        if slot is None:
+            return
+        text = " ".join(
+            f"{value:f}" if isinstance(value, float) else str(value).replace("'", "")
+            for value in args
+        )
+        self.device.record_graphic_operator(
+            slot, f"{text} {name}".strip(), name in SELF_CONTAINED_COLOUR_OPERATORS
+        )
+
+    def do_q(self) -> None:
+        """Save graphics state"""
+        super().do_q()
+        self.device.push_graphic_state()
+
+    def do_Q(self) -> None:
+        """Restore graphics state"""
+        super().do_Q()
+        self.device.pop_graphic_state()
 
     def init_resources(self, resources: Dict[object, object]) -> None:
         """Prepare the fonts and XObjects listed in the Resource attribute."""
@@ -327,6 +381,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                         # log.debug("exec: %s %r", name, args)
                         if len(args) == nargs:
                             func(*args)
+                            self.record_graphic(name, args)
                             if not (
                                 name[0] == "T"
                                 or name in ['"', "'", "EI", "MP", "DP", "BMC", "BDC"]
@@ -347,6 +402,9 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                         targs = func()
                         if targs is None:
                             targs = []
+                        # `sc`/`scn` pop their own operands, so they arrive
+                        # here rather than in the branch above.
+                        self.record_graphic(name, targs)
                         if not (name[0] == "T" or name in ["BI", "ID", "EMC"]):
                             p = " ".join(
                                 [

@@ -8,7 +8,9 @@ from pathlib import Path
 from pdf2zh.cache import clean_test_db, init_test_db
 from pdf2zh.translator import (
     FormulaPlaceholderError,
+    GoogleTranslator,
     HandoffTranslator,
+    SegmentTooLongError,
     encode_formula_placeholders,
     load_segment_table,
     placeholders,
@@ -160,6 +162,28 @@ class HandoffTranslatorTests(unittest.TestCase):
         self.misses.write_text('{"src": "from an older run"}\n', encoding="utf-8")
         self._translator()
         self.assertEqual(self._recorded_misses(), [])
+
+
+class GoogleSegmentLengthTests(unittest.TestCase):
+    def test_a_segment_over_the_limit_is_refused_rather_than_truncated(self):
+        """Upstream sends the first 5000 characters and returns that as the whole
+        translation, so the rest of a long paragraph disappears with nothing said."""
+        translator = GoogleTranslator("en", "vi")
+        with self.assertRaises(SegmentTooLongError):
+            translator.do_translate("a" * 5001)
+
+    def test_a_segment_at_the_limit_is_still_sent(self):
+        translator = GoogleTranslator("en", "vi")
+        sent = {}
+
+        def fake_get(endpoint, params, headers, timeout):
+            sent["q"] = params["q"]
+            raise RuntimeError("stop before the network")
+
+        translator.session.get = fake_get
+        with self.assertRaises(RuntimeError):
+            translator.do_translate("a" * 5000)
+        self.assertEqual(len(sent["q"]), 5000)
 
 
 if __name__ == "__main__":

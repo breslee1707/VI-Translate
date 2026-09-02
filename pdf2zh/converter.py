@@ -46,12 +46,20 @@ class TextStyle(IntEnum):
 
 
 def text_style_from_font(font_name: str | bytes) -> TextStyle:
-    """Infer PDF text emphasis from common PostScript font face names."""
+    """Infer PDF text emphasis from common PostScript font face names.
+
+    The Adobe Pro families abbreviate the slanted face, so `MinionPro-It` and
+    `MyriadPro-BoldIt` have to be read as italic even though they never spell
+    the word out. Only a trailing abbreviation counts, or ordinary words that
+    happen to end in those letters would be matched.
+    """
     if isinstance(font_name, bytes):
         font_name = font_name.decode("utf-8", errors="ignore")
     face = font_name.split("+")[-1]
     bold = re.search(r"bold|semibold|demi|black|heavy", face, re.IGNORECASE)
-    italic = re.search(r"italic|oblique|slanted", face, re.IGNORECASE)
+    italic = re.search(r"italic|oblique|slanted", face, re.IGNORECASE) or re.search(
+        r"(?:^|[^A-Za-z])(?:It|Ital)$|[a-z](?:It|Ital)$", face
+    )
     if bold and italic:
         return TextStyle.BOLD_ITALIC
     if bold:
@@ -59,6 +67,55 @@ def text_style_from_font(font_name: str | bytes) -> TextStyle:
     if italic:
         return TextStyle.ITALIC
     return TextStyle.REGULAR
+
+
+# PDF 32000-1 table 123: the font descriptor's own account of its face.
+FLAG_ITALIC = 1 << 6
+FLAG_FORCE_BOLD = 1 << 18
+
+
+def text_style_from_descriptor(descriptor: Dict | None) -> TextStyle | None:
+    """Read emphasis from the font descriptor, or None if it does not say.
+
+    The embedded font declares what it is, so this beats guessing from a name
+    that a producer is free to abbreviate or subset-prefix. BabelDOC reads the
+    same properties out of the embedded font program; the descriptor carries
+    them without unpacking the font, and is what pdfminer already parsed.
+    """
+    if not descriptor:
+        return None
+    try:
+        flags = int(descriptor.get("Flags") or 0)
+    except (TypeError, ValueError):
+        flags = 0
+    try:
+        angle = float(descriptor.get("ItalicAngle") or 0)
+    except (TypeError, ValueError):
+        angle = 0.0
+    try:
+        weight = float(descriptor.get("FontWeight") or 0)
+    except (TypeError, ValueError):
+        weight = 0.0
+    if not flags and not angle and not weight:
+        return None
+    italic = bool(flags & FLAG_ITALIC) or angle != 0.0
+    bold = bool(flags & FLAG_FORCE_BOLD) or weight >= 600
+    if bold and italic:
+        return TextStyle.BOLD_ITALIC
+    if bold:
+        return TextStyle.BOLD
+    if italic:
+        return TextStyle.ITALIC
+    return TextStyle.REGULAR
+
+
+def text_style_of(character: LTChar) -> TextStyle:
+    """Emphasis for one glyph: what the font declares, else what it is called."""
+    descriptor = getattr(getattr(character, "font", None), "descriptor", None)
+    style = text_style_from_descriptor(descriptor)
+    if style is not None:
+        return style
+    return text_style_from_font(character.fontname)
 
 
 def text_orientation(matrix) -> tuple[float, float, float, float] | None:
@@ -163,6 +220,36 @@ def paragraph_width_budget(x: float, x0: float, x1: float, lines: int) -> float:
     return first_line + max(0, lines - 1) * (x1 - x0)
 
 
+# Setting a colour leaves it in force for everything drawn after it, so a run
+# that states no colour of its own takes the colour of whatever ran before it -
+# a gold list bullet repainted the whole item that followed it. Every run
+# states its colour, and black is stated explicitly when the source never set
+# one, which is the colour a content stream starts in anyway.
+DEFAULT_COLOUR_INSTRUCTION = "0 g 0 G"
+FILL_TO_STROKE_OPERATORS = {
+    "g": "G",
+    "rg": "RG",
+    "k": "K",
+    "sc": "SC",
+    "scn": "SCN",
+    "cs": "CS",
+}
+
+
+def stroke_colour_from_fill(instruction: str) -> str:
+    """Mirror a fill colour onto the stroking colour.
+
+    Synthetic bold thickens a glyph by stroking its outline. That stroke is our
+    own device rather than something the source drew, so it has to use the
+    colour the glyph is filled with, or a red heading comes out red with a
+    black outline. Only the operator tokens change; operands and colourspace
+    names pass through untouched.
+    """
+    return " ".join(
+        FILL_TO_STROKE_OPERATORS.get(token, token) for token in instruction.split()
+    )
+
+
 def styled_text_matrix(
     orientation: tuple[float, float, float, float],
     style: int,
@@ -208,7 +295,7 @@ def styled_character_text(characters: list[LTChar]) -> str:
     parts: list[str] = []
     active = TextStyle.REGULAR
     for character in characters:
-        style = text_style_from_font(character.fontname)
+        style = text_style_of(character)
         if style != active:
             if active:
                 parts.append(f"</s{int(active)}>")
@@ -276,6 +363,40 @@ class PDFConverterEx(PDFConverter):
     ) -> None:
         PDFConverter.__init__(self, rsrcmgr, None, "utf-8", 1, None)
         self.page_clip: tuple[float, float, float, float] | None = None
+        # One entry per piece of colour state, and a saved stack for q/Q.
+        self.graphic_operators: dict[str, str] = {}
+        self.graphic_stack: list[dict[str, str]] = []
+
+    def record_graphic_operator(
+        self, slot: str, text: str, self_contained: bool
+    ) -> None:
+        self.graphic_operators[slot] = text
+        if self_contained:
+            # `rg` and friends name their own space, so a space selected
+            # earlier must not be replayed in front of them.
+            self.graphic_operators.pop(slot.replace("_colour", "_space"), None)
+        elif slot.endswith("_space"):
+            # A new space resets its colour; the components that follow will
+            # arrive as their own operator.
+            self.graphic_operators.pop(slot.replace("_space", "_colour"), None)
+
+    def push_graphic_state(self) -> None:
+        self.graphic_stack.append(dict(self.graphic_operators))
+
+    def pop_graphic_state(self) -> None:
+        if self.graphic_stack:
+            self.graphic_operators = self.graphic_stack.pop()
+
+    @property
+    def graphic_instruction(self) -> str:
+        """The colour in force, as operators to replay before drawing text."""
+        from pdf2zh.pdfinterp import COLOUR_SLOT_ORDER
+
+        return " ".join(
+            self.graphic_operators[slot]
+            for slot in COLOUR_SLOT_ORDER
+            if slot in self.graphic_operators
+        )
 
     def begin_page(self, page, ctm) -> None:
         x0, y0, x1, y1 = page.cropbox
@@ -285,17 +406,21 @@ class PDFConverterEx(PDFConverter):
         # A figure reports its own bbox, so the page rectangle has to be kept
         # here: it is what decides whether a glyph is on the paper at all.
         self.page_clip = mediabox
+        self.graphic_operators = {}
+        self.graphic_stack = []
         self.cur_item = LTPage(page.pageno, mediabox)
 
     def end_page(self, page):
         return self.receive_layout(self.cur_item)
 
     def begin_figure(self, name, bbox, matrix) -> None:
+        self.push_graphic_state()
         self._stack.append(self.cur_item)
         self.cur_item = LTFigure(name, bbox, mult_matrix(matrix, self.ctm))
         self.cur_item.pageid = self._stack[-1].pageid
 
     def end_figure(self, _: str) -> None:
+        self.pop_graphic_state()
         fig = self.cur_item
         assert isinstance(self.cur_item, LTFigure), str(type(self.cur_item))
         self.cur_item = self._stack.pop()
@@ -335,6 +460,7 @@ class PDFConverterEx(PDFConverter):
         self.cur_item.add(item)
         item.cid = cid
         item.font = font
+        item.graphic_instruction = self.graphic_instruction
         return item.adv
 
 
@@ -353,11 +479,24 @@ class Paragraph:
         self.orientation = text_orientation(matrix or (1, 0, 0, 1))
         self.rotated_chars: list[LTChar] = []
         self.open_style = TextStyle.REGULAR
+        # Replayed in front of this paragraph's runs. A translation cannot
+        # carry a colour change through the translator the way it carries a
+        # style marker, so the paragraph gets the colour most of its own ink is
+        # drawn in; a short coloured term inside black prose then leaves the
+        # prose alone instead of repainting all of it.
+        self.graphic_ink: Counter[str] = Counter()
         self.text_length = 0
         # Characters that actually draw ink. Spacing inserted between source
         # glyphs must not count, or it hides how much text a paragraph holds.
         self.visible_length = 0
         self.anchor: tuple[float, float] = (x, y)
+
+    @property
+    def graphic_instruction(self) -> str:
+        """The colour most of this paragraph's own ink is drawn in."""
+        if not self.graphic_ink:
+            return ""
+        return self.graphic_ink.most_common(1)[0][0]
 
 
 def text_fits_box_at_minimum_size(
@@ -590,6 +729,15 @@ class TranslateConverter(PDFConverterEx):
                 1 for character in text if not character.isspace()
             )
 
+        def adopt_graphic(paragraph: Paragraph, child: LTChar) -> None:
+            """Count this glyph's colour towards the paragraph's own."""
+            text = child.get_text()
+            if text.isspace():
+                return
+            paragraph.graphic_ink[
+                getattr(child, "graphic_instruction", "")
+            ] += len(text)
+
         def append_formula(index: int, identifier: int) -> None:
             close_style(index)
             sstk[index] += f"{{v{identifier}}}"
@@ -688,14 +836,14 @@ class TranslateConverter(PDFConverterEx):
                                 append_styled(
                                     len(sstk) - 1,
                                     " ",
-                                    text_style_from_font(child.fontname),
+                                    text_style_of(child),
                                 )
                         elif child.x1 < xt.x0:
                             if pstk[-1].orientation == IDENTITY_ORIENTATION:
                                 append_styled(
                                     len(sstk) - 1,
                                     " ",
-                                    text_style_from_font(child.fontname),
+                                    text_style_of(child),
                                 )
                             pstk[-1].brk = True
                     else:
@@ -703,6 +851,7 @@ class TranslateConverter(PDFConverterEx):
                             close_style(len(sstk) - 1)
                         new_paragraph(child, cls)
                 if not cur_v:
+                    adopt_graphic(pstk[-1], child)
                     if pstk[-1].orientation != IDENTITY_ORIENTATION:
                         pstk[-1].rotated_chars.append(child)
                         pstk[-1].text_length += len(child.get_text())
@@ -718,7 +867,7 @@ class TranslateConverter(PDFConverterEx):
                         append_styled(
                             len(sstk) - 1,
                             child.get_text(),
-                            text_style_from_font(child.fontname),
+                            text_style_of(child),
                         )
                 else:
                     if (
@@ -923,6 +1072,7 @@ class TranslateConverter(PDFConverterEx):
             rtxt,
             style=TextStyle.REGULAR,
             orientation=IDENTITY_ORIENTATION,
+            graphic="",
         ):
             synthetic = int(style) in self.synthetic_styles
             a, b, c, d = styled_text_matrix(orientation, int(style), synthetic)
@@ -931,8 +1081,12 @@ class TranslateConverter(PDFConverterEx):
             if uses_synthetic_bold(int(style), synthetic):
                 render = f"2 Tr {max(0.15, size * 0.025):f} w "
                 reset = "0 Tr "
+            colour = graphic or DEFAULT_COLOUR_INSTRUCTION
+            if uses_synthetic_bold(int(style), synthetic):
+                colour = f"{colour} {stroke_colour_from_fill(colour)}"
+            colour = f"{colour} "
             return (
-                f"/{font} {size:f} Tf {render}{a:f} {b:f} {c:f} {d:f} "
+                f"{colour}/{font} {size:f} Tf {render}{a:f} {b:f} {c:f} {d:f} "
                 f"{x:f} {y:f} Tm [<{rtxt}>] TJ {reset}"
             )
 
@@ -1000,6 +1154,7 @@ class TranslateConverter(PDFConverterEx):
                         raw_string(run_font, run_text),
                         run_style,
                         paragraph.orientation,
+                        paragraph.graphic_instruction,
                     )
                 )
                 run_text = ""
@@ -1044,6 +1199,7 @@ class TranslateConverter(PDFConverterEx):
                                 ),
                                 TextStyle.REGULAR,
                                 normalised_text_matrix(formula_char.matrix),
+                                getattr(formula_char, "graphic_instruction", ""),
                             )
                         )
                     cursor += vlen[vid]
@@ -1270,6 +1426,7 @@ class TranslateConverter(PDFConverterEx):
                             "rtxt": raw_string(fcur, cstk),
                             "lidx": lidx,
                             "style": cstyle,
+                            "graphic": pstk[id].graphic_instruction,
                         })
                         cstk = ""
                     closing, identifier = style_tag.groups()
@@ -1306,6 +1463,7 @@ class TranslateConverter(PDFConverterEx):
                                 "rtxt": raw_string(fcur, cstk),
                                 "lidx": lidx,
                                 "style": cstyle,
+                                "graphic": pstk[id].graphic_instruction,
                             })
                             cstk = ""
                         x = x0
@@ -1335,6 +1493,7 @@ class TranslateConverter(PDFConverterEx):
                                     "rtxt": raw_string(fcur, before),
                                     "lidx": lidx,
                                     "style": cstyle,
+                                    "graphic": pstk[id].graphic_instruction,
                                 })
                             # Move remainder to new line
                             lidx += 1
@@ -1354,6 +1513,7 @@ class TranslateConverter(PDFConverterEx):
                                 "rtxt": raw_string(fcur, cstk),
                                 "lidx": lidx,
                                 "style": cstyle,
+                                "graphic": pstk[id].graphic_instruction,
                             })
                             cstk = ""
                 if brk and x + adv > x1 + 0.1 * size:
@@ -1375,6 +1535,7 @@ class TranslateConverter(PDFConverterEx):
                             "lidx": lidx,
                             "style": TextStyle.REGULAR,
                             "orientation": normalised_text_matrix(vch.matrix),
+                            "graphic": getattr(vch, "graphic_instruction", ""),
                         })
                         if log.isEnabledFor(logging.DEBUG):
                             lstk.append(LTLine(0.1, (_x, _y), (x + vch.x0 - var[vid][0].x0, fix + y + vch.y0 - var[vid][0].y0)))
@@ -1416,6 +1577,7 @@ class TranslateConverter(PDFConverterEx):
                     "rtxt": raw_string(fcur, cstk),
                     "lidx": lidx,
                     "style": cstyle,
+                    "graphic": pstk[id].graphic_instruction,
                 })
 
             line_height = default_line_height
@@ -1500,6 +1662,7 @@ class TranslateConverter(PDFConverterEx):
                             vals["rtxt"],
                             vals.get("style", TextStyle.REGULAR),
                             vals.get("orientation", IDENTITY_ORIENTATION),
+                            vals.get("graphic", ""),
                         )
                     )
                 elif vals["type"] == OpType.LINE:

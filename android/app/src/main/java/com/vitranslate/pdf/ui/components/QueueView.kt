@@ -1,8 +1,6 @@
 package com.vitranslate.pdf.ui.components
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,11 +15,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
 import com.vitranslate.pdf.model.QueueItem
 import com.vitranslate.pdf.model.TranslationStatus
 import com.vitranslate.pdf.ui.theme.*
-import java.io.File
 
 @Composable
 fun QueueView(
@@ -113,7 +109,7 @@ private fun QueueRow(
         TranslationStatus.SKIPPED -> StatusQueuedLight
     }
 
-    val isClickable = item.outputPath != null && File(item.outputPath).exists()
+    val isClickable = translatedPdfExists(context, item.outputPath)
 
     Surface(
         shape = RoundedCornerShape(8.dp),
@@ -121,7 +117,7 @@ private fun QueueRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(enabled = isClickable) {
-                item.outputPath?.let { path -> openPdfFile(context, path) }
+                item.outputPath?.let { path -> openTranslatedPdf(context, path) }
             }
     ) {
         Row(
@@ -162,7 +158,7 @@ private fun QueueRow(
 
             if (isClickable) {
                 TextButton(
-                    onClick = { item.outputPath?.let { path -> openPdfFile(context, path) } },
+                    onClick = { item.outputPath?.let { path -> openTranslatedPdf(context, path) } },
                     modifier = Modifier.height(32.dp)
                 ) {
                     Text(
@@ -185,27 +181,4 @@ private fun QueueRow(
             }
         }
     }
-}
-
-private fun openPdfFile(context: Context, filePath: String) {
-    try {
-        val file = File(filePath)
-        if (!file.exists()) return
-
-        val contentUri: Uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.provider",
-            file
-        )
-
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(contentUri, "application/pdf")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-
-        val chooser = Intent.createChooser(intent, "Mở bằng PDF Viewer")
-        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(chooser)
-    } catch (_: Exception) {}
 }

@@ -212,6 +212,63 @@ def output_font_lacks_glyph(text: str, font: Font | None) -> bool:
         return False
 
 
+# A line that stops well short of its column is the last line of a paragraph.
+# Justified prose reaches the right edge on every line but the last, and even
+# ragged-right prose rarely gives up a quarter of the measure mid-paragraph.
+PARAGRAPH_END_RATIO = 0.75
+
+
+def line_ends_paragraph(
+    line_end: float,
+    bounds: tuple[float, float, float, float] | None,
+    ratio: float = PARAGRAPH_END_RATIO,
+) -> bool:
+    """Whether a line finishing here is the last line of its paragraph.
+
+    Without this a whole column of prose is one paragraph, because the layout
+    model returns the column as a single region and nothing else in the source
+    says where one paragraph stops. The translation then reflows as one
+    continuous block: first-line indents disappear, the blank line between
+    paragraphs goes, and short lines such as the four answers to a
+    multiple-choice question run together on one line.
+
+    BabelDOC splits on the same signal, comparing against the median line
+    width of the page. The column the layout model already found is a steadier
+    reference: it is the measure those lines were set to.
+    """
+    if bounds is None:
+        return False
+    x0, _y0, x1, _y1 = bounds
+    width = x1 - x0
+    if width <= 0:
+        return False
+    return line_end < x0 + width * ratio
+
+
+# A subscript or a superscript is a character or two. Anything this long that
+# reads as words is body text that merely happens to be set smaller than what
+# opened its paragraph.
+MINIMUM_PROSE_RUN = 12
+
+
+def run_is_prose(text: str) -> bool:
+    """Whether a run held back for being small is really body text.
+
+    A caption whose bold label is set larger than its body makes the whole body
+    look like a subscript against it, so an entire figure caption was preserved
+    as source glyphs and never translated. Size alone cannot tell the two
+    apart, but length and shape can: a run this long, made of words, is prose.
+
+    Runs preserved for any other reason never reach this test. A formula font,
+    a protected layout region, a character the output font cannot draw and a
+    rotated baseline all still keep their source glyphs however long they run.
+    """
+    visible = text.strip()
+    if len(visible) < MINIMUM_PROSE_RUN:
+        return False
+    return re.search(r"[a-z]{3,}", visible) is not None
+
+
 def paragraph_width_budget(x: float, x0: float, x1: float, lines: int) -> float:
     """Return usable width while accounting for a first-line indentation."""
     if lines <= 0 or x1 <= x0:
@@ -379,6 +436,14 @@ class PDFConverterEx(PDFConverter):
             # A new space resets its colour; the components that follow will
             # arrive as their own operator.
             self.graphic_operators.pop(slot.replace("_space", "_colour"), None)
+
+    def knows_colour_space(self, slot: str) -> bool:
+        return slot in self.graphic_operators
+
+    def forget_colour(self, slot: str) -> None:
+        """Drop a colour that cannot be replayed, so the run falls back to black."""
+        self.graphic_operators.pop(slot, None)
+        self.graphic_operators.pop(slot.replace("_colour", "_space"), None)
 
     def push_graphic_state(self) -> None:
         self.graphic_stack.append(dict(self.graphic_operators))
@@ -574,6 +639,7 @@ class TranslateConverter(PDFConverterEx):
         style_font_names: Dict | None = None,
         style_fonts: Dict | None = None,
         synthetic_styles: set[int] | None = None,
+        class_bounds: Dict | None = None,
     ) -> None:
         super().__init__(rsrcmgr)
         self.vfont = vfont
@@ -583,6 +649,7 @@ class TranslateConverter(PDFConverterEx):
         # high_level fills this mapping after the converter is constructed.
         # Preserve an empty mapping by identity instead of replacing it.
         self.layout_bounds = layout_bounds if layout_bounds is not None else {}
+        self.class_bounds = class_bounds if class_bounds is not None else {}
         self.noto_name = noto_name
         self.noto = noto
         self.style_font_names = style_font_names or {0: noto_name}
@@ -660,6 +727,9 @@ class TranslateConverter(PDFConverterEx):
         vbkt: int = 0
         vstk: list[LTChar] = []
         vlstk: list[LTLine] = []
+        # Whether everything held back so far was held back only for being
+        # smaller than the text that opened its paragraph.
+        vstk_size_only: bool = True
         vfix: float = 0
         var: list[list[LTChar]] = []
         varl: list[list[LTLine]] = []
@@ -669,6 +739,7 @@ class TranslateConverter(PDFConverterEx):
         xt: LTChar = None
         xt_cls: int = -1
         vmax: float = ltpage.width / 4
+        page_class_bounds = self.class_bounds.get(ltpage.pageid, {})
         ops: str = ""
         preserved_segments: set[str] = set()
 
@@ -738,6 +809,17 @@ class TranslateConverter(PDFConverterEx):
                 getattr(child, "graphic_instruction", "")
             ] += len(text)
 
+        def adopt_prose_run(index: int, characters: list[LTChar]) -> None:
+            """Put a run back into the paragraph as the body text it is."""
+            paragraph = pstk[index]
+            size = min(character.size for character in characters)
+            if size < paragraph.size:
+                paragraph.y -= size - paragraph.size
+                paragraph.size = size
+            for character in characters:
+                adopt_graphic(paragraph, character)
+                append_styled(index, character.get_text(), text_style_of(character))
+
         def append_formula(index: int, identifier: int) -> None:
             close_style(index)
             sstk[index] += f"{{v{identifier}}}"
@@ -778,17 +860,21 @@ class TranslateConverter(PDFConverterEx):
                 if is_bullet_character(child.get_text(), child.fontname):
                     cls = 0
                 orientation = text_orientation(child.matrix)
-                if (
+                # Kept apart because they are not equally final. Small text may
+                # turn out to be body text set under a larger label; a formula
+                # font or a protected region never does.
+                smaller_than_body = (
+                    cls == xt_cls
+                    and pstk[-1].text_length > 1
+                    and orientation == IDENTITY_ORIENTATION
+                    and child.size < pstk[-1].size * 0.79
+                )
+                must_preserve = (
                     cls == 0
-                    or (
-                        cls == xt_cls
-                        and pstk[-1].text_length > 1
-                        and orientation == IDENTITY_ORIENTATION
-                        and child.size < pstk[-1].size * 0.79
-                    )
                     or vflag(child.fontname, child.get_text())
                     or orientation is None
-                ):
+                )
+                if smaller_than_body or must_preserve:
                     cur_v = True
                 if not cur_v:
                     # Keep brackets with a formula only when the formula starts
@@ -797,9 +883,11 @@ class TranslateConverter(PDFConverterEx):
                     # bracket then strands it at its source coordinate.
                     if vstk and not pstk[-1].text_length and child.get_text() == "(":
                         cur_v = True
+                        must_preserve = True
                         vbkt += 1
                     if vbkt and child.get_text() == ")":
                         cur_v = True
+                        must_preserve = True
                         vbkt -= 1
                 if (
                     not cur_v
@@ -807,21 +895,28 @@ class TranslateConverter(PDFConverterEx):
                     or (pstk[-1].text_length and abs(child.x0 - xt.x0) > vmax)
                 ):
                     if vstk:
-                        if (
-                            not cur_v
-                            and cls == xt_cls
-                            and child.x0 > max([vch.x0 for vch in vstk])
+                        if vstk_size_only and run_is_prose(
+                            "".join(vch.get_text() for vch in vstk)
                         ):
-                            vfix = vstk[0].y0 - child.y0
-                        if not pstk[-1].text_length:
-                            xt_cls = -1
-                        append_formula(len(sstk) - 1, len(var))
-                        var.append(vstk)
-                        varl.append(vlstk)
-                        varf.append(vfix)
+                            adopt_prose_run(len(sstk) - 1, vstk)
+                            lstk.extend(vlstk)
+                        else:
+                            if (
+                                not cur_v
+                                and cls == xt_cls
+                                and child.x0 > max([vch.x0 for vch in vstk])
+                            ):
+                                vfix = vstk[0].y0 - child.y0
+                            if not pstk[-1].text_length:
+                                xt_cls = -1
+                            append_formula(len(sstk) - 1, len(var))
+                            var.append(vstk)
+                            varl.append(vlstk)
+                            varf.append(vfix)
                         vstk = []
                         vlstk = []
                         vfix = 0
+                        vstk_size_only = True
                 if not vstk:
                     if cls == xt_cls:
                         # Force paragraph break for list items: when text wraps back
@@ -839,13 +934,19 @@ class TranslateConverter(PDFConverterEx):
                                     text_style_of(child),
                                 )
                         elif child.x1 < xt.x0:
-                            if pstk[-1].orientation == IDENTITY_ORIENTATION:
-                                append_styled(
-                                    len(sstk) - 1,
-                                    " ",
-                                    text_style_of(child),
-                                )
-                            pstk[-1].brk = True
+                            if pstk[-1].text_length > 1 and line_ends_paragraph(
+                                xt.x1, page_class_bounds.get(int(cls))
+                            ):
+                                close_style(len(sstk) - 1)
+                                new_paragraph(child, cls)
+                            else:
+                                if pstk[-1].orientation == IDENTITY_ORIENTATION:
+                                    append_styled(
+                                        len(sstk) - 1,
+                                        " ",
+                                        text_style_of(child),
+                                    )
+                                pstk[-1].brk = True
                     else:
                         if sstk:
                             close_style(len(sstk) - 1)
@@ -876,6 +977,8 @@ class TranslateConverter(PDFConverterEx):
                         and child.x0 > xt.x0
                     ):
                         vfix = child.y0 - xt.y0
+                    if must_preserve:
+                        vstk_size_only = False
                     vstk.append(child)
                 pstk[-1].x0 = min(pstk[-1].x0, child.x0)
                 pstk[-1].x1 = max(pstk[-1].x1, child.x1)
@@ -897,10 +1000,16 @@ class TranslateConverter(PDFConverterEx):
             else:
                 pass
         if vstk:
-            append_formula(len(sstk) - 1, len(var))
-            var.append(vstk)
-            varl.append(vlstk)
-            varf.append(vfix)
+            if vstk_size_only and run_is_prose(
+                "".join(vch.get_text() for vch in vstk)
+            ):
+                adopt_prose_run(len(sstk) - 1, vstk)
+                lstk.extend(vlstk)
+            else:
+                append_formula(len(sstk) - 1, len(var))
+                var.append(vstk)
+                varl.append(vlstk)
+                varf.append(vfix)
 
         for index, paragraph in enumerate(pstk):
             close_style(index)

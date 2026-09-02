@@ -36,6 +36,17 @@ These classifications preserve the complete page layout instead of reflowing num
   `0.210` em beneath it, against `0.695`/`0.210` for English. Below it, lines
   are drawn through each other.
 - Windows uses Times New Roman when available; other environments use the downloaded Unicode font fallback.
+- A character the output font cannot draw keeps its source glyph rather than
+  being emitted as a missing one.
+- Translated text keeps the colour the source drew it in. A paragraph takes the
+  colour most of its own text uses; a colour that cannot be replayed safely
+  falls back to black rather than to a guess.
+- Bold and italic are read from the font descriptor before the font name, so the
+  abbreviated Adobe Pro faces keep their slant.
+- A line that stops well short of its column ends its paragraph, so indents and
+  the break between paragraphs survive translation.
+- A segment longer than the translation service accepts is refused and reported,
+  never truncated and delivered as if it were whole.
 - Long translations scale down before rendering, wrap at word boundaries,
   reduce line height to the language floor, then take up any clear vertical gap
   below the paragraph, and only shrink the font again when it still does not

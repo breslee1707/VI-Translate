@@ -55,6 +55,24 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   `page_has_image` (any image at all) drives the image-only report, because a
   scanner routinely emits one page as dozens of small tiles.
 
+## Colour and Emphasis
+
+The colour in force is captured as the source wrote it and replayed in front of
+each run, the way BabelDOC carries colour: reducing everything to RGB would
+guess at a conversion of an ICCBased or Separation space the document never
+asked for. One entry is kept per piece of colour state, not per operator, since
+`g`, `rg`, `k`, `sc` and `scn` all write the same slot. `sc`/`scn` are never
+replayed without a space that explains their operands - a device space is
+supplied from the operand count, and a colour that still cannot be explained is
+dropped so the run falls back to black rather than to whatever DeviceGray makes
+of four CMYK components. An ExtGState travels with the text only when it
+carries no soft mask, transfer function or partial alpha. A paragraph takes the
+colour most of its own ink uses, because a colour change cannot travel through
+the translator the way a style marker can.
+
+Emphasis comes from the font descriptor's own flags before the font name, since
+the Adobe Pro families abbreviate the slanted face as `-It`.
+
 ## Large Documents
 
 The app requests mono output only; do not construct the unused interleaved

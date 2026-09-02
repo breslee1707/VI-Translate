@@ -24,7 +24,9 @@ from pdf2zh.converter import (
     operation_ink,
     paragraph_width_budget,
     is_outside_page,
+    line_ends_paragraph,
     output_font_lacks_glyph,
+    run_is_prose,
     stroke_colour_from_fill,
     preferred_translation,
     rescale_operations,
@@ -42,8 +44,9 @@ from pdf2zh.converter import (
 )
 from pdf2zh.high_level import output_style_font_paths
 from pdf2zh.converter import PDFConverterEx
-from pdf2zh.pdfinterp import PDFPageInterpreterEx
+from pdf2zh.pdfinterp import PDFPageInterpreterEx, extgstate_is_safe
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
+from pdfminer.psparser import PSLiteral
 
 
 class RecordingDevice:
@@ -553,6 +556,84 @@ class OrientationAndStyleTests(unittest.TestCase):
         )
         self.assertEqual(stroke_colour_from_fill("/CS0 cs 1.000000 scn"),
                          "/CS0 CS 1.000000 SCN")
+
+    def test_a_line_stopping_short_of_its_column_ends_the_paragraph(self):
+        """The layout model returns a column, not a paragraph.
+
+        Without this the whole column translates as one block: indents go, the
+        gap between paragraphs goes, and the four answers to a multiple-choice
+        question run together on one line.
+        """
+        column = (300.0, 100.0, 548.0, 700.0)
+        self.assertTrue(line_ends_paragraph(360.0, column))
+        self.assertFalse(line_ends_paragraph(546.0, column))
+        # Three quarters of the measure is still a full line.
+        self.assertFalse(line_ends_paragraph(300.0 + 248.0 * 0.8, column))
+
+    def test_a_line_is_never_judged_without_a_column_to_judge_it_against(self):
+        self.assertFalse(line_ends_paragraph(360.0, None))
+        self.assertFalse(line_ends_paragraph(360.0, (300.0, 100.0, 300.0, 700.0)))
+
+    def test_a_long_run_of_words_is_body_text_not_a_subscript(self):
+        """A caption's label is set larger than its body, so the body reads as
+        small text against it and the whole caption stayed untranslated."""
+        self.assertTrue(
+            run_is_prose("Members of one of the cytokine receptor superfamilies")
+        )
+        self.assertTrue(run_is_prose("the solid lines represent the shape"))
+
+    def test_a_real_subscript_is_still_preserved(self):
+        for run in ("1", "2n", "max", "C6H12O6", "  ", "", "1994;330:839"):
+            self.assertFalse(run_is_prose(run), run)
+
+    def test_a_graphics_state_that_only_mixes_colour_is_replayed(self):
+        """Overprint belongs to the text: it is why a CMYK black prints black."""
+        self.assertTrue(
+            extgstate_is_safe(
+                {"OP": True, "op": True, "OPM": 1, "BM": PSLiteral("Normal"),
+                 "ca": 1, "CA": 1, "SMask": PSLiteral("None")}
+            )
+        )
+        self.assertTrue(extgstate_is_safe({}))
+
+    def test_a_graphics_state_that_could_hide_the_text_is_left_behind(self):
+        """A page that reads as empty is worse than one whose black is a shade off."""
+        self.assertFalse(extgstate_is_safe({"ca": 0}))
+        self.assertFalse(extgstate_is_safe({"CA": 0.5}))
+        self.assertFalse(extgstate_is_safe({"SMask": {"Type": "Mask"}}))
+        self.assertFalse(extgstate_is_safe({"TR": {"FunctionType": 2}}))
+
+    def test_components_are_replayed_with_a_space_that_explains_them(self):
+        """`0 0 0 1 sc` is CMYK black, and DeviceGray 1 is white.
+
+        Replayed without the space it names components in, a chemistry
+        textbook's blue headings were drawn white on white paper.
+        """
+        device = PDFConverterEx(PDFResourceManager())
+        interpreter = PDFPageInterpreterEx(PDFResourceManager(), device, {})
+        interpreter.record_graphic("sc", [0.0, 0.0, 0.0, 1.0])
+        self.assertEqual(
+            device.graphic_instruction,
+            "/DeviceCMYK cs 0.000000 0.000000 0.000000 1.000000 sc",
+        )
+
+    def test_a_named_space_already_in_force_is_kept(self):
+        device = PDFConverterEx(PDFResourceManager())
+        interpreter = PDFPageInterpreterEx(PDFResourceManager(), device, {})
+        interpreter.record_graphic("cs", ["/CS1"])
+        interpreter.record_graphic("sc", [1.0, 1.0, 0.0, 0.0])
+        self.assertEqual(
+            device.graphic_instruction,
+            "/CS1 cs 1.000000 1.000000 0.000000 0.000000 sc",
+        )
+
+    def test_a_colour_that_cannot_be_replayed_is_dropped(self):
+        """Falling back to black beats drawing the run in a guessed colour."""
+        device = PDFConverterEx(PDFResourceManager())
+        interpreter = PDFPageInterpreterEx(PDFResourceManager(), device, {})
+        interpreter.record_graphic("rg", [0.1, 0.2, 0.3])
+        interpreter.record_graphic("scn", [PSLiteral("P0")])
+        self.assertEqual(device.graphic_instruction, "")
 
     def test_first_line_indent_is_deducted_from_width_budget(self):
         self.assertEqual(paragraph_width_budget(20, 10, 110, 1), 90)

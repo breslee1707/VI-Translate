@@ -79,8 +79,6 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
-        askForNotificationPermission()
-
         // Handle incoming PDF shared intent
         intent?.let { handleIntent(it) }
 
@@ -94,7 +92,8 @@ class MainActivity : ComponentActivity() {
                         viewModel = viewModel,
                         onPickFiles = { pickFilesLauncher.launch(arrayOf("application/pdf")) },
                         onPickDirectory = { pickDirectoryLauncher.launch(null) },
-                        onPickSaveDirectory = { pickSaveDirectoryLauncher.launch(null) }
+                        onPickSaveDirectory = { pickSaveDirectoryLauncher.launch(null) },
+                        onStartTranslation = { startTranslationAskingToNotify() }
                     )
                 }
             }
@@ -102,16 +101,24 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * The foreground service runs either way; without this the progress bar and
-     * the Huỷ action simply never appear.
+     * Asked when a translation starts, not at launch.
+     *
+     * Requesting it in onCreate put a system permission dialog over the app
+     * before the user had done anything, which is what Android's own guidance
+     * tells you not to do. The notification only matters once there is progress
+     * to report, so that is when it is worth interrupting for.
+     *
+     * The foreground service runs either way; without the permission the
+     * progress bar and the Huỷ action simply never appear.
      */
-    private fun askForNotificationPermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        val granted = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+    private fun startTranslationAskingToNotify() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
-        if (!granted) {
+        ) {
             requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        viewModel.startTranslation()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -139,7 +146,8 @@ fun MainScreen(
     viewModel: MainViewModel,
     onPickFiles: () -> Unit,
     onPickDirectory: () -> Unit,
-    onPickSaveDirectory: () -> Unit
+    onPickSaveDirectory: () -> Unit,
+    onStartTranslation: () -> Unit
 ) {
     val queueItems by viewModel.queueItems.collectAsState()
     val selectedLanguage by viewModel.selectedLanguage.collectAsState()
@@ -203,7 +211,7 @@ fun MainScreen(
             customSaveDirectory = customSaveDirectory,
             onPickSaveDirectory = onPickSaveDirectory,
             isTranslating = isTranslating,
-            onStartTranslation = { viewModel.startTranslation() },
+            onStartTranslation = onStartTranslation,
             onCancelTranslation = { viewModel.cancelTranslation() }
         )
 

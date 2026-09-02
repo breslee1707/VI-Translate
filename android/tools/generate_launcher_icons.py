@@ -36,6 +36,7 @@ DENSITIES = {
 
 ADAPTIVE_DP = 108  # Full adaptive-icon canvas.
 LEGACY_DP = 48  # Pre-26 launcher icon.
+MARK_DP = 48  # In-app mark drawn in the header.
 
 # Fraction of the 108dp canvas the artwork is allowed to occupy. The safe zone
 # is 66/108 = 0.611; sitting just inside it keeps the mark clear of the mask on
@@ -119,7 +120,20 @@ def main() -> None:
             out_dir / "ic_launcher_round.png"
         )
 
-        written.append(f"mipmap-{bucket}: {adaptive_px}px adaptive, {legacy_px}px legacy")
+        # A separate drawable for the header. Compose's painterResource reads
+        # vectors and bitmaps only, so it cannot be pointed at R.mipmap
+        # .ic_launcher: on API 26+ that resolves to the <adaptive-icon> XML and
+        # throws at first composition. This is a plain PNG, full bleed, with no
+        # launcher safe-zone padding to waste at 36dp.
+        mark_dir = RES / f"drawable-{bucket}"
+        mark_dir.mkdir(parents=True, exist_ok=True)
+        mark_px = round(MARK_DP * factor)
+        fitted(art, mark_px, 1.0).save(mark_dir / "ic_app_mark.png")
+
+        written.append(
+            f"mipmap-{bucket}: {adaptive_px}px adaptive, {legacy_px}px legacy; "
+            f"drawable-{bucket}: {mark_px}px mark"
+        )
 
     for line in written:
         print(line)

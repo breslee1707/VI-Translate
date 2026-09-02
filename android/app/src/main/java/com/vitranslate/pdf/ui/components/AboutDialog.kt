@@ -9,17 +9,22 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.OpenInNew
-import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.Image
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.vitranslate.pdf.R
 
 @Composable
 fun AboutDialog(
@@ -54,31 +59,35 @@ fun AboutDialog(
                     .fillMaxSize()
                     .padding(18.dp)
             ) {
+                // The title row had no weight, so a title this long pushed the
+                // close button past the dialog edge and clipped itself.
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Image(
+                        painter = painterResource(R.drawable.ic_app_mark),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Ghi nhận & Mã nguồn",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = onDismiss) {
                         Icon(
-                            imageVector = Icons.Default.PictureAsPdf,
-                            contentDescription = "App Icon",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(28.dp)
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Đóng",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Ghi nhận & Mã nguồn (Credits)",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Text("✕", style = MaterialTheme.typography.titleMedium)
                     }
                 }
 

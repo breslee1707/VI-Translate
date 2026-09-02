@@ -41,7 +41,7 @@ fun HeaderView(
         // The app's own mark rather than a generic PDF glyph, so the header and
         // the launcher icon are recognisably the same product.
         Image(
-            painter = painterResource(R.mipmap.ic_launcher),
+            painter = painterResource(R.drawable.ic_app_mark),
             contentDescription = null,
             modifier = Modifier
                 .size(36.dp)

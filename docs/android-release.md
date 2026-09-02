@@ -70,6 +70,24 @@ keyPassword=…
 | `ANDROID_KEY_ALIAS` | `vitranslate` |
 | `ANDROID_KEY_PASSWORD` | the key password |
 
+Set them with `gh secret set NAME --body "<value>"`, not by piping. A pipe from
+PowerShell appends CRLF, and a password secret with a trailing carriage return
+fails later with a signing error that names the wrong cause. The workflow now
+strips whitespace from the base64 and opens the keystore with `keytool` before
+building, so a bad secret fails at the step that set it.
+
+From PowerShell:
+
+```powershell
+$d = "C:\path\to\signing"
+$pw = Get-Content "$d\password.txt" -Raw
+$b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$d\vitranslate-release.jks"))
+gh secret set ANDROID_KEYSTORE_BASE64 --body $b64
+gh secret set ANDROID_KEYSTORE_PASSWORD --body $pw
+gh secret set ANDROID_KEY_ALIAS --body "vitranslate"
+gh secret set ANDROID_KEY_PASSWORD --body $pw
+```
+
 Without `ANDROID_KEYSTORE_BASE64` the workflow still builds, but the artifact
 is named `PDFTranslate-android-<version>-unsigned.apk` and the publish job
 refuses to release it. An unsigned APK will not install on a device; use the

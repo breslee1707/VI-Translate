@@ -79,13 +79,23 @@ jobs:
         id: keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           if [ -z "$KEYSTORE_BASE64" ]; then
             echo "No ANDROID_KEYSTORE_BASE64 secret; the release APK will be unsigned."
             echo "signed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          # Strip whitespace before decoding. GNU base64 rejects a lone CR as
+          # invalid input, and a secret set from a Windows shell or pasted into
+          # the web UI picks one up easily — the failure message says nothing
+          # about where the stray byte came from.
+          printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/release.jks"
+          if ! keytool -list -keystore "$RUNNER_TEMP/release.jks" \
+                 -storepass "$KEYSTORE_PASSWORD" >/dev/null 2>&1; then
+            echo "The keystore decoded but will not open. Check ANDROID_KEYSTORE_PASSWORD." >&2
+            exit 1
+          fi
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
       - name: Build the release APK

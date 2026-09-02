@@ -95,6 +95,44 @@ against its source; each has a test in `PdfLayoutPreserverTest`.
   `Matrix.getRotateInstance`. Before this, rotated table headers were stripped
   and never written back.
 
+## Translation Is Per Paragraph, Not Per Line
+
+The port sent one extracted line at a time to the engine. An engine given a
+fragment translates the fragment: "advanced", orphaned at the end of a line
+from "advanced equations", came back as the Vietnamese for "advanced
+equipment". `groupIntoParagraphs` gathers lines back into the sentence they
+spell before anything is sent, and `drawParagraph` writes the answer onto the
+baselines and left edges the source used, so the layout does not move.
+
+Three things that took a rendered page to work out:
+
+- **The next line of a paragraph is not the next line on the page.** Blocks
+  arrive in reading order across the whole page, so on a three-column layout
+  the line after a left-column line is the middle column at the same height.
+  Each paragraph follows its own column down instead: the highest unused line
+  below the current one that starts at the same left edge.
+- **The measure is what the lines were set to, not how far they could reach.**
+  Measuring "did this line run the full width" against the gap to the next
+  column made ordinary full lines look short, and 41 lines produced 39
+  paragraphs. The measure is the widest line in the column.
+- **A table and a paragraph are not separable by line spacing.** In the
+  document this was built against, a table row and a wrapped line are both one
+  pitch apart to a tenth of a point. What separates them is the spread of line
+  widths: prose runs the full measure on every line but its last (0.93 of lines
+  at full measure), a table's labels are each whatever length they happen to be
+  (0.22). A column is treated as prose only when most of its lines run the
+  measure *and* the measure is at least 8 ems — without the second test a
+  column of one-em symbols looks like perfectly justified prose. A non-prose
+  column is never merged, which costs the two-line table labels their join and
+  is the right side to err on.
+
+Vietnamese runs longer than English, so a paragraph rarely fits the line count
+its source had. The spare space below it is spent before the type is shrunk --
+type two points smaller than the column beside it is visible, a paragraph one
+line longer in its own document's gap is not -- but one line of the gap is
+never spent, because the blank line between two paragraphs is what says they
+are two.
+
 ## Windows Note
 
 If the Gradle test worker fails with `Could not find or load main class ...`,

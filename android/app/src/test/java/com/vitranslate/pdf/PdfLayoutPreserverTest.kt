@@ -269,4 +269,149 @@ class PdfLayoutPreserverTest {
         // Bounded by the rotated header's left edge (x - descent), not the page.
         assertEquals(510f, limits.getValue(label), 1.0f)
     }
+
+    /** Right limits as the page would give them, for paragraph tests. */
+    private fun limits(vararg blocks: PdfLayoutPreserver.TextBlock) =
+        PdfLayoutPreserver.computeRightLimits(blocks.toList(), pageRightEdge = 595f)
+
+    @Test
+    fun testGroupIntoParagraphs_linesThatRanTheMeasureAreOneParagraph() {
+        // Three lines of body prose in a 240pt column. The first two reach the
+        // margin, the third is the short last line.
+        val one = block("This brochure contains advanced", x = 74f, y = 500f, width = 230f)
+        val two = block("equations, figures and", x = 74f, y = 490f, width = 225f)
+        val three = block("recommendations.", x = 74f, y = 480f, width = 90f)
+        val neighbour = block("second column", x = 333f, y = 500f, width = 200f)
+
+        val all = listOf(one, two, three, neighbour)
+        val paragraphs = PdfLayoutPreserver.groupIntoParagraphs(
+            all,
+            PdfLayoutPreserver.computeRightLimits(all, 595f),
+            pageRightEdge = 595f
+        )
+
+        assertEquals(2, paragraphs.size)
+        assertEquals(3, paragraphs[0].lines.size)
+        assertEquals(
+            "This brochure contains advanced equations, figures and recommendations.",
+            paragraphs[0].text
+        )
+    }
+
+    /**
+     * The label column of the terminology table, at its real geometry: 8pt
+     * type at x=218.3, one line pitch of 9.6 between every row, and the widths
+     * the document actually sets. Nothing here is invented -- a smaller,
+     * tidier sample would not exercise the rule, because the rule is about the
+     * spread of the widths.
+     */
+    private fun terminologyTableColumn(): List<PdfLayoutPreserver.TextBlock> {
+        val widths = listOf(
+            74.1f, 35.9f, 63.8f, 84.3f, 70.0f, 115.0f, 44.2f, 127.7f,
+            126.7f, 103.1f, 44.3f, 81.4f, 134.7f, 93.0f, 124.6f
+        )
+        var y = 640f
+        return widths.map { width ->
+            val line = block("row of the table", x = 218.3f, y = y, width = width, fontSize = 8f)
+            y -= 9.6f
+            line
+        }
+    }
+
+    @Test
+    fun testGroupIntoParagraphs_tableRowsAreNeverOneParagraph() {
+        // A table row and a wrapped line are both exactly one line pitch apart,
+        // to a tenth of a point, so spacing cannot tell them apart. What can is
+        // that prose runs the full measure on every line but its last, while a
+        // table's labels are each whatever length they happen to be.
+        val rows = terminologyTableColumn()
+
+        val paragraphs = PdfLayoutPreserver.groupIntoParagraphs(
+            rows,
+            PdfLayoutPreserver.computeRightLimits(rows, 595f),
+            pageRightEdge = 595f
+        )
+
+        assertEquals(rows.size, paragraphs.size)
+        assertTrue(paragraphs.all { it.lines.size == 1 })
+    }
+
+    @Test
+    fun testGroupIntoParagraphs_aColumnOfSymbolsIsNeverProse() {
+        // Every entry in a symbol column fills it, so the spread of widths says
+        // "prose". Its width does not: a text measure is many times the size of
+        // its type, and this column is barely one em wide. Without that test
+        // the symbols of a table would be joined into a sentence.
+        var y = 640f
+        val symbols = listOf("b", "b0", "C..", "d", "dA", "f", "F", "F1").map { text ->
+            val line = block(text, x = 465f, y = y, width = 9f, fontSize = 8f)
+            y -= 9.6f
+            line
+        }
+
+        val paragraphs = PdfLayoutPreserver.groupIntoParagraphs(
+            symbols,
+            PdfLayoutPreserver.computeRightLimits(symbols, 595f),
+            pageRightEdge = 595f
+        )
+
+        assertEquals(symbols.size, paragraphs.size)
+    }
+
+    @Test
+    fun testGroupIntoParagraphs_aChangeOfSizeOrColumnBreaksTheParagraph() {
+        val heading = block("Terminology", x = 74f, y = 520f, width = 230f, fontSize = 16f)
+        val body = block("This brochure contains advanced", x = 74f, y = 500f, width = 230f)
+        val indented = block("far away in another column", x = 200f, y = 490f, width = 230f)
+
+        val all = listOf(heading, body, indented)
+        val paragraphs = PdfLayoutPreserver.groupIntoParagraphs(
+            all,
+            PdfLayoutPreserver.computeRightLimits(all, 595f),
+            pageRightEdge = 595f
+        )
+
+        assertEquals(3, paragraphs.size)
+    }
+
+    @Test
+    fun testGroupIntoParagraphs_rotatedRunsStayOnTheirOwn() {
+        val header = block("Designation", x = 220f, y = 150f, width = 50f, rotation = 90)
+        val line = block("Drum and roller width", x = 218f, y = 140f, width = 230f)
+
+        val all = listOf(header, line)
+        val paragraphs = PdfLayoutPreserver.groupIntoParagraphs(
+            all,
+            PdfLayoutPreserver.computeRightLimits(all, 595f),
+            pageRightEdge = 595f
+        )
+
+        assertEquals(2, paragraphs.size)
+        assertTrue(paragraphs.all { it.lines.size == 1 })
+    }
+
+    @Test
+    fun testJoinLines_aWordBrokenForTheMarginKeepsItsHyphenAndLosesTheSpace() {
+        // "equa-" + "tions" must not become "equa- tions": the engine reads the
+        // joined form as the word. The hyphen stays because removing it would
+        // guess wrong on a compound the source wrote hyphenated ("take-up").
+        val joined = PdfLayoutPreserver.joinLines(
+            listOf(
+                block("This brochure contains advanced equa-", x = 74f, y = 500f, width = 230f),
+                block("tions and figures", x = 74f, y = 490f, width = 90f)
+            )
+        )
+        assertEquals("This brochure contains advanced equa-tions and figures", joined)
+    }
+
+    @Test
+    fun testJoinLines_ordinaryLinesAreJoinedWithASingleSpace() {
+        val joined = PdfLayoutPreserver.joinLines(
+            listOf(
+                block("The take-up range for", x = 74f, y = 500f, width = 230f),
+                block("load-dependent systems", x = 74f, y = 490f, width = 100f)
+            )
+        )
+        assertEquals("The take-up range for load-dependent systems", joined)
+    }
 }

@@ -98,12 +98,15 @@ class PdfLayoutPreserver(private val context: Context) {
                             val textBlocks = groupIntoLineRuns(collapsedBlocks)
 
                             if (textBlocks.isNotEmpty()) {
-                                val translations = mutableListOf<BlockTranslation>()
+                                val pageRight = textCollector.cropBox.upperRightX
+                                val rightLimits = computeRightLimits(textBlocks, pageRight)
+                                val paragraphs = groupIntoParagraphs(textBlocks, rightLimits, pageRight)
+                                val translations = mutableListOf<ParagraphTranslation>()
                                 var skippedMathCount = 0
 
-                                for (block in textBlocks) {
+                                for (paragraph in paragraphs) {
                                     if (isCancelled()) throw TranslationCancelledException()
-                                    val originalText = block.text.trim()
+                                    val originalText = paragraph.text.trim()
                                     if (originalText.isBlank()) continue
 
                                     // Separate option label prefix (e.g. "A.") from content before translating
@@ -113,7 +116,7 @@ class PdfLayoutPreserver(private val context: Context) {
                                     // Skip translating standalone math formulas and numeric choices, but preserve them in translations list
                                     if (textToTranslate.isBlank() || isPureMathOrFormula(textToTranslate)) {
                                         skippedMathCount++
-                                        translations.add(BlockTranslation(block, originalText))
+                                        translations.add(ParagraphTranslation(paragraph, originalText))
                                         continue
                                     }
 
@@ -143,14 +146,12 @@ class PdfLayoutPreserver(private val context: Context) {
                                     } else {
                                         translatedRemainder
                                     }
-                                    translations.add(BlockTranslation(block, translatedText))
+                                    translations.add(ParagraphTranslation(paragraph, translatedText))
                                 }
 
-                                onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: Tìm thấy ${textBlocks.size} đoạn. Đã dịch: ${translations.size}, Bỏ qua công thức: $skippedMathCount")
+                                onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: ${textBlocks.size} dòng gộp thành ${paragraphs.size} đoạn. Đã dịch: ${translations.size}, Bỏ qua công thức: $skippedMathCount")
 
                                 if (translations.isNotEmpty()) {
-                                    val rightLimits = computeRightLimits(textBlocks, textCollector.cropBox.upperRightX)
-
                                     // Strip original text from page streams so vector drawings & diagrams remain 100% pristine
                                     stripTextFromPage(document, page)
 
@@ -163,24 +164,45 @@ class PdfLayoutPreserver(private val context: Context) {
                                     ).use { stream ->
                                         for (i in translations.indices) {
                                             val translation = translations[i]
-                                            val block = translation.block
+                                            val paragraph = translation.paragraph
                                             val cleanedText = stripTagsAndPlaceholders(translation.translated)
                                             val text = sanitizeForFont(cleanedText, font)
+
+                                            // Cover the source lines whatever happens next, so a
+                                            // paragraph whose translation came back blank leaves
+                                            // clean paper rather than half-erased English.
+                                            for (line in paragraph.lines) coverSourceText(stream, line)
                                             if (text.isBlank()) continue
 
-                                            // The next block down the page bounds how far this one
-                                            // may wrap. Rotated runs sit outside that vertical order,
-                                            // so they are not what "next" means here.
+                                            // The next paragraph down the page bounds how far this
+                                            // one may spill. Rotated runs sit outside that vertical
+                                            // order, so they are not what "next" means here.
+                                            // What bounds a spill is the next thing in
+                                            // this column, not the next thing on the page.
+                                            val lastY = paragraph.lines.last().y
                                             val nextY = translations
                                                 .asSequence()
                                                 .drop(i + 1)
-                                                .firstOrNull { !it.block.isRotated }
-                                                ?.block?.y ?: 0f
-                                            val maxAllowedHeight = if (nextY > 0f && block.y > nextY) (block.y - nextY) * 0.9f else Float.MAX_VALUE
-                                            coverSourceText(stream, block)
-                                            val rightLimit = rightLimits[block]
-                                                ?: (textCollector.cropBox.upperRightX - PAGE_RIGHT_MARGIN)
-                                            drawTextWithWrapping(stream, font, block, text, maxAllowedHeight, rightLimit)
+                                                .filter { !it.paragraph.isRotated }
+                                                .filter {
+                                                    kotlin.math.abs(it.paragraph.first.x - paragraph.first.x) <=
+                                                        PARAGRAPH_LEFT_TOLERANCE
+                                                }
+                                                .map { it.paragraph.y }
+                                                .filter { it < lastY }
+                                                .maxOrNull() ?: 0f
+                                            val maxAllowedHeight =
+                                                if (nextY > 0f && lastY > nextY) (lastY - nextY) * 0.9f
+                                                else Float.MAX_VALUE
+
+                                            if (paragraph.lines.size == 1) {
+                                                drawTextWithWrapping(
+                                                    stream, font, paragraph.first, text,
+                                                    maxAllowedHeight, paragraph.rightLimit
+                                                )
+                                            } else {
+                                                drawParagraph(stream, font, paragraph, text, maxAllowedHeight)
+                                            }
                                         }
                                     }
                                 }
@@ -434,6 +456,43 @@ class PdfLayoutPreserver(private val context: Context) {
 
         /** Floor for the drawn length of a rotated run, in points. */
         private const val MIN_ROTATED_LENGTH = 8f
+
+        /**
+         * Lines a paragraph may run on past the ones its source used, when the
+         * space below it is free. A cap rather than the whole gap, so a
+         * paragraph at the foot of a column cannot walk down the empty half of
+         * a page it was never meant to fill.
+         */
+        private const val MAX_SPILL_LINES = 4
+
+        /**
+         * How much of its column a line must fill to be a continued line.
+         * Justified prose reaches the right edge on every line but the last,
+         * and even ragged-right prose rarely gives up a quarter of the measure
+         * mid-paragraph. Mirrors PARAGRAPH_END_RATIO in the desktop converter.
+         */
+        private const val PARAGRAPH_END_RATIO = 0.75f
+
+        /** Left edges further apart than this start a different paragraph. */
+        private const val PARAGRAPH_LEFT_TOLERANCE = 12f
+
+        /**
+         * A text measure is many times the size of its type. A column of
+         * symbols or units is one or two ems wide and every entry fills it, so
+         * without this every symbol in a table would look like full-measure
+         * prose and the column would be joined into one sentence.
+         */
+        private const val MIN_PROSE_MEASURE_EMS = 8f
+
+        /**
+         * How much of a column must run the full measure for the column to be
+         * prose. Body text reaches the margin on every line but the last; a
+         * table's labels are whatever length each label happens to be. On the
+         * document this was built against the two sit at 0.93 and 0.22, and
+         * nothing separates them by line spacing -- a table row and a wrapped
+         * line are both one line pitch apart, to a tenth of a point.
+         */
+        private const val PROSE_FULL_LINE_RATIO = 0.5f
         private val LETTER_RUN_PATTERN = Regex("[\\p{L}]+")
         private val FRACTION_BAR_PATTERN = Regex("^[-_–—―─═]{1,}$")
 
@@ -498,6 +557,143 @@ class PdfLayoutPreserver(private val context: Context) {
             }
 
             return false
+        }
+
+        /** What a column was set to, and whether it is prose at all. */
+        private class ColumnMeasure(val measure: Float, val isProse: Boolean)
+
+        /**
+         * Whether two lines belong to the same block of text: same left edge,
+         * same size of type, both reading across the page.
+         */
+        fun sameColumn(a: TextBlock, b: TextBlock): Boolean {
+            if (a.isRotated || b.isRotated) return false
+            if (abs(a.x - b.x) > PARAGRAPH_LEFT_TOLERANCE) return false
+            val font = maxOf(a.fontSize, b.fontSize)
+            return abs(a.fontSize - b.fontSize) <= font * 0.12f
+        }
+
+        /**
+         * Join the lines of a paragraph back into the sentence they spell.
+         *
+         * A line broken mid-word leaves its hyphen behind, so those two pieces
+         * are joined with nothing between them and the hyphen is kept. Removing
+         * it would be a guess: "take-" followed by "up" is a compound the source
+         * wrote that way, not a word split for the margin. Kept, the engine
+         * reads "equa-tions" as "equations" and "take-up" as itself, which is
+         * both halves right for the price of neither being decided here.
+         */
+        fun joinLines(lines: List<TextBlock>): String {
+            val builder = StringBuilder()
+            for (line in lines) {
+                val piece = line.text.trim()
+                if (piece.isEmpty()) continue
+                if (builder.isEmpty()) {
+                    builder.append(piece)
+                } else if (builder.last() == '-') {
+                    builder.append(piece)
+                } else {
+                    builder.append(' ').append(piece)
+                }
+            }
+            return builder.toString()
+        }
+
+        /**
+         * Gather lines that were one paragraph into one unit of translation.
+         *
+         * The signal that a paragraph continues is that the line before it ran
+         * the full measure of its column. Prose set to a column reaches the
+         * right edge on every line but the last; a line that gives up a quarter
+         * of the measure has stopped because the paragraph stopped. This is the
+         * same rule the desktop engine uses (`line_ends_paragraph`), against
+         * the same reference: the column the line was set to.
+         *
+         * That one test is what keeps a table out of this. Every label in a
+         * terminology table is far shorter than its column, so every row ends
+         * its own paragraph and no two rows are ever joined — while the two
+         * lines of a label that did wrap are joined, because the first of them
+         * did reach the edge.
+         */
+        fun groupIntoParagraphs(
+            lines: List<TextBlock>,
+            rightLimits: Map<TextBlock, Float>,
+            pageRightEdge: Float
+        ): List<Paragraph> {
+            if (lines.isEmpty()) return emptyList()
+            val fallbackLimit = pageRightEdge - PAGE_RIGHT_MARGIN
+
+            fun limitOf(line: TextBlock) = rightLimits[line] ?: fallbackLimit
+
+            // The measure is what the lines were set to, not how far they could
+            // have reached. The gap to the next column is wider than the text,
+            // so measuring against it made ordinary full lines look short and
+            // no paragraph ever formed.
+            val columns = HashMap<TextBlock, ColumnMeasure>(lines.size)
+            for (line in lines) {
+                if (line.isRotated) continue
+                val column = lines.filter { sameColumn(line, it) }
+                val measure = column.maxOf { it.width }
+                val full = column.count { it.width >= measure * PARAGRAPH_END_RATIO }
+                val isProse = measure >= line.fontSize * MIN_PROSE_MEASURE_EMS &&
+                    full >= column.size * PROSE_FULL_LINE_RATIO
+                columns[line] = ColumnMeasure(measure, isProse)
+            }
+
+            fun reachesTheMargin(line: TextBlock): Boolean {
+                val column = columns[line] ?: return false
+                if (!column.isProse) return false
+                return line.width >= column.measure * PARAGRAPH_END_RATIO
+            }
+
+            fun continues(previous: TextBlock, next: TextBlock): Boolean {
+                if (!sameColumn(previous, next)) return false
+                val gap = previous.y - next.y
+                val font = maxOf(previous.fontSize, next.fontSize)
+                if (gap <= font * 0.6f || gap > font * 2.0f) return false
+                return reachesTheMargin(previous)
+            }
+
+            // The next line of a paragraph is not the next line on the page.
+            // Blocks arrive in reading order across the whole page, so on a
+            // three-column layout the line after a left-column line is the
+            // middle column's line at the same height. Walking that order
+            // joined nothing. Each paragraph instead follows its own column
+            // down: the highest unused line below the current one that starts
+            // at the same left edge.
+            val order = lines.sortedWith(
+                compareByDescending<TextBlock> { it.y }.thenBy { it.x }
+            )
+            val used = HashSet<TextBlock>(order.size)
+            val paragraphs = mutableListOf<Paragraph>()
+
+            for (start in order) {
+                if (start in used) continue
+                used.add(start)
+                val current = mutableListOf(start)
+                while (true) {
+                    val previous = current.last()
+                    val candidate = order
+                        .asSequence()
+                        .filter { it !in used && it.y < previous.y }
+                        .filter { abs(it.x - previous.x) <= PARAGRAPH_LEFT_TOLERANCE }
+                        .maxByOrNull { it.y }
+                        ?: break
+                    if (!continues(previous, candidate)) break
+                    used.add(candidate)
+                    current.add(candidate)
+                }
+                // Wrap to the measure the source set, but never past the point
+                // where the next column starts.
+                val collisionLimit = current.minOf { limitOf(it) }
+                val measured = current.minOf { it.x } +
+                    (columns[current.first()]?.measure ?: (collisionLimit - current.first().x))
+                paragraphs.add(Paragraph(current, minOf(collisionLimit, measured)))
+            }
+
+            return paragraphs.sortedWith(
+                compareByDescending<Paragraph> { it.y }.thenBy { it.first.x }
+            )
         }
 
         /**
@@ -798,6 +994,72 @@ class PdfLayoutPreserver(private val context: Context) {
     }
 
     /**
+     * Write a translated paragraph back onto the lines the source used.
+     *
+     * The baselines, the left edges and the measure all come from the source,
+     * so a paragraph that fits lands exactly where it was. Vietnamese runs a
+     * little longer than English, so the size is stepped down until the
+     * translation wraps into no more lines than the source had. Only if that
+     * fails does the paragraph spill below its last baseline, and it spills
+     * rather than losing its tail: text that is not drawn is text the reader
+     * never learns was there.
+     */
+    private fun drawParagraph(
+        stream: PDPageContentStream,
+        font: PDFont,
+        paragraph: Paragraph,
+        text: String,
+        maxAllowedHeight: Float
+    ) {
+        val lines = paragraph.lines
+        val available = (paragraph.rightLimit - lines.minOf { it.x }).coerceAtLeast(30f)
+        val baseFontSize = paragraph.fontSize.coerceIn(6f, 72f)
+        val floor = maxOf(baseFontSize * 0.75f, 5.5f)
+        val pitch = paragraph.pitch
+
+        // Vietnamese runs longer than English, so a paragraph rarely fits the
+        // line count its source had. Two ways to absorb that: shrink the type,
+        // or run on into the space below. Running on is the lesser change --
+        // type two points smaller than the paragraph beside it is visible on
+        // sight, whereas a paragraph a line longer, in the gap its own document
+        // left empty, is not. So the empty space is spent first and the type is
+        // only shrunk once it runs out. The space is whatever stands between
+        // this paragraph and the next thing in its column, so a paragraph can
+        // grow into a gap but never into its neighbour.
+        // One line of the gap is never spent. The blank line between two
+        // paragraphs is what says they are two, and a paragraph that ate it
+        // read as one long block that changed subject halfway through.
+        val room = if (maxAllowedHeight >= Float.MAX_VALUE / 2f) {
+            MAX_SPILL_LINES
+        } else {
+            ((maxAllowedHeight - pitch) / pitch).toInt().coerceIn(0, MAX_SPILL_LINES)
+        }
+        val allowedLines = lines.size + room
+
+        var fontSize = baseFontSize
+        var wrapped = wrapText(text, font, fontSize, available)
+        while (wrapped.size > allowedLines && fontSize - 0.5f >= floor) {
+            fontSize -= 0.5f
+            wrapped = wrapText(text, font, fontSize, available)
+        }
+
+        for ((index, line) in wrapped.withIndex()) {
+            val sanitised = sanitizeForFont(line, font)
+            if (sanitised.isBlank()) continue
+            val source = lines.getOrNull(index)
+            val x = (source ?: lines.last()).x
+            val y = source?.y ?: (lines.last().y - (index - lines.size + 1) * pitch)
+            stream.beginText()
+            stream.setFont(font, fontSize)
+            stream.newLineAtOffset(x, y)
+            try {
+                stream.showText(sanitised)
+            } catch (_: Exception) {}
+            stream.endText()
+        }
+    }
+
+    /**
      * Redraw a run that reads up or down the page — a rotated column header.
      *
      * These used to vanish. The page's whole text layer is stripped before the
@@ -1073,10 +1335,43 @@ class PdfLayoutPreserver(private val context: Context) {
         return name
     }
 
-    private class BlockTranslation(
-        val block: TextBlock,
+    private class ParagraphTranslation(
+        val paragraph: Paragraph,
         val translated: String
     )
+
+    /**
+     * The lines that were one paragraph in the source, and the text they say.
+     *
+     * The port translated one line at a time. A translation engine given a
+     * fragment translates the fragment: "advanced" alone, orphaned at the end
+     * of a line from "advanced equations", came back as the Vietnamese for
+     * "advanced equipment". Meaning is made across a whole sentence, so the
+     * whole sentence has to be sent — and to put the answer back where the
+     * source had it, the paragraph has to remember the lines it came from.
+     */
+    class Paragraph(
+        val lines: List<TextBlock>,
+        val rightLimit: Float
+    ) {
+        init {
+            require(lines.isNotEmpty()) { "a paragraph has at least one line" }
+        }
+
+        val first: TextBlock get() = lines.first()
+        val isRotated: Boolean get() = first.isRotated
+        val y: Float get() = first.y
+        val fontSize: Float get() = first.fontSize
+        val text: String = joinLines(lines)
+
+        /** Baseline-to-baseline distance, for lines the translation adds. */
+        val pitch: Float
+            get() {
+                if (lines.size < 2) return fontSize * 1.25f
+                val gaps = lines.zipWithNext { a, b -> a.y - b.y }.filter { it > 0f }
+                return if (gaps.isEmpty()) fontSize * 1.25f else gaps.sorted()[gaps.size / 2]
+            }
+    }
 
     /**
      * One run of text with the geometry needed to put it back.

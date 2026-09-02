@@ -25,6 +25,13 @@ pdf-translate.log
 # Editor and OS droppings.
 .vscode/
 .idea/
+.gradle/
+.kotlin/
+android/.gradle/
+android/.kotlin/
+android/.idea/
+android/build/
+android/app/build/
 Thumbs.db
 desktop.ini
 

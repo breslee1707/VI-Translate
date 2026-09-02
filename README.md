@@ -42,7 +42,7 @@
 
 ---
 
-PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows và macOS. Công cụ phân tích bố cục từng trang, bảo vệ công thức và code, dịch phần văn xuôi rồi đặt nội dung trở lại đúng vị trí trong tài liệu gốc — không biến PDF của bạn thành một trang chữ trắng đơn giản.
+PDF Translate là ứng dụng mã nguồn mở dành cho Windows, macOS và Android. Công cụ phân tích bố cục từng trang, bảo vệ công thức và code, dịch phần văn xuôi rồi đặt nội dung trở lại đúng vị trí trong tài liệu gốc — không biến PDF của bạn thành một trang chữ trắng đơn giản.
 
 Đây không phải bản dịch giao diện của một công cụ có sẵn. Dự án mượn ý tưởng và phần nhân đọc/ghi PDF từ hai dự án mã nguồn mở, rồi tự xây phần quyết định chất lượng đầu ra: ứng dụng desktop, bộ quy tắc bảo toàn bố cục, lớp xử lý tiếng Việt và hàng loạt bản sửa lỗi ngay trong nhân. Chi tiết ở mục [Được phát triển ở đây](#được-phát-triển-ở-đây).
 
@@ -69,6 +69,16 @@ PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows và ma
 1. Tải bản phù hợp: **[Apple Silicon](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-macos-apple-silicon.dmg)** cho Mac M1/M2/M3/M4/M5 hoặc **[Intel](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-macos-intel.dmg)** cho Mac Intel.
 2. Mở file `.dmg`, kéo **PDF Translate** vào thư mục **Applications**.
 3. Trong lần chạy đầu, bấm chuột phải vào ứng dụng → **Open** → **Open**.
+
+### Android
+
+1. Dự án Android viết bằng **Kotlin** & **Jetpack Compose** nằm tại thư mục `android/`.
+2. Để biên dịch ứng dụng Android:
+   ```bash
+   cd android
+   ./gradlew assembleDebug
+   ```
+3. Cài đặt APK lên thiết bị Android hoặc Emulator để sử dụng.
 
 > [!NOTE]
 > Bản macOS yêu cầu **macOS 14 Sonoma trở lên**. Tất cả bản desktop đều không cần cài Python và không phải tải thêm model ở lần chạy đầu. Quá trình dịch bằng Google vẫn cần kết nối Internet.

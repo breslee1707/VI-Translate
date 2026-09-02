@@ -25,7 +25,8 @@ fun ControlsView(
     customSaveDirectory: String?,
     onPickSaveDirectory: () -> Unit,
     isTranslating: Boolean,
-    onStartTranslation: () -> Unit
+    onStartTranslation: () -> Unit,
+    onCancelTranslation: () -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -104,17 +105,24 @@ fun ControlsView(
                     }
                 }
 
+                // A long run is the normal case, so the same button has to be
+                // the way out of it; a disabled "Đang dịch…" left no way to stop.
                 Button(
-                    onClick = onStartTranslation,
-                    enabled = !isTranslating,
+                    onClick = { if (isTranslating) onCancelTranslation() else onStartTranslation() },
                     shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isTranslating) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        }
+                    ),
                     modifier = Modifier
                         .height(48.dp)
                         .padding(start = 8.dp)
                 ) {
                     Text(
-                        text = if (isTranslating) "Đang dịch…" else "Dịch",
+                        text = if (isTranslating) "Huỷ" else "Dịch",
                         style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
                     )
                 }

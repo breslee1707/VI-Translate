@@ -1,7 +1,10 @@
 package com.vitranslate.pdf
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -19,6 +22,10 @@ import com.vitranslate.pdf.viewmodel.MainViewModel
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
+
+    private val requestNotificationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* Progress notifications are a convenience; a refusal must not block work. */ }
 
     private val pickFilesLauncher = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -72,6 +79,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
+        askForNotificationPermission()
+
         // Handle incoming PDF shared intent
         intent?.let { handleIntent(it) }
 
@@ -89,6 +98,19 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    /**
+     * The foreground service runs either way; without this the progress bar and
+     * the Huỷ action simply never appear.
+     */
+    private fun askForNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -181,7 +203,8 @@ fun MainScreen(
             customSaveDirectory = customSaveDirectory,
             onPickSaveDirectory = onPickSaveDirectory,
             isTranslating = isTranslating,
-            onStartTranslation = { viewModel.startTranslation() }
+            onStartTranslation = { viewModel.startTranslation() },
+            onCancelTranslation = { viewModel.cancelTranslation() }
         )
 
         QueueView(

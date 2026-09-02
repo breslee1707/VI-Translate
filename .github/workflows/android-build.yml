@@ -1,69 +1,139 @@
-name: Build and Release APK
+name: Android
 
+# The APK is built on every push to the Android branch and on pull requests, so
+# a broken build is visible before anyone tries to release. Publishing is a
+# separate job that only a tag can reach.
+#
+# Tags are namespaced `android-v*` on purpose. `v*` belongs to the desktop
+# build: release.yml triggers on it and app/update.py downloads
+# PDFTranslate-windows.zip from whatever it finds there, so an Android release
+# under `v*` would tell every installed Windows copy to update to an asset that
+# does not exist.
 on:
   push:
     branches:
-      - android-dev
+      - feat/android-apk
+    tags:
+      - "android-v*"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android-build.yml"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+defaults:
+  run:
+    working-directory: android
 
 jobs:
-  build-and-release:
+  build:
     runs-on: ubuntu-latest
-
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      # gradle-wrapper.jar is a binary that arrived through a pull request.
+      # Check it against Gradle's published checksums before running it.
+      - name: Validate the Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: Grant execute permission for gradlew
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
         run: chmod +x gradlew
-        working-directory: android
 
-      - name: Build release APK
-        run: ./gradlew assembleRelease
-        working-directory: android
+      - name: Read the version name
+        id: version
+        run: echo "version=$(./gradlew -q printVersionName)" >> "$GITHUB_OUTPUT"
 
-      - name: Compute next tag
-        id: tag
-        run: |
-          latest=$(git tag --list 'v*.*.*' | sort -V | tail -n 1)
-          if [ -z "$latest" ]; then
-            new_tag="v1.0.0"
-          else
-            ver=${latest#v}
-            major=$(echo "$ver" | cut -d. -f1)
-            minor=$(echo "$ver" | cut -d. -f2)
-            patch=$(echo "$ver" | cut -d. -f3)
-            new_tag="v${major}.${minor}.$((patch + 1))"
-          fi
-          echo "new_tag=$new_tag" >> "$GITHUB_OUTPUT"
+      - name: Unit tests and lint
+        run: ./gradlew testDebugUnitTest lintDebug
 
-      - name: Locate APK
-        id: apk
-        run: |
-          apk_path=$(find android -type f -name "*.apk" -path "*release*" | head -n 1)
-          echo "apk_path=$apk_path" >> "$GITHUB_OUTPUT"
-
-      - name: Create tag
-        run: |
-          git tag ${{ steps.tag.outputs.new_tag }}
-          git push origin ${{ steps.tag.outputs.new_tag }}
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.new_tag }}
-          name: Release ${{ steps.tag.outputs.new_tag }}
-          files: ${{ steps.apk.outputs.apk_path }}
+      # A release APK signed with a throwaway debug key cannot be updated over,
+      # so the keystore comes from repository secrets. Without them the release
+      # build stays unsigned and the publish job below refuses to run.
+      - name: Decode the release keystore
+        id: keystore
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "No ANDROID_KEYSTORE_BASE64 secret; the release APK will be unsigned."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build the release APK
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ steps.keystore.outputs.signed == 'true' && format('{0}/release.jks', runner.temp) || '' }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease
+
+      - name: Confirm the APK is signed
+        if: steps.keystore.outputs.signed == 'true'
+        run: |
+          apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
+          "$apksigner" verify --print-certs \
+            app/build/outputs/apk/release/app-release.apk
+
+      - name: Name the APK after the version
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk \
+             "PDFTranslate-android-${{ steps.version.outputs.version }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PDFTranslate-android-${{ steps.version.outputs.version }}
+          path: android/PDFTranslate-android-${{ steps.version.outputs.version }}.apk
+          if-no-files-found: error
+
+      - name: Remove the keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/android-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The desktop release gate compares its tag with APP_VERSION for the same
+      # reason: a tag that disagrees with the shipped version makes the in-app
+      # update check compare the wrong numbers.
+      - name: Check the tag matches versionName
+        run: |
+          tag="${GITHUB_REF_NAME#android-v}"
+          version="${{ needs.build.outputs.version }}"
+          if [ "$tag" != "$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match versionName $version" >&2
+            exit 1
+          fi
+          echo "Releasing $version"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: PDFTranslate-android-${{ needs.build.outputs.version }}
+          path: android
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Android ${{ needs.build.outputs.version }}
+          files: android/PDFTranslate-android-${{ needs.build.outputs.version }}.apk
+          fail_on_unmatched_files: true

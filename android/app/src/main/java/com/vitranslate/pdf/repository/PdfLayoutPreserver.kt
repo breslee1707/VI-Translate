@@ -29,6 +29,12 @@ data class TranslationResult(
     val untranslatedCount: Int
 )
 
+/**
+ * Raised when the user stops a run. A half-written PDF is worse than none, so
+ * whoever throws this is responsible for having deleted the partial output.
+ */
+class TranslationCancelledException : Exception("Translation cancelled")
+
 class PdfLayoutPreserver(private val context: Context) {
 
     init {
@@ -57,7 +63,8 @@ class PdfLayoutPreserver(private val context: Context) {
         targetLang: String,
         overwrite: Boolean,
         onProgress: (done: Int, total: Int) -> Unit,
-        onLog: ((String) -> Unit)? = null
+        onLog: ((String) -> Unit)? = null,
+        isCancelled: () -> Boolean = { false }
     ): TranslationResult {
         val originalFileName = getFileName(inputUri)
         onLog?.invoke("Bắt đầu xử lý file: $originalFileName (Ngôn ngữ đích: $targetLang, Ghi đè: $overwrite)")
@@ -72,6 +79,7 @@ class PdfLayoutPreserver(private val context: Context) {
         val engine = GoogleTranslateEngine(sourceLang = "auto", targetLang = targetLang)
         var untranslatedCount = 0
 
+        try {
         outputStream.use { outStream ->
             context.contentResolver.openInputStream(inputUri)?.use { inputStream ->
                 PDDocument.load(inputStream).use { document ->
@@ -81,6 +89,7 @@ class PdfLayoutPreserver(private val context: Context) {
                     val font: PDFont = loadBundledFont(document)
 
                     for (pageIndex in 0 until totalPages) {
+                        if (isCancelled()) throw TranslationCancelledException()
                         val page = document.getPage(pageIndex)
                         val textCollector = PageTextCollector()
                         textCollector.extractPageText(document, page, pageIndex)
@@ -92,6 +101,7 @@ class PdfLayoutPreserver(private val context: Context) {
                             var skippedMathCount = 0
 
                             for (block in textBlocks) {
+                                if (isCancelled()) throw TranslationCancelledException()
                                 val originalText = block.text.trim()
                                 if (originalText.isBlank()) continue
 
@@ -172,11 +182,29 @@ class PdfLayoutPreserver(private val context: Context) {
                 }
             } ?: throw Exception("Unable to open input PDF stream")
         }
+        } catch (cancelled: TranslationCancelledException) {
+            deleteOutput(resultPath)
+            onLog?.invoke("Đã huỷ khi đang dịch $originalFileName, đã xoá file dở dang.")
+            throw cancelled
+        }
 
         return TranslationResult(
             outputPath = resultPath,
             untranslatedCount = untranslatedCount
         )
+    }
+
+    /** Removes a half-written output, whether it landed in SAF or on a path. */
+    private fun deleteOutput(resultPath: String) {
+        try {
+            if (resultPath.startsWith("content://")) {
+                DocumentFile.fromSingleUri(context, Uri.parse(resultPath))?.delete()
+            } else {
+                File(resultPath).delete()
+            }
+        } catch (_: Exception) {
+            // Nothing left to do; the caller is already unwinding.
+        }
     }
 
     private fun prepareOutputStream(

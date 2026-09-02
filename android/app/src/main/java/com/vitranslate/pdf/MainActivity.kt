@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
@@ -65,6 +66,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Android 15 forces edge-to-edge on targetSdk 35 whether or not we ask,
+        // so opt in explicitly and let the bars stay transparent. HeaderView and
+        // FooterView already pad themselves with the system bar insets.
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
         // Handle incoming PDF shared intent
@@ -142,7 +147,7 @@ fun MainScreen(
 
     if (showAboutDialog) {
         AboutDialog(
-            appVersion = "1.9.11",
+            appVersion = BuildConfig.VERSION_NAME,
             onDismiss = { showAboutDialog = false }
         )
     }
@@ -151,7 +156,7 @@ fun MainScreen(
         modifier = Modifier.fillMaxSize()
     ) {
         HeaderView(
-            appVersion = "1.9.11",
+            appVersion = BuildConfig.VERSION_NAME,
             updateInfo = updateInfo,
             onShowLog = {
                 currentLogText = viewModel.getLogContent()

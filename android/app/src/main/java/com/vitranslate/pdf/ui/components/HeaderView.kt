@@ -20,7 +20,7 @@ import com.vitranslate.pdf.model.UpdateInfo
 
 @Composable
 fun HeaderView(
-    appVersion: String = "1.9.11",
+    appVersion: String,
     updateInfo: UpdateInfo? = null,
     onShowLog: (() -> Unit)? = null,
     onShowAbout: (() -> Unit)? = null

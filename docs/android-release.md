@@ -70,8 +70,10 @@ keyPassword=…
 | `ANDROID_KEY_ALIAS` | `vitranslate` |
 | `ANDROID_KEY_PASSWORD` | the key password |
 
-Without `ANDROID_KEYSTORE_BASE64` the workflow still builds, but produces an
-unsigned APK and the publish job refuses the release.
+Without `ANDROID_KEYSTORE_BASE64` the workflow still builds, but the artifact
+is named `PDFTranslate-android-<version>-unsigned.apk` and the publish job
+refuses to release it. An unsigned APK will not install on a device; use the
+debug APK for testing until the secrets are in place.
 
 ## Releasing
 

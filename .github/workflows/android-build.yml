@@ -59,6 +59,18 @@ jobs:
       - name: Unit tests and lint
         run: ./gradlew testDebugUnitTest lintDebug
 
+      # The debug APK is signed with the runner's throwaway debug key, which is
+      # useless for distribution but is the only build installable on a phone
+      # before the release keystore secrets exist.
+      - name: Build the debug APK
+        run: ./gradlew assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PDFTranslate-android-${{ steps.version.outputs.version }}-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
       # A release APK signed with a throwaway debug key cannot be updated over,
       # so the keystore comes from repository secrets. Without them the release
       # build stays unsigned and the publish job below refuses to run.

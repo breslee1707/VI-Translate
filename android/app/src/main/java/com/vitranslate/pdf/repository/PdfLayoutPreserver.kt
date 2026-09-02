@@ -80,108 +80,108 @@ class PdfLayoutPreserver(private val context: Context) {
         var untranslatedCount = 0
 
         try {
-        outputStream.use { outStream ->
-            context.contentResolver.openInputStream(inputUri)?.use { inputStream ->
-                PDDocument.load(inputStream).use { document ->
-                    val totalPages = document.numberOfPages
-                    onProgress(0, totalPages)
-                    onLog?.invoke("Mở file PDF thành công. Tổng số trang: $totalPages")
-                    val font: PDFont = loadBundledFont(document)
+            outputStream.use { outStream ->
+                context.contentResolver.openInputStream(inputUri)?.use { inputStream ->
+                    PDDocument.load(inputStream).use { document ->
+                        val totalPages = document.numberOfPages
+                        onProgress(0, totalPages)
+                        onLog?.invoke("Mở file PDF thành công. Tổng số trang: $totalPages")
+                        val font: PDFont = loadBundledFont(document)
 
-                    for (pageIndex in 0 until totalPages) {
-                        if (isCancelled()) throw TranslationCancelledException()
-                        val page = document.getPage(pageIndex)
-                        val textCollector = PageTextCollector()
-                        textCollector.extractPageText(document, page, pageIndex)
-                        val collapsedBlocks = collapseVerticalFractions(textCollector.blocks)
-                        val textBlocks = groupIntoLineRuns(collapsedBlocks)
+                        for (pageIndex in 0 until totalPages) {
+                            if (isCancelled()) throw TranslationCancelledException()
+                            val page = document.getPage(pageIndex)
+                            val textCollector = PageTextCollector()
+                            textCollector.extractPageText(document, page, pageIndex)
+                            val collapsedBlocks = collapseVerticalFractions(textCollector.blocks)
+                            val textBlocks = groupIntoLineRuns(collapsedBlocks)
 
-                        if (textBlocks.isNotEmpty()) {
-                            val translations = mutableListOf<BlockTranslation>()
-                            var skippedMathCount = 0
+                            if (textBlocks.isNotEmpty()) {
+                                val translations = mutableListOf<BlockTranslation>()
+                                var skippedMathCount = 0
 
-                            for (block in textBlocks) {
-                                if (isCancelled()) throw TranslationCancelledException()
-                                val originalText = block.text.trim()
-                                if (originalText.isBlank()) continue
+                                for (block in textBlocks) {
+                                    if (isCancelled()) throw TranslationCancelledException()
+                                    val originalText = block.text.trim()
+                                    if (originalText.isBlank()) continue
 
-                                // Separate option label prefix (e.g. "A.") from content before translating
-                                val (optionLabel, remainder) = splitOptionLabel(originalText)
-                                val textToTranslate = remainder.trim()
+                                    // Separate option label prefix (e.g. "A.") from content before translating
+                                    val (optionLabel, remainder) = splitOptionLabel(originalText)
+                                    val textToTranslate = remainder.trim()
 
-                                // Skip translating standalone math formulas and numeric choices, but preserve them in translations list
-                                if (textToTranslate.isBlank() || isPureMathOrFormula(textToTranslate)) {
-                                    skippedMathCount++
-                                    translations.add(BlockTranslation(block, originalText))
-                                    continue
-                                }
+                                    // Skip translating standalone math formulas and numeric choices, but preserve them in translations list
+                                    if (textToTranslate.isBlank() || isPureMathOrFormula(textToTranslate)) {
+                                        skippedMathCount++
+                                        translations.add(BlockTranslation(block, originalText))
+                                        continue
+                                    }
 
-                                val encodedText = FormulaPlaceholder.encodeFormulaPlaceholders(textToTranslate)
-                                var translatedRaw = encodedText
-                                var translationSuccess = false
-                                try {
-                                    translatedRaw = engine.translate(encodedText)
-                                    translationSuccess = true
-                                } catch (_: Exception) {
-                                    untranslatedCount++
-                                }
-                                var translatedRemainder = translatedRaw
-                                if (translationSuccess) {
+                                    val encodedText = FormulaPlaceholder.encodeFormulaPlaceholders(textToTranslate)
+                                    var translatedRaw = encodedText
+                                    var translationSuccess = false
                                     try {
-                                        translatedRemainder = FormulaPlaceholder.restoreFormulaPlaceholders(textToTranslate, translatedRaw)
+                                        translatedRaw = engine.translate(encodedText)
+                                        translationSuccess = true
                                     } catch (_: Exception) {
-                                        translatedRemainder = FormulaPlaceholder.removeControlCharacters(translatedRaw)
-                                            .replace(Regex("</?b\\d+>"), "")
-                                            .replace(Regex("</?s[123]>"), "")
+                                        untranslatedCount++
+                                    }
+                                    var translatedRemainder = translatedRaw
+                                    if (translationSuccess) {
+                                        try {
+                                            translatedRemainder = FormulaPlaceholder.restoreFormulaPlaceholders(textToTranslate, translatedRaw)
+                                        } catch (_: Exception) {
+                                            translatedRemainder = FormulaPlaceholder.removeControlCharacters(translatedRaw)
+                                                .replace(Regex("</?b\\d+>"), "")
+                                                .replace(Regex("</?s[123]>"), "")
+                                        }
+                                    }
+
+                                    // Re-attach option label prefix if it was present
+                                    val translatedText = if (optionLabel != null) {
+                                        optionLabel + translatedRemainder
+                                    } else {
+                                        translatedRemainder
+                                    }
+                                    translations.add(BlockTranslation(block, translatedText))
+                                }
+
+                                onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: Tìm thấy ${textBlocks.size} đoạn. Đã dịch: ${translations.size}, Bỏ qua công thức: $skippedMathCount")
+
+                                if (translations.isNotEmpty()) {
+                                    // Strip original text from page streams so vector drawings & diagrams remain 100% pristine
+                                    stripTextFromPage(document, page)
+
+                                    PDPageContentStream(
+                                        document,
+                                        page,
+                                        PDPageContentStream.AppendMode.APPEND,
+                                        true,
+                                        true
+                                    ).use { stream ->
+                                        for (i in translations.indices) {
+                                            val translation = translations[i]
+                                            val block = translation.block
+                                            val cleanedText = stripTagsAndPlaceholders(translation.translated)
+                                            val text = sanitizeForFont(cleanedText, font)
+                                            if (text.isBlank()) continue
+
+                                            val nextY = if (i + 1 < translations.size) translations[i + 1].block.y else 0f
+                                            val maxAllowedHeight = if (nextY > 0f && block.y > nextY) (block.y - nextY) * 0.9f else Float.MAX_VALUE
+                                            coverSourceText(stream, block)
+                                            drawTextWithWrapping(stream, font, block, text, maxAllowedHeight, textCollector.cropBox.width)
+                                        }
                                     }
                                 }
-
-                                // Re-attach option label prefix if it was present
-                                val translatedText = if (optionLabel != null) {
-                                    optionLabel + translatedRemainder
-                                } else {
-                                    translatedRemainder
-                                }
-                                translations.add(BlockTranslation(block, translatedText))
+                            } else {
+                                onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: Không tìm thấy văn bản nào.")
                             }
-
-                            onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: Tìm thấy ${textBlocks.size} đoạn. Đã dịch: ${translations.size}, Bỏ qua công thức: $skippedMathCount")
-
-                            if (translations.isNotEmpty()) {
-                                // Strip original text from page streams so vector drawings & diagrams remain 100% pristine
-                                stripTextFromPage(document, page)
-
-                                PDPageContentStream(
-                                    document,
-                                    page,
-                                    PDPageContentStream.AppendMode.APPEND,
-                                    true,
-                                    true
-                                ).use { stream ->
-                                    for (i in translations.indices) {
-                                        val translation = translations[i]
-                                        val block = translation.block
-                                        val cleanedText = stripTagsAndPlaceholders(translation.translated)
-                                        val text = sanitizeForFont(cleanedText, font)
-                                        if (text.isBlank()) continue
-
-                                        val nextY = if (i + 1 < translations.size) translations[i + 1].block.y else 0f
-                                        val maxAllowedHeight = if (nextY > 0f && block.y > nextY) (block.y - nextY) * 0.9f else Float.MAX_VALUE
-                                        coverSourceText(stream, block)
-                                        drawTextWithWrapping(stream, font, block, text, maxAllowedHeight, textCollector.cropBox.width)
-                                    }
-                                }
-                            }
-                        } else {
-                            onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: Không tìm thấy văn bản nào.")
+                            onProgress(pageIndex + 1, totalPages)
                         }
-                        onProgress(pageIndex + 1, totalPages)
+                        document.save(outStream)
+                        onLog?.invoke("Lưu file dịch thành công: $resultPath")
                     }
-                    document.save(outStream)
-                    onLog?.invoke("Lưu file dịch thành công: $resultPath")
-                }
-            } ?: throw Exception("Unable to open input PDF stream")
-        }
+                } ?: throw Exception("Unable to open input PDF stream")
+            }
         } catch (cancelled: TranslationCancelledException) {
             deleteOutput(resultPath)
             onLog?.invoke("Đã huỷ khi đang dịch $originalFileName, đã xoá file dở dang.")

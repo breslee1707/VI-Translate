@@ -9,6 +9,8 @@ because every line in a paragraph got the same leading.
 from __future__ import annotations
 
 import unittest
+
+import pymupdf
 from types import SimpleNamespace
 
 from pdf2zh.converter import (
@@ -21,7 +23,10 @@ from pdf2zh.converter import (
     normalised_text_matrix,
     operation_ink,
     paragraph_width_budget,
+    is_outside_page,
+    output_font_lacks_glyph,
     preferred_translation,
+    rescale_operations,
     should_translate_rotated_text,
     size_should_follow_body,
     styled_text_matrix,
@@ -364,6 +369,121 @@ class OrientationAndStyleTests(unittest.TestCase):
     def test_missing_style_faces_fall_back_to_the_regular_font(self):
         paths = output_style_font_paths("vi", "C:/missing/regular.ttf")
         self.assertEqual(set(paths.values()), {"C:\\missing\\regular.ttf"})
+
+    def test_shrinking_a_paragraph_moves_its_runs_with_it(self):
+        """A line that shrinks must close up, not spread out.
+
+        Vietnamese splits a line into many runs, because every accented letter
+        comes from the Unicode font while the ASCII around it stays in the
+        base-14 face. Scaling only the size left each run at the coordinate the
+        old size had produced, so the gap in front of it grew by the width the
+        run gave up, and the gaps accumulated along the line: "Sức căng" came
+        out as "S ứ c c ă ng".
+        """
+        # "S|ứ|c c|ă|ng" at 10pt, each run placed after the previous one.
+        widths = [5.0, 6.0, 11.0, 6.0, 12.0]
+        x = 100.0
+        operations = []
+        for width in widths:
+            operations.append(
+                {
+                    "type": OpType.TEXT,
+                    "font": "noto",
+                    "size": 10.0,
+                    "x": x,
+                    "dy": 0.0,
+                    "rtxt": "",
+                    "lidx": 0,
+                    "style": TextStyle.REGULAR,
+                }
+            )
+            x += width
+
+        rescale_operations(operations, 0.8, 100.0, 100.0)
+
+        self.assertEqual(operations[0]["x"], 100.0)
+        cursor = 100.0
+        for values, width in zip(operations, widths):
+            self.assertAlmostEqual(values["x"], cursor, places=6)
+            self.assertAlmostEqual(values["size"], 8.0, places=6)
+            cursor += width * 0.8
+
+    def test_shrinking_measures_every_line_from_its_own_left_edge(self):
+        """Only the first line may be indented; later lines start at x0."""
+        operations = [
+            {"type": OpType.TEXT, "font": "noto", "size": 10.0, "x": 120.0,
+             "dy": 0.0, "rtxt": "", "lidx": 0, "style": TextStyle.REGULAR},
+            {"type": OpType.TEXT, "font": "noto", "size": 10.0, "x": 130.0,
+             "dy": 0.0, "rtxt": "", "lidx": 1, "style": TextStyle.REGULAR},
+        ]
+
+        rescale_operations(operations, 0.5, 120.0, 100.0)
+
+        self.assertAlmostEqual(operations[0]["x"], 120.0, places=6)
+        self.assertAlmostEqual(operations[1]["x"], 115.0, places=6)
+
+    def test_shrinking_keeps_a_formula_together(self):
+        """Formula glyphs already scaled; their offsets have to follow.
+
+        Their size was scaled while the offsets holding them in place were not,
+        so a shrunk inline formula was drawn as small glyphs spread across the
+        width the full-size ones had occupied.
+        """
+        operations = [
+            {"type": OpType.TEXT, "font": "F1", "size": 9.0, "x": 200.0,
+             "dy": 0.0, "rtxt": "", "lidx": 0, "style": TextStyle.REGULAR},
+            {"type": OpType.TEXT, "font": "F1", "size": 6.0, "x": 206.0,
+             "dy": -2.0, "rtxt": "", "lidx": 0, "style": TextStyle.REGULAR},
+            {"type": OpType.LINE, "x": 200.0, "dy": 3.0, "linewidth": 0.4,
+             "xlen": 12.0, "ylen": 0.0, "lidx": 0},
+        ]
+
+        rescale_operations(operations, 0.5, 200.0, 200.0)
+
+        self.assertAlmostEqual(operations[1]["x"] - operations[0]["x"], 3.0)
+        self.assertAlmostEqual(operations[1]["dy"], -1.0)
+        self.assertAlmostEqual(operations[2]["xlen"], 6.0)
+        self.assertAlmostEqual(operations[2]["linewidth"], 0.2)
+        self.assertAlmostEqual(operations[2]["dy"], 1.5)
+
+    def test_a_glyph_parked_above_the_page_is_dropped(self):
+        """Stray off-page glyphs used to split a paragraph at every bold term.
+
+        They sit in no layout region, so they take the catch-all class; the
+        class change started a new paragraph, and the fragments each reflowed
+        inside their own width and printed over one another.
+        """
+        page = (0.0, 0.0, 584.0, 792.5)
+        stray = SimpleNamespace(x0=535.0, x1=537.6, y0=823.2, y1=832.0)
+        self.assertTrue(is_outside_page(stray, page))
+
+    def test_a_glyph_touching_the_edge_is_kept(self):
+        """Clipped is not invisible, and neither is a glyph with no page."""
+        page = (0.0, 0.0, 584.0, 792.5)
+        edge = SimpleNamespace(x0=580.0, x1=590.0, y0=100.0, y1=110.0)
+        inside = SimpleNamespace(x0=100.0, x1=110.0, y0=100.0, y1=110.0)
+        self.assertFalse(is_outside_page(edge, page))
+        self.assertFalse(is_outside_page(inside, page))
+        self.assertFalse(is_outside_page(edge, None))
+
+    def test_a_character_the_output_font_cannot_draw_is_preserved(self):
+        """A missing glyph draws as .notdef and extracts as U+0000.
+
+        The list markers of a chemistry textbook and the apostrophe in a
+        physiology textbook's own title were lost that way.
+        """
+        font = pymupdf.Font("probe", "app/assets/GoNotoKurrent-Regular.ttf")
+        self.assertTrue(output_font_lacks_glyph("➤", font))
+        self.assertTrue(output_font_lacks_glyph("☐", font))
+        self.assertFalse(output_font_lacks_glyph("ệ", font))
+        self.assertFalse(output_font_lacks_glyph("e", font))
+
+    def test_spaces_and_a_missing_font_are_never_preserved(self):
+        """Preserving a space would break a paragraph at every word."""
+        font = pymupdf.Font("probe", "app/assets/GoNotoKurrent-Regular.ttf")
+        self.assertFalse(output_font_lacks_glyph(" ", font))
+        self.assertFalse(output_font_lacks_glyph("", font))
+        self.assertFalse(output_font_lacks_glyph("➤", None))
 
     def test_first_line_indent_is_deducted_from_width_budget(self):
         self.assertEqual(paragraph_width_budget(20, 10, 110, 1), 90)

@@ -103,6 +103,58 @@ def normalised_text_matrix(matrix) -> tuple[float, float, float, float]:
     return (a / x_scale, b / x_scale, c / y_scale, d / y_scale)
 
 
+def is_outside_page(
+    character: LTChar, page: tuple[float, float, float, float] | None
+) -> bool:
+    """Whether a glyph falls entirely off the paper, and so is never seen.
+
+    Some producers park stray glyphs above the page between the styled runs of
+    a paragraph - a 23rd-edition physiology textbook emits a space at y=823 on a
+    792-point page between every bold term and the prose around it. Those
+    glyphs land in no layout region, so they take the catch-all class, and the
+    class change breaks the real paragraph in two at each of them. Every bold
+    term then became its own paragraph, reflowed inside its own width, and the
+    fragments printed over each other once the translation stopped being the
+    length of the English.
+
+    A glyph that only overlaps the edge is kept: it is clipped, not invisible.
+    """
+    if page is None:
+        return False
+    x0, y0, x1, y1 = page
+    return (
+        character.x1 <= x0
+        or character.x0 >= x1
+        or character.y1 <= y0
+        or character.y0 >= y1
+    )
+
+
+def output_font_lacks_glyph(text: str, font: Font | None) -> bool:
+    """Whether the prose font has no outline at all for this character.
+
+    `raw_string` writes `font.has_glyph(ord(c))` straight into an Identity-H
+    font, and a missing glyph is glyph 0. The character then draws as .notdef -
+    a blank or a hollow box - and extracts as U+0000, so it is lost twice over.
+    A physical chemistry textbook lost the arrowhead and ballot-box markers that
+    open its list items this way, and a physiology textbook lost the apostrophe
+    in its own title.
+
+    Keeping the source glyph instead is what the bullet rule already does. It
+    is also the only thing that can be right in general: the character exists in
+    the source document, drawn by a font that does have it.
+    """
+    if font is None or not text:
+        return False
+    character = text[0]
+    if character.isspace():
+        return False
+    try:
+        return font.has_glyph(ord(character)) == 0
+    except Exception:
+        return False
+
+
 def paragraph_width_budget(x: float, x0: float, x1: float, lines: int) -> float:
     """Return usable width while accounting for a first-line indentation."""
     if lines <= 0 or x1 <= x0:
@@ -223,12 +275,16 @@ class PDFConverterEx(PDFConverter):
         rsrcmgr: PDFResourceManager,
     ) -> None:
         PDFConverter.__init__(self, rsrcmgr, None, "utf-8", 1, None)
+        self.page_clip: tuple[float, float, float, float] | None = None
 
     def begin_page(self, page, ctm) -> None:
         x0, y0, x1, y1 = page.cropbox
         x0, y0 = apply_matrix_pt(ctm, (x0, y0))
         x1, y1 = apply_matrix_pt(ctm, (x1, y1))
         mediabox = (0, 0, abs(x0 - x1), abs(y0 - y1))
+        # A figure reports its own bbox, so the page rectangle has to be kept
+        # here: it is what decides whether a glyph is on the paper at all.
+        self.page_clip = mediabox
         self.cur_item = LTPage(page.pageno, mediabox)
 
     def end_page(self, page):
@@ -413,6 +469,8 @@ class TranslateConverter(PDFConverterEx):
         # Pages carrying a raster image, filled in by the caller.
         self.pages_with_images: set[int] = set()
         self.segments_by_page: Counter[int] = Counter()
+        # One lookup per distinct character rather than per glyph drawn.
+        self.unrenderable_characters: dict[str, bool] = {}
         # e.g. "handoff:model" -> ["handoff", "model"]; model is unused by both engines
         param = service.split(":", 1)
         service_name = param[0]
@@ -484,6 +542,13 @@ class TranslateConverter(PDFConverterEx):
             font = font.split("+")[-1]
             if re.match(r"\(cid:", char):
                 return True
+            if char:
+                lacks = self.unrenderable_characters.get(char[0])
+                if lacks is None:
+                    lacks = output_font_lacks_glyph(char, self.noto)
+                    self.unrenderable_characters[char[0]] = lacks
+                if lacks:
+                    return True
             if self.vfont:
                 if re.match(self.vfont, font):
                     return True
@@ -555,6 +620,8 @@ class TranslateConverter(PDFConverterEx):
         ############################################################
         for child in ltpage:
             if isinstance(child, LTChar):
+                if is_outside_page(child, self.page_clip):
+                    continue
                 cur_v = False
                 layout = self.layout[ltpage.pageid]
                 h, w = layout.shape
@@ -1182,6 +1249,12 @@ class TranslateConverter(PDFConverterEx):
             cstyle = TextStyle.REGULAR
             log.debug(f"< {y} {x} {x0} {x1} {size} {brk} > {sstk[id]} | {new}")
 
+            # Where each line begins.  A font size chosen after these
+            # operations are built has to put every run back at the coordinate
+            # the new size implies; without an origin to measure from, the runs
+            # keep the old size's positions and the line pulls apart.  Line 0
+            # may be indented, every later line starts at x0.
+            first_line_x = x
             ops_vals: list[dict] = []
 
             while ptr < len(new):
@@ -1366,9 +1439,7 @@ class TranslateConverter(PDFConverterEx):
                 shrink = fit_height / ((lidx + 1) * size * line_height)
                 shrink = max(shrink, 0.5)  # Don't go below 50%
                 size *= shrink
-                for vals in ops_vals:
-                    if vals["type"] == OpType.TEXT:
-                        vals["size"] *= shrink
+                rescale_operations(ops_vals, shrink, first_line_x, x0)
 
             # Measure ink only after the final font-size adjustment.  Measuring
             # before shrinking left the old line gaps in place, so dense table
@@ -1400,9 +1471,7 @@ class TranslateConverter(PDFConverterEx):
                     if scale >= 0.999:
                         break
                     size *= scale
-                    for vals in ops_vals:
-                        if vals["type"] == OpType.TEXT:
-                            vals["size"] *= scale
+                    rescale_operations(ops_vals, scale, first_line_x, x0)
                     ink = operation_ink(ops_vals)
 
             # Formula slack stays charged to the paragraph's own box, so a
@@ -1531,6 +1600,39 @@ def operation_ink(
             max(previous_high, high),
         )
     return ink
+
+
+def rescale_operations(
+    operations: list[dict],
+    factor: float,
+    first_line_x: float,
+    left_x: float,
+) -> None:
+    """Re-place built operations after their font size changed.
+
+    Every advance this converter measures is linear in the font size, so a
+    paragraph that shrinks by `factor` needs each run at `factor` of its former
+    distance from the start of its line.  Scaling only the size left each run at
+    the old size's coordinate: the gap in front of it grew by the width the run
+    no longer occupies, and the gaps accumulated along the line.  Vietnamese
+    showed it worst, because every accented letter starts a new run in the
+    Unicode font while the ASCII around it stays in the base-14 face, so a
+    shrunk paragraph pulled apart between the letters of single words.
+
+    Formula glyphs are moved the same way.  Their size was already being scaled
+    while the offsets holding them together were not, which spread a shrunk
+    inline formula out over its original width.
+    """
+    for values in operations:
+        origin = first_line_x if values["lidx"] == 0 else left_x
+        values["x"] = origin + (values["x"] - origin) * factor
+        values["dy"] *= factor
+        if values["type"] == OpType.TEXT:
+            values["size"] *= factor
+        else:
+            values["xlen"] *= factor
+            values["ylen"] *= factor
+            values["linewidth"] *= factor
 
 
 def vertical_ink_extent(

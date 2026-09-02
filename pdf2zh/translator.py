@@ -43,6 +43,24 @@ def remove_control_characters(value: str) -> str:
     return "".join(character for character in value if unicodedata.category(character)[0] != "C")
 
 
+NUMBER_ABBREVIATION_PATTERN = re.compile(r"(?<![A-Za-z])no\.(?=\s*\d)")
+
+
+def normalise_number_abbreviation(text: str) -> str:
+    """Capitalise the ``no.`` that means "number" so it is not read as "not".
+
+    "ref. no. 305" came back as "ref. KHONG. 305": lowercase "no." mid-sentence
+    reads as the negation, and every engine we can reach makes the same choice.
+    The same string capitalised is unambiguous -- "No. 305" translates to
+    "So 305" -- and capitalising an abbreviation that already stands for a
+    proper noun changes nothing else about the sentence.
+
+    Only ``no.`` directly in front of a number is touched, so ordinary prose
+    ("there is no. Then...") is left alone.
+    """
+    return NUMBER_ABBREVIATION_PATTERN.sub("No.", text)
+
+
 class BaseTranslator:
     """Cache-aware translator interface consumed by the PDF converter."""
 
@@ -73,6 +91,7 @@ class BaseTranslator:
 
     def translate(self, text: str, ignore_cache: bool = False) -> str:
         """Translate text, consulting the persistent cache unless bypassed."""
+        text = normalise_number_abbreviation(text)
         if not (self.ignore_cache or ignore_cache):
             cached = self.cache.get(text)
             if cached is not None:

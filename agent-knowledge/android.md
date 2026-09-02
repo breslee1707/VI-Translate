@@ -63,6 +63,38 @@ probe checked per page and per paragraph, and deletes its partial output before
 rethrowing `TranslationCancelledException`, because a truncated PDF left on
 disk is indistinguishable from a finished one.
 
+## Layout Rules the Port Learned the Hard Way
+
+`PdfLayoutPreserver` strips the whole text layer and writes the translation
+back, so anything the collector misses is erased for good and anything it
+misjudges is drawn wrong. Four rules earned by comparing a rendered page
+against its source; each has a test in `PdfLayoutPreserverTest`.
+
+- **A wrapped line is bounded by its neighbour, not by the page.** The width
+  used to be `cropBox - x - 40`, which on a multi-column page let a paragraph
+  run over the column beside it. `computeRightLimits` takes the nearest block
+  that shares the line and starts further right, then gives every block on the
+  same left edge the tightest limit its column found. No overshoot allowance:
+  a 5% one is twelve points of text on top of the next column.
+- **A fraction needs a bar, and the bar must span what it divides.** Merging
+  vertically stacked short-math blocks without a bar destroys tables — rows of
+  a symbol column sit at the line pitch and all look like operands, so
+  thirty rows collapsed into fifteen. That pass is gone. An en dash is also
+  not a bar: it is how a table writes "dimensionless", and reading it as one
+  merged the units above and below into `mm/N`.
+- **Sub- and superscripts must be in the symbol test.** The collector rewrites
+  off-baseline digits into `U+2080`/`U+2070` blocks, so any pattern deciding
+  whether a block is math has to accept them, or `m'0` goes to the translator
+  and returns as a Vietnamese word. Likewise `` is ASCII-only, so a Greek
+  initial hides the function word behind it: `emax` needs explicit
+  ASCII-letter lookarounds to be recognised.
+- **Rotated runs are captured, redrawn rotated, and never regrouped.** Line
+  grouping and fraction detection compare page coordinates, which mean
+  something else once text reads up the page. A rotated run takes its origin
+  from the text matrix, keeps the length it was drawn at, and is redrawn with
+  `Matrix.getRotateInstance`. Before this, rotated table headers were stripped
+  and never written back.
+
 ## Windows Note
 
 If the Gradle test worker fails with `Could not find or load main class ...`,

@@ -13,6 +13,7 @@ import com.tom_roush.pdfbox.pdmodel.font.PDSimpleFont
 import com.tom_roush.pdfbox.pdmodel.font.PDType0Font
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import com.tom_roush.pdfbox.text.TextPosition
+import com.tom_roush.pdfbox.util.Matrix
 import com.tom_roush.pdfbox.contentstream.operator.Operator
 import com.tom_roush.pdfbox.cos.COSArray
 import com.tom_roush.pdfbox.cos.COSString
@@ -148,6 +149,8 @@ class PdfLayoutPreserver(private val context: Context) {
                                 onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: Tìm thấy ${textBlocks.size} đoạn. Đã dịch: ${translations.size}, Bỏ qua công thức: $skippedMathCount")
 
                                 if (translations.isNotEmpty()) {
+                                    val rightLimits = computeRightLimits(textBlocks, textCollector.cropBox.upperRightX)
+
                                     // Strip original text from page streams so vector drawings & diagrams remain 100% pristine
                                     stripTextFromPage(document, page)
 
@@ -165,10 +168,19 @@ class PdfLayoutPreserver(private val context: Context) {
                                             val text = sanitizeForFont(cleanedText, font)
                                             if (text.isBlank()) continue
 
-                                            val nextY = if (i + 1 < translations.size) translations[i + 1].block.y else 0f
+                                            // The next block down the page bounds how far this one
+                                            // may wrap. Rotated runs sit outside that vertical order,
+                                            // so they are not what "next" means here.
+                                            val nextY = translations
+                                                .asSequence()
+                                                .drop(i + 1)
+                                                .firstOrNull { !it.block.isRotated }
+                                                ?.block?.y ?: 0f
                                             val maxAllowedHeight = if (nextY > 0f && block.y > nextY) (block.y - nextY) * 0.9f else Float.MAX_VALUE
                                             coverSourceText(stream, block)
-                                            drawTextWithWrapping(stream, font, block, text, maxAllowedHeight, textCollector.cropBox.width)
+                                            val rightLimit = rightLimits[block]
+                                                ?: (textCollector.cropBox.upperRightX - PAGE_RIGHT_MARGIN)
+                                            drawTextWithWrapping(stream, font, block, text, maxAllowedHeight, rightLimit)
                                         }
                                     }
                                 }
@@ -327,8 +339,16 @@ class PdfLayoutPreserver(private val context: Context) {
     private fun groupIntoLineRuns(raw: List<TextBlock>): List<TextBlock> {
         if (raw.isEmpty()) return emptyList()
 
+        // Rotated runs pass through whole. Line and run grouping compares x and
+        // y as page coordinates, which mean something different once the text
+        // reads up the page, so a rotated table header must not be folded in
+        // with the body text beside it. The collector already emits each such
+        // header as one run.
+        val (rotated, horizontal) = raw.partition { it.isRotated }
+        if (horizontal.isEmpty()) return rotated
+
         val lines = mutableListOf<MutableList<TextBlock>>()
-        for (frag in raw) {
+        for (frag in horizontal) {
             val lastLine = lines.lastOrNull()
             if (lastLine != null) {
                 val refFrag = lastLine.maxByOrNull { it.fontSize } ?: lastLine.last()
@@ -371,17 +391,49 @@ class PdfLayoutPreserver(private val context: Context) {
             }
             flushRun()
         }
+        result.addAll(rotated)
         return result
     }
 
     companion object {
+        // \b is defined against ASCII word characters, so in "εmax" there is no
+        // boundary before "max" and the subscript went unrecognised: the block
+        // looked like the prose word "εmax", was sent to the translator, and
+        // came back as the Vietnamese for "maximum". Explicit ASCII-letter
+        // lookarounds put a boundary next to any non-Latin character while
+        // still refusing to fire inside a real word ("maximum" is untouched).
         private val MATH_FUNCTION_WORDS = Regex(
-            "\\b(?:ln|log|lim|sin|cos|tan|cot|sec|csc|exp|max|min|mod|sqrt|rad|deg|fnc|fnt|fn)\\b",
+            "(?<![A-Za-z])(?:ln|log|lim|sin|cos|tan|cot|sec|csc|exp|max|min|mod|sqrt|rad|deg|fnc|fnt|fn)(?![A-Za-z])",
             RegexOption.IGNORE_CASE
         )
+
+        // Must cover everything the extractor itself can emit. It rewrites
+        // digits that sit off the baseline into the sub/superscript blocks, so
+        // leaving those out meant "m'₀" failed the symbol test, went to the
+        // translator, and came back as "tôi'₀" — the Vietnamese for "me".
         private val MATH_SYMBOL_ONLY_PATTERN = Pattern.compile(
-            "^[0-9+\\-*/=()<>\\[\\]{},._:;^√∫∑∞≤≥≠±∓×÷%'\"\\\\|\\s]*$"
+            "^[0-9+\\-*/=()<>\\[\\]{},._:;^√∫∑∞≤≥≠±∓×÷%'\"\\\\|\\s" +
+                "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻₀₁₂₃₄₅₆₇₈₉₊₋′″‴°·∙–—~]*$"
         )
+
+        // Characters that only appear in a symbol, never in English or
+        // Vietnamese prose: Greek letters, the sub/superscript blocks, primes.
+        private val MATH_MARKER_PATTERN = Regex(
+            "[\\p{InGreek}⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻₀₁₂₃₄₅₆₇₈₉₊₋′″‴∙√∞µ]"
+        )
+        private const val SYMBOL_TOKEN_MAX_LENGTH = 16
+
+        /** Room left at the page edge when nothing else bounds a block. */
+        private const val PAGE_RIGHT_MARGIN = 40f
+
+        /** Left edges within this many points belong to the same column. */
+        private const val COLUMN_EDGE_TOLERANCE = 3f
+
+        /** Kept clear between a wrapped line and whatever stands to its right. */
+        private const val COLUMN_GUTTER = 3f
+
+        /** Floor for the drawn length of a rotated run, in points. */
+        private const val MIN_ROTATED_LENGTH = 8f
         private val LETTER_RUN_PATTERN = Regex("[\\p{L}]+")
         private val FRACTION_BAR_PATTERN = Regex("^[-_–—―─═]{1,}$")
 
@@ -416,6 +468,19 @@ class PdfLayoutPreserver(private val context: Context) {
             val trimmed = text.trim()
             if (trimmed.isEmpty()) return false
 
+            // A single short token carrying a character that prose never uses is
+            // a symbol, whatever else it contains. This is what keeps "εmax",
+            // "ρS" and "µST" out of the translator: they read as ordinary words
+            // to every test below, because their only unusual character is the
+            // leading Greek letter. Requiring no whitespace keeps the rule off
+            // sentences that merely mention a symbol in passing.
+            if (trimmed.length <= SYMBOL_TOKEN_MAX_LENGTH &&
+                trimmed.none { it.isWhitespace() } &&
+                MATH_MARKER_PATTERN.containsMatchIn(trimmed)
+            ) {
+                return true
+            }
+
             val withoutFunctionWords = trimmed.replace(MATH_FUNCTION_WORDS, " ")
             val letterRuns = LETTER_RUN_PATTERN.findAll(withoutFunctionWords).map { it.value }.toList()
 
@@ -436,16 +501,79 @@ class PdfLayoutPreserver(private val context: Context) {
         }
 
         /**
+         * The x each block may grow to before it would collide with something else.
+         *
+         * A translated line is usually longer than its source, so it needs room to
+         * the right. The room used to be "the rest of the page", which on a
+         * two-column page let a left-column paragraph run straight across the
+         * gutter and over the right column, and in a table let a name run into the
+         * symbol beside it.
+         *
+         * The page itself says where the room ends: the nearest block that shares
+         * the line and starts further right. Two passes, because a table cell or a
+         * paragraph is several lines and only some of them have a neighbour —
+         * blocks that begin at the same left edge belong to the same column, so
+         * they all inherit the tightest limit any of them found.
+         */
+        fun computeRightLimits(
+            blocks: List<TextBlock>,
+            pageRightEdge: Float
+        ): Map<TextBlock, Float> {
+            val pageRight = pageRightEdge - PAGE_RIGHT_MARGIN
+            if (blocks.isEmpty()) return emptyMap()
+
+            // A rotated run keeps the extent it was drawn at — it is never rewrapped
+            // — but it still blocks the horizontal runs beside it.
+            val subjects = blocks.filter { !it.isRotated }
+            if (subjects.isEmpty()) return emptyMap()
+
+            val perBlock = HashMap<TextBlock, Float>(subjects.size)
+            for (block in subjects) {
+                val ownRight = block.boxRight
+                val top = block.boxTop
+                val bottom = block.boxBottom
+                var limit = pageRight
+                for (other in blocks) {
+                    if (other === block) continue
+                    if (other.boxLeft < ownRight - COLUMN_EDGE_TOLERANCE) continue
+                    val sharesLine = other.boxBottom < top && other.boxTop > bottom
+                    if (!sharesLine) continue
+                    if (other.boxLeft < limit) limit = other.boxLeft
+                }
+                perBlock[block] = limit
+            }
+
+            // Propagate along a column. Clustering by sorted left edge rather than
+            // by a rounded bucket, so two lines a fraction of a point apart cannot
+            // land either side of a bucket boundary and one of them keep the
+            // page-wide limit.
+            val result = HashMap<TextBlock, Float>(subjects.size)
+            val byLeftEdge = subjects.sortedBy { it.x }
+            var index = 0
+            while (index < byLeftEdge.size) {
+                var end = index + 1
+                while (end < byLeftEdge.size &&
+                    byLeftEdge[end].x - byLeftEdge[end - 1].x <= COLUMN_EDGE_TOLERANCE
+                ) {
+                    end++
+                }
+                val column = byLeftEdge.subList(index, end)
+                val columnLimit = column.minOf { perBlock[it] ?: pageRight }
+                for (block in column) {
+                    // Never less room than the source itself used for that block.
+                    result[block] = maxOf(columnLimit - COLUMN_GUTTER, block.x + block.width)
+                }
+                index = end
+            }
+            return result
+        }
+
+        /**
          * Scans raw extracted text blocks and merges vertical fraction stacks
          * ONLY when an explicit fraction bar (a run of dashes/underscores) is
          * found between the numerator and denominator.  Without a bar, blocks
          * are never merged — this avoids destroying normal consecutive text lines.
          */
-        // Strict pattern: only digits, single letters, operators, parens, superscript/subscript
-        private val SHORT_MATH_PATTERN = Pattern.compile(
-            "^[0-9a-zA-Z⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻₀₁₂₃₄₅₆₇₈₉₊₋+\\-*/^().√∞παβγθ\\s]{1,8}$"
-        )
-
         fun collapseVerticalFractions(raw: List<TextBlock>): List<TextBlock> {
             if (raw.size < 2) return raw
 
@@ -457,10 +585,15 @@ class PdfLayoutPreserver(private val context: Context) {
             }
 
             fun isBar(text: String) = FRACTION_BAR_PATTERN.matches(text.trim())
-            fun isShortMath(text: String) = SHORT_MATH_PATTERN.matcher(text.trim()).matches()
 
-            val unused = raw.sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x }).toMutableList()
+            // A stacked fraction is a vertical relationship in page coordinates.
+            // Rotated runs read across that axis, so they are never part of one.
+            val (rotated, horizontal) = raw.partition { it.isRotated }
+            val unused = horizontal.sortedWith(
+                compareByDescending<TextBlock> { it.y }.thenBy { it.x }
+            ).toMutableList()
             val collapsed = mutableListOf<TextBlock>()
+            collapsed.addAll(rotated)
             val consumed = mutableSetOf<TextBlock>()
 
             // Pass 1: explicit  numerator ── bar ── denominator  triples
@@ -471,10 +604,18 @@ class PdfLayoutPreserver(private val context: Context) {
                 val barFont = bar.fontSize
                 val barRight = bar.x + bar.width
 
+                // A fraction bar is drawn at least as wide as what it divides.
+                // Without that test a lone en dash passed for a bar, and the
+                // dash is exactly how a table writes "dimensionless": the unit
+                // column of a terminology table turned "mm", "-", "N" into the
+                // single cell "mm/N" and lost a row.
+                fun barSpans(c: TextBlock) = bar.width >= c.width * 0.9f
+
                 val numCandidate = unused.firstOrNull { c ->
                     !consumed.contains(c) && !isBar(c.text) &&
                     c.y > bar.y && (c.y - bar.y) <= barFont * 1.8f &&
                     overlapRatio(c.x, c.x + c.width, bar.x, barRight) > 0.5f &&
+                    barSpans(c) &&
                     c.text.trim().length <= 20
                 }
                 if (numCandidate == null) continue
@@ -483,6 +624,7 @@ class PdfLayoutPreserver(private val context: Context) {
                     !consumed.contains(c) && !isBar(c.text) && c != numCandidate &&
                     bar.y > c.y && (bar.y - c.y) <= barFont * 1.8f &&
                     overlapRatio(c.x, c.x + c.width, bar.x, barRight) > 0.5f &&
+                    barSpans(c) &&
                     c.text.trim().length <= 20
                 }
                 if (denCandidate == null) continue
@@ -513,61 +655,27 @@ class PdfLayoutPreserver(private val context: Context) {
                 ))
             }
 
-            // Pass 2: bar-less fractions — ONLY very short pure-math blocks
-            val remaining = unused.filter { !consumed.contains(it) }
-                .sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x })
-                .toMutableList()
-
-            val consumed2 = mutableSetOf<TextBlock>()
-            for (top in remaining) {
-                if (consumed2.contains(top)) continue
-                if (!isShortMath(top.text)) continue
-
-                val topFont = top.fontSize
-                val topRight = top.x + top.width
-
-                val bot = remaining.firstOrNull { c ->
-                    !consumed2.contains(c) && c != top &&
-                    top.y > c.y &&                                         // below
-                    (top.y - c.y) <= topFont * 1.2f &&                     // very tight gap
-                    overlapRatio(top.x, topRight, c.x, c.x + c.width) > 0.6f &&
-                    isShortMath(c.text) &&
-                    abs(c.fontSize - topFont) <= topFont * 0.3f            // similar font size
-                }
-                if (bot == null) continue
-
-                consumed2.add(top)
-                consumed2.add(bot)
-
-                // Consume any intervening bar/dash block between top and bot
-                for (mid in remaining) {
-                    if (!consumed2.contains(mid) && mid.y < top.y && mid.y > bot.y) {
-                        if (overlapRatio(top.x, topRight, mid.x, mid.x + mid.width) > 0.3f) {
-                            consumed2.add(mid)
-                        }
-                    }
-                }
-
-                val nT = top.text.trim(); val dT = bot.text.trim()
-                val minX = minOf(top.x, bot.x)
-                val maxR = maxOf(topRight, bot.x + bot.width)
-                val avgY = (top.y + bot.y) / 2f
-                val topY = top.y + top.ascent
-                val botY = bot.y - bot.descent
-
-                collapsed.add(TextBlock(
-                    text = "$nT/$dT",
-                    x = minX, y = avgY,
-                    fontSize = maxOf(top.fontSize, bot.fontSize),
-                    width = maxR - minX,
-                    ascent = topY - avgY,
-                    descent = avgY - botY
-                ))
-            }
-
-            // Keep unconsumed blocks
-            for (block in remaining) {
-                if (!consumed2.contains(block)) collapsed.add(block)
+            // Everything the bar pass did not claim is kept exactly as extracted.
+            //
+            // A second pass used to merge any two vertically stacked short-math
+            // blocks into "top/bottom" on the theory that they were a fraction
+            // written without a bar. On a symbol table it destroyed the page:
+            // consecutive rows of the symbol column sit at the normal line
+            // pitch and are all short math, so "b" over "b0" became "b/b0",
+            // "alpha" over "beta" became "alpha/beta", and thirty rows
+            // collapsed into fifteen blocks drawn at the average of two
+            // baselines -- no label lined up with its symbol any more, and the
+            // units column merged the same way ("mm/mm", "kg/m/kg").
+            //
+            // A bar-less fraction and a pair of table rows are not separable by
+            // geometry alone: both are two short tokens one line apart, roughly
+            // centred on each other. Without a layout model there is no
+            // evidence to tell them apart, so the merge is not attempted.
+            // Leaving a rare bar-less fraction as two stacked lines is a
+            // cosmetic loss; merging table rows is structural damage, and the
+            // preservation rules prefer the cosmetic loss every time.
+            for (block in unused) {
+                if (!consumed.contains(block)) collapsed.add(block)
             }
 
             return collapsed.sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x })
@@ -618,28 +726,33 @@ class PdfLayoutPreserver(private val context: Context) {
         )
     }
 
+
     private fun drawTextWithWrapping(
         stream: PDPageContentStream,
         font: PDFont,
         block: TextBlock,
         text: String,
         maxAllowedHeight: Float = Float.MAX_VALUE,
-        cropBoxWidth: Float = 612f
+        rightLimit: Float = Float.MAX_VALUE
     ) {
         val baseFontSize = block.fontSize.coerceIn(6f, 72f)
-        val availableWidth = if (cropBoxWidth > 0f) {
-            maxOf(block.width, cropBoxWidth - block.x - 40f).coerceAtLeast(30f)
-        } else {
-            maxOf(block.width, 30f)
+        if (block.isRotated) {
+            drawRotatedText(stream, font, block, text, baseFontSize)
+            return
         }
+        val availableWidth = maxOf(block.width, rightLimit - block.x).coerceAtLeast(30f)
         val minSingleLineFontSize = maxOf(baseFontSize * 0.6f, 5.5f)
 
         var chosenFontSize = baseFontSize
-        var fits = measureStringWidth(text, font, chosenFontSize) <= availableWidth * 1.05f
+        // No overshoot allowance. A 5% one used to be granted here, which on a
+        // 240pt column is twelve points of text sitting on top of whatever is
+        // in the next column. The width already includes whatever the source
+        // itself occupied, so nothing that fitted before is squeezed by this.
+        var fits = measureStringWidth(text, font, chosenFontSize) <= availableWidth
         if (!fits) {
             var size = baseFontSize - 0.5f
             while (size >= minSingleLineFontSize) {
-                if (measureStringWidth(text, font, size) <= availableWidth * 1.05f) {
+                if (measureStringWidth(text, font, size) <= availableWidth) {
                     chosenFontSize = size
                     fits = true
                     break
@@ -682,6 +795,39 @@ class PdfLayoutPreserver(private val context: Context) {
             } catch (_: Exception) {}
             stream.endText()
         }
+    }
+
+    /**
+     * Redraw a run that reads up or down the page — a rotated column header.
+     *
+     * These used to vanish. The page's whole text layer is stripped before the
+     * translation is written back, and the writer only ever emitted horizontal
+     * lines, so anything rotated was erased and never replaced. A rotated run
+     * is not rewrapped: the space it has is the length it was drawn at, so it
+     * only shrinks to fit that, which keeps it inside its own table cell.
+     */
+    private fun drawRotatedText(
+        stream: PDPageContentStream,
+        font: PDFont,
+        block: TextBlock,
+        text: String,
+        baseFontSize: Float
+    ) {
+        val available = block.width.coerceAtLeast(MIN_ROTATED_LENGTH)
+        var fontSize = baseFontSize
+        val floor = maxOf(baseFontSize * 0.5f, 4.5f)
+        while (fontSize > floor && measureStringWidth(text, font, fontSize) > available) {
+            fontSize -= 0.5f
+        }
+        stream.beginText()
+        stream.setFont(font, fontSize)
+        stream.setTextMatrix(
+            Matrix.getRotateInstance(Math.toRadians(block.rotation.toDouble()), block.x, block.y)
+        )
+        try {
+            stream.showText(text)
+        } catch (_: Exception) {}
+        stream.endText()
     }
 
     private fun wrapText(
@@ -749,10 +895,12 @@ class PdfLayoutPreserver(private val context: Context) {
         val padX = 1.0f
         val padTop = 1.0f
         val padBottom = 1.0f
-        val rectX = block.x - padX
-        val rectY = block.y - block.descent - padBottom
-        val rectW = block.width + padX * 2.0f
-        val rectH = block.ascent + block.descent + padTop + padBottom
+        // Box accessors rather than x/width, so a rotated run is covered by the
+        // tall thin rectangle it actually occupies instead of a wide flat one.
+        val rectX = block.boxLeft - padX
+        val rectY = block.boxBottom - padBottom
+        val rectW = (block.boxRight - block.boxLeft) + padX * 2.0f
+        val rectH = (block.boxTop - block.boxBottom) + padTop + padBottom
         if (rectW <= 0f || rectH <= 0f) return
         stream.saveGraphicsState()
         @Suppress("DEPRECATION")
@@ -930,6 +1078,14 @@ class PdfLayoutPreserver(private val context: Context) {
         val translated: String
     )
 
+    /**
+     * One run of text with the geometry needed to put it back.
+     *
+     * [x] and [y] are the run's origin in PDF user space and [width] is its
+     * length along the reading direction, so for a rotated run the width runs
+     * up or down the page rather than across it. The box accessors resolve
+     * that, and everything that reasons about collisions uses them.
+     */
     class TextBlock(
         val text: String,
         val x: Float,
@@ -937,8 +1093,44 @@ class PdfLayoutPreserver(private val context: Context) {
         val fontSize: Float,
         val width: Float,
         val ascent: Float,
-        val descent: Float
-    )
+        val descent: Float,
+        /** Reading direction in degrees counter-clockwise: 0, 90, 180 or 270. */
+        val rotation: Int = 0
+    ) {
+        val isRotated: Boolean get() = rotation != 0
+
+        val boxLeft: Float
+            get() = when (rotation) {
+                90 -> x - descent
+                180 -> x - width
+                270 -> x - ascent
+                else -> x
+            }
+
+        val boxRight: Float
+            get() = when (rotation) {
+                90 -> x + ascent
+                180 -> x
+                270 -> x + descent
+                else -> x + width
+            }
+
+        val boxBottom: Float
+            get() = when (rotation) {
+                90 -> y
+                180 -> y - ascent
+                270 -> y - width
+                else -> y - descent
+            }
+
+        val boxTop: Float
+            get() = when (rotation) {
+                90 -> y + width
+                180 -> y + descent
+                270 -> y
+                else -> y + ascent
+            }
+    }
 
     private inner class PageTextCollector : PDFTextStripper() {
         val blocks = mutableListOf<TextBlock>()
@@ -990,8 +1182,12 @@ class PdfLayoutPreserver(private val context: Context) {
                     val gap = tp.xDirAdj - (prev.xDirAdj + prev.widthDirAdj)
                     val maxFont = maxOf(prev.fontSizeInPt, tp.fontSizeInPt)
 
-                    // Separate runs if there's a horizontal gap bigger than 1.5x font size, or a Y jump
-                    if (gap > maxFont * 1.5f || abs(tp.yDirAdj - prev.yDirAdj) > maxFont * 0.4f) {
+                    // Separate runs if there's a horizontal gap bigger than 1.5x font size, a Y jump,
+                    // or a change of reading direction (a rotated table header beside body text).
+                    if (tp.dir != prev.dir ||
+                        gap > maxFont * 1.5f ||
+                        abs(tp.yDirAdj - prev.yDirAdj) > maxFont * 0.4f
+                    ) {
                         clusters.add(currentCluster)
                         currentCluster = mutableListOf(tp)
                     } else {
@@ -1055,12 +1251,29 @@ class PdfLayoutPreserver(private val context: Context) {
                 val clusterText = sb.toString()
                 if (clusterText.isBlank()) continue
 
-                val x = cropBox.lowerLeftX + first.xDirAdj
-                val y = cropBox.upperRightY - first.yDirAdj
+                // The direction-adjusted coordinates the stripper reports are in
+                // the frame the text reads in, which is the page's frame only
+                // for unrotated text. For a rotated run the text matrix already
+                // carries the origin in user space, which is what the content
+                // stream wants back, so take it from there instead of trying to
+                // unrotate xDirAdj/yDirAdj.
+                val rotation = ((Math.round(first.dir) % 360) + 360) % 360
+                val x: Float
+                val y: Float
+                if (rotation == 0) {
+                    x = cropBox.lowerLeftX + first.xDirAdj
+                    y = cropBox.upperRightY - first.yDirAdj
+                } else {
+                    val matrix = first.textMatrix
+                    x = matrix.translateX
+                    y = matrix.translateY
+                }
+                // Width runs along the reading direction in both cases, because
+                // widthDirAdj is measured in that same rotated frame.
                 val width = maxOf((last.xDirAdj + last.widthDirAdj) - first.xDirAdj, baseFontSize * 0.5f)
                 val ascent = baseFontSize * 0.8f
                 val descent = baseFontSize * 0.2f
-                blocks.add(TextBlock(clusterText, x, y, baseFontSize, width, ascent, descent))
+                blocks.add(TextBlock(clusterText, x, y, baseFontSize, width, ascent, descent, rotation))
             }
         }
     }

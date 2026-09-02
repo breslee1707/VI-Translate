@@ -23,8 +23,11 @@ class GoogleTranslateEngine(
     private val resultPattern = Pattern.compile("(?s)class=\"(?:t0|result-container)\">(.*?)<")
 
     @Throws(IOException::class, FormulaPlaceholderException::class)
-    fun translate(text: String, ignoreCache: Boolean = false): String {
-        if (text.isBlank()) return text
+    fun translate(rawText: String, ignoreCache: Boolean = false): String {
+        if (rawText.isBlank()) return rawText
+        // Normalise before the cache lookup so one spelling of a segment is
+        // never served from a key written under another.
+        val text = SourceTextNormaliser.normalise(rawText)
         if (!ignoreCache && cache.containsKey(text)) {
             return cache[text]!!
         }

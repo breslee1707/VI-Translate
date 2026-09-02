@@ -153,7 +153,7 @@ class PdfLayoutPreserver(private val context: Context) {
 
                                 if (translations.isNotEmpty()) {
                                     // Strip original text from page streams so vector drawings & diagrams remain 100% pristine
-                                    stripTextFromPage(document, page)
+                                    val sourceTextRemoved = stripTextFromPage(document, page)
 
                                     PDPageContentStream(
                                         document,
@@ -168,10 +168,14 @@ class PdfLayoutPreserver(private val context: Context) {
                                             val cleanedText = stripTagsAndPlaceholders(translation.translated)
                                             val text = sanitizeForFont(cleanedText, font)
 
-                                            // Cover the source lines whatever happens next, so a
-                                            // paragraph whose translation came back blank leaves
-                                            // clean paper rather than half-erased English.
-                                            for (line in paragraph.lines) coverSourceText(stream, line)
+                                            // Only when the source text is still on the page.
+                                            // Painting white over a block that has already been
+                                            // stripped hides nothing and destroys what was behind
+                                            // it: on a page of tinted table panels the app left a
+                                            // white patch under every line it wrote.
+                                            if (!sourceTextRemoved) {
+                                                for (line in paragraph.lines) coverSourceText(stream, line)
+                                            }
                                             if (text.isBlank()) continue
 
                                             // The next paragraph down the page bounds how far this
@@ -1200,7 +1204,15 @@ class PdfLayoutPreserver(private val context: Context) {
         stream.restoreGraphicsState()
     }
 
-    private fun stripTextFromPage(document: PDDocument, page: PDPage) {
+    /**
+     * Blank every string the page draws, keeping its vector art intact.
+     *
+     * Returns whether it succeeded, because what the caller does next
+     * depends on it: with the text gone there is nothing to hide, and the
+     * white patch that used to be painted over each block was landing on
+     * the coloured panels behind the text and bleaching them.
+     */
+    private fun stripTextFromPage(document: PDDocument, page: PDPage): Boolean {
         try {
             val parser = PDFStreamParser(page)
             parser.parse()
@@ -1246,7 +1258,10 @@ class PdfLayoutPreserver(private val context: Context) {
             contentWriter.writeTokens(newTokens)
             out.close()
             page.setContents(newStream)
-        } catch (_: Exception) {}
+            return true
+        } catch (_: Exception) {
+            return false
+        }
     }
 
     private fun sanitizeForFont(text: String, font: PDFont): String {

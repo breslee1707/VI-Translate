@@ -72,16 +72,22 @@ PDF Translate là ứng dụng mã nguồn mở dành cho Windows, macOS và And
 
 ### Android
 
-1. Dự án Android viết bằng **Kotlin** & **Jetpack Compose** nằm tại thư mục `android/`.
-2. Để biên dịch ứng dụng Android:
-   ```bash
-   cd android
-   ./gradlew assembleDebug
-   ```
-3. Cài đặt APK lên thiết bị Android hoặc Emulator để sử dụng.
+1. **[Tải APK từ bản phát hành Android mới nhất](https://github.com/breslee1707/VI-Translate/releases?q=android-v)** (`PDFTranslate-android-*.apk`). Bản Android được đánh tag riêng theo dạng `android-v*`.
+2. Trên điện thoại, cho phép trình duyệt hoặc trình quản lý file **cài ứng dụng từ nguồn không xác định**, rồi mở file APK.
+3. Ứng dụng cần Android 8.0 trở lên.
+
+Muốn tự biên dịch:
+
+```bash
+cd android
+./gradlew assembleDebug
+```
 
 > [!NOTE]
 > Bản macOS yêu cầu **macOS 14 Sonoma trở lên**. Tất cả bản desktop đều không cần cài Python và không phải tải thêm model ở lần chạy đầu. Quá trình dịch bằng Google vẫn cần kết nối Internet.
+
+> [!IMPORTANT]
+> Bản Android là một bản viết lại trên PDFBox-Android, không phải bản desktop biên dịch lại. Nó chỉ đọc PDF dạng văn bản (chưa có OCR) và dùng heuristic thay cho model bố cục BabelDOC/YOLOv8, nên PDF nhiều công thức có thể còn sai chỉ số trên/dưới hoặc phân số. Chi tiết build và phát hành nằm ở [`docs/android-release.md`](docs/android-release.md).
 
 > [!WARNING]
 > Windows SmartScreen có thể cảnh báo vì ứng dụng chưa được ký số. Chọn **More info** → **Run anyway** nếu bạn tải file từ trang Releases chính thức của repo này.

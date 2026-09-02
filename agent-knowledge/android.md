@@ -14,12 +14,22 @@ it and `app/update.py` downloads `PDFTranslate-windows.zip` from whatever the
 latest `v*` release holds. Publishing an APK under `v*` makes every installed
 Windows copy see an update it cannot fetch.
 
-Android releases are tagged `android-v<versionName>` and published by
+Android releases are tagged `android-v<appVersionName>` and published by
 `.github/workflows/android-build.yml`, which refuses a tag that disagrees with
-`versionName` in `android/app/build.gradle.kts`. `UpdateChecker` walks the
+`appVersionName` in `android/app/build.gradle.kts`. `UpdateChecker` walks the
 release list and takes the newest non-draft, non-prerelease tag with that
 prefix; it must never fall back to `/releases/latest`, which returns whichever
 product released last.
+
+The Android line started at 0.1.0 while the desktop is past v0.2.5, so a
+desktop tag compares *higher*. The prefix filter, not the number comparison, is
+what keeps a Windows release from prompting Android users. `UpdateCheckerTest`
+pins this; do not "simplify" it away.
+
+`versionCode` is derived from `appVersionName` as
+`major * 10000 + minor * 100 + patch`. Never set it by hand: Android refuses to
+install over an equal or higher code, and the failure surfaces on a user's
+phone as "app not installed", nowhere in CI. Minor and patch stay below 100.
 
 ## Pinned Toolchain
 

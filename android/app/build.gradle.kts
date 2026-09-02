@@ -32,6 +32,32 @@ val hasReleaseSigning = releaseStorePath != null &&
     releaseKeyPassword != null &&
     file(releaseStorePath).exists()
 
+// The one number to change for a release. Everything else follows from it: the
+// tag the workflow accepts, the name of the published APK, and versionCode.
+val appVersionName = "0.1.0"
+
+/**
+ * Android refuses to install over a build whose versionCode is not lower, and
+ * the number means nothing to anyone by itself. Deriving it from the version
+ * name removes the step that is easy to forget and whose only symptom is
+ * "app not installed" on a user's phone.
+ *
+ * major * 10000 + minor * 100 + patch, so 0.1.0 is 100 and 1.2.3 is 10203.
+ * Each component has to stay under 100, which is the same discipline the
+ * desktop APP_VERSION already follows.
+ */
+fun versionCodeFrom(name: String): Int {
+    val parts = name.split(".").map { part ->
+        part.takeWhile { it.isDigit() }.toIntOrNull()
+            ?: throw GradleException("appVersionName '$name' is not dotted numbers")
+    }
+    require(parts.size == 3) { "appVersionName '$name' must be major.minor.patch" }
+    require(parts.drop(1).all { it < 100 }) {
+        "minor and patch in '$name' must each stay below 100"
+    }
+    return parts[0] * 10000 + parts[1] * 100 + parts[2]
+}
+
 android {
     namespace = "com.vitranslate.pdf"
     compileSdk = 35
@@ -40,8 +66,8 @@ android {
         applicationId = "com.vitranslate.pdf"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = versionCodeFrom(appVersionName)
+        versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

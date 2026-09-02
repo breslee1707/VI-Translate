@@ -84,13 +84,28 @@ under a `v*` tag.** That namespace belongs to the desktop product:
 only an APK tells every installed Windows copy that an update exists and then
 fails to deliver it.
 
-1. Set `versionName` (and bump `versionCode`) in
-   [`android/app/build.gradle.kts`](../android/app/build.gradle.kts).
+Releasing is one number and one tag:
+
+1. Change `appVersionName` in
+   [`android/app/build.gradle.kts`](../android/app/build.gradle.kts). That is
+   the only edit. `versionCode` is derived from it as
+   `major * 10000 + minor * 100 + patch`, so 0.1.0 is 100 and 1.2.3 is 10203 —
+   there is no second number to remember to bump, and forgetting one is how you
+   ship a build that phones refuse to install over the last one.
 2. Merge to `main`.
-3. Tag `android-v<versionName>` and push it.
-4. `.github/workflows/android-build.yml` checks the tag against `versionName`,
+3. Tag `android-v<appVersionName>` and push it:
+
+   ```bash
+   git tag android-v0.1.1 && git push origin android-v0.1.1
+   ```
+
+4. `.github/workflows/android-build.yml` checks the tag against the version,
    builds, verifies the signature with `apksigner`, and publishes
    `PDFTranslate-android-<version>.apk`.
+
+Minor and patch must each stay below 100, or the derived codes stop increasing
+monotonically; the build fails with that message rather than producing a broken
+release. Go to the next minor rather than a 100th patch.
 
 The in-app update check reads the same namespace: `UpdateChecker` walks the
 release list and takes the newest non-draft release whose tag starts with

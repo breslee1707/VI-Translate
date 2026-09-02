@@ -32,6 +32,13 @@ android/.kotlin/
 android/.idea/
 android/build/
 android/app/build/
+# Machine-specific SDK path; a committed one breaks every other checkout.
+android/local.properties
+# Signing material never belongs in the repository.
+android/keystore.properties
+*.jks
+*.keystore
+.DS_Store
 Thumbs.db
 desktop.ini
 

@@ -33,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      apk: ${{ steps.apk.outputs.name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -89,15 +90,28 @@ jobs:
           "$apksigner" verify --print-certs \
             app/build/outputs/apk/release/app-release.apk
 
+      # Without a keystore AGP writes app-release-unsigned.apk instead, and the
+      # name has to say so: an unsigned APK will not install, and one that
+      # looked like a finished release would waste somebody's afternoon.
       - name: Name the APK after the version
+        id: apk
         run: |
-          cp app/build/outputs/apk/release/app-release.apk \
-             "PDFTranslate-android-${{ steps.version.outputs.version }}.apk"
+          version="${{ steps.version.outputs.version }}"
+          if [ "${{ steps.keystore.outputs.signed }}" = "true" ]; then
+            source="app/build/outputs/apk/release/app-release.apk"
+            name="PDFTranslate-android-${version}.apk"
+          else
+            source="app/build/outputs/apk/release/app-release-unsigned.apk"
+            name="PDFTranslate-android-${version}-unsigned.apk"
+          fi
+          test -f "$source"
+          cp "$source" "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: PDFTranslate-android-${{ steps.version.outputs.version }}
-          path: android/PDFTranslate-android-${{ steps.version.outputs.version }}.apk
+          name: ${{ steps.apk.outputs.name }}
+          path: android/${{ steps.apk.outputs.name }}
           if-no-files-found: error
 
       - name: Remove the keystore
@@ -124,16 +138,20 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match versionName $version" >&2
             exit 1
           fi
+          if [ "${{ needs.build.outputs.apk }}" != "PDFTranslate-android-${version}.apk" ]; then
+            echo "Refusing to publish an unsigned APK. Set the ANDROID_KEYSTORE_* secrets." >&2
+            exit 1
+          fi
           echo "Releasing $version"
 
       - uses: actions/download-artifact@v4
         with:
-          name: PDFTranslate-android-${{ needs.build.outputs.version }}
+          name: ${{ needs.build.outputs.apk }}
           path: android
 
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Android ${{ needs.build.outputs.version }}
-          files: android/PDFTranslate-android-${{ needs.build.outputs.version }}.apk
+          files: android/${{ needs.build.outputs.apk }}
           fail_on_unmatched_files: true

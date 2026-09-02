@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PDF Translate</string>
+    <string name="notification_channel_name">Tiến độ dịch</string>
+    <string name="notification_channel_description">Hiển thị tiến độ khi đang dịch file PDF.</string>
+    <string name="notification_translating_title">Đang dịch PDF</string>
+    <string name="notification_cancel">Huỷ</string>
+</resources>

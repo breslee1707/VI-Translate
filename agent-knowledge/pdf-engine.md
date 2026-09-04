@@ -54,6 +54,12 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   `is_scanned_page` (one image over half the page) drives backing rectangles;
   `page_has_image` (any image at all) drives the image-only report, because a
   scanner routinely emits one page as dozens of small tiles.
+- The experimental OCR path is opt-in at the CLI (`--ocr standard|enhanced`).
+  It adds an invisible sidecar only for image-only pages, never paints white
+  backing rectangles on those pages, and replaces the scan image only after a
+  safe inpainting pass. Pages with protected layout regions, dense rules,
+  formula/numeric content, or fragmented OCR are kept unchanged and reported
+  partial; the default `--ocr off` path is unchanged.
 
 ## Colour and Emphasis
 

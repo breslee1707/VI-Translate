@@ -45,6 +45,7 @@ Use this as a cause map, not a substitute for inspecting the failing PDF.
 | An OCR'd slide title is invisible | The source was white on a photograph and every translation was written in black | `ink_for` picks the ink from the sampled background's luminance; `test_ocr_overlay.py` |
 | The app looks hung at the last page when OCR is on | The pass runs after the whole document is translated and reported no progress of its own | The OCR pass drives the same callback with a phase name; `test_translate_pdf.py` |
 | OCR paints nonsense across a line drawing | A design patent drawing of a logotype reads as words, the translator hands them straight back, and they were painted over the artwork at the size of the strokes they were mistaken for | A translation identical to its source is not drawn: nothing is gained and the picture is lost; `test_ocr_overlay.py` |
+| An OCR'd page steps between font sizes at every paragraph, and the heading comes out smaller than the body | The size was taken from the detector's box, and that box grows or shrinks with the descenders a line happens to carry: one uniform 12pt page measured 12.3 to 21.2 | `level_body_sizes` gives every block within the body band the page's usual height, and the page then draws all of them at the largest size the tightest one holds; `test_ocr_overlay.py` |
 
 When adding a new guard, reproduce the smallest failing geometry in a unit test
 and validate the real document visually. Do not encode a filename-specific fix.

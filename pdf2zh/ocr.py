@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Sequence
 
 import numpy as np
@@ -57,6 +57,11 @@ MIN_FONT_SIZE = 4.0
 # The detected box is what the source glyphs occupied, so it sets the size. A
 # fixed ceiling here drew a 70pt slide title at 24pt.
 FONT_SIZE_OF_BOX = 0.8
+# How far a block's box may sit from the page's usual one and still count as
+# body text. The detector's box depends on whether a line happens to carry
+# descenders, so one uniform 12pt page measured 12.3 to 21.2: the band has to
+# be wide enough to swallow that and still leave a real title outside it.
+BODY_SIZE_BAND = (0.6, 1.5)
 # Below this the paper is dark and black text on it cannot be read.
 DARK_BACKGROUND_LUMINANCE = 0.5
 LIGHT_INK = (0.97, 0.97, 0.97)
@@ -258,7 +263,44 @@ def group_lines(lines: Sequence[Line]) -> list[OcrBlock]:
                 tuple(boxes),
             )
         )
-    return result
+    return level_body_sizes(result)
+
+
+def most_common_height(blocks: Iterable[OcrBlock]) -> float | None:
+    """The box height most of the page's blocks share, after levelling.
+
+    `level_body_sizes` gives every body block the same height, so the mode is
+    the body text and anything else is a heading, a caption or a footnote.
+    """
+    counted = Counter(block.height for block in blocks)
+    return counted.most_common(1)[0][0] if counted else None
+
+
+def level_body_sizes(blocks: Sequence[OcrBlock]) -> list[OcrBlock]:
+    """Give every block of body text the same size.
+
+    A detector's box height wanders by a few percent with skew, noise and the
+    descenders a line happens to contain, and the size is taken from that box.
+    On a page of one uniform 12pt paragraph after another, that came out as
+    13.1, 13.8 and 12.6, with the heading below all of them: the reader sees
+    the size stepping about for no reason the page explains.
+
+    Every line on the page votes, so the winner is the size most of the text
+    is set in. A block within a third of it is body text and joins it; a title
+    or a footnote sits far enough away to keep its own.
+    """
+    every_line = sorted(
+        box[3] - box[1] for block in blocks for box in block.lines or (block.rect,)
+    )
+    if not every_line:
+        return list(blocks)
+    common = every_line[len(every_line) // 2]
+    return [
+        replace(block, height=common)
+        if BODY_SIZE_BAND[0] <= block.height / common <= BODY_SIZE_BAND[1]
+        else block
+        for block in blocks
+    ]
 
 
 def _image_rects(page: Any) -> list[Rect]:
@@ -331,35 +373,58 @@ def ink_for(background: tuple[float, float, float]) -> tuple[float, float, float
     return DARK_INK if luminance > DARK_BACKGROUND_LUMINANCE else LIGHT_INK
 
 
-def _draw(page: Any, block: OcrBlock, text: str, font: Font) -> bool:
+def _block_rect(block: OcrBlock) -> Any:
+    return pymupdf.Rect(block.rect) + (-1, -1, 1, 1)
+
+
+def _line_boxes(block: OcrBlock) -> list[Any]:
+    return [pymupdf.Rect(box) + (-1, -1, 1, 1) for box in block.lines or (block.rect,)]
+
+
+def fitting_size(page: Any, block: OcrBlock, text: str, font: Font) -> float | None:
+    """The largest size at which this translation fits where it has to go.
+
+    Nothing is drawn: the page needs every block measured before any of them is
+    written, because they are all going to share one size.
+    """
+    rect = _block_rect(block)
+    size = max(MIN_FONT_SIZE, block.height * FONT_SIZE_OF_BOX)
+    floor = max(MIN_FONT_SIZE, size * MIN_FONT_SCALE)
+    while size >= floor:
+        try:
+            leftover = pymupdf.TextWriter(page.rect).fill_textbox(
+                rect, text, font=font, fontsize=size, lineheight=LINE_HEIGHT
+            )
+        except (ValueError, RuntimeError):
+            return None
+        if not leftover:
+            return size
+        size -= FONT_SHRINK_STEP
+    return None
+
+
+def _draw(page: Any, block: OcrBlock, text: str, font: Font, size: float) -> bool:
     """Cover the lines that were read and write the translation in their place.
 
     The backing covers those line boxes only, never the picture around them, so
     a diagram keeps its artwork and loses just the label it was carrying, and
-    each box is painted the colour sampled underneath it rather than white. A
-    translation that will not fit even at the floor size is left undrawn rather
-    than spilled across the figure, and reported instead.
+    each box is painted the colour sampled underneath it rather than white.
     """
-    rect = pymupdf.Rect(block.rect) + (-1, -1, 1, 1)
-    boxes = [pymupdf.Rect(box) + (-1, -1, 1, 1) for box in block.lines or (block.rect,)]
+    boxes = _line_boxes(block)
     background = sampled_background(page, boxes[0])
-    size = max(MIN_FONT_SIZE, block.height * FONT_SIZE_OF_BOX)
-    floor = max(MIN_FONT_SIZE, size * MIN_FONT_SCALE)
-    while size >= floor:
-        writer = pymupdf.TextWriter(page.rect, color=ink_for(background))
-        try:
-            leftover = writer.fill_textbox(
-                rect, text, font=font, fontsize=size, lineheight=LINE_HEIGHT
-            )
-        except (ValueError, RuntimeError):
-            return False
-        if not leftover:
-            for box in boxes:
-                page.draw_rect(box, color=None, fill=sampled_background(page, box))
-            writer.write_text(page)
-            return True
-        size -= FONT_SHRINK_STEP
-    return False
+    writer = pymupdf.TextWriter(page.rect, color=ink_for(background))
+    try:
+        leftover = writer.fill_textbox(
+            _block_rect(block), text, font=font, fontsize=size, lineheight=LINE_HEIGHT
+        )
+    except (ValueError, RuntimeError):
+        return False
+    if leftover:
+        return False
+    for box in boxes:
+        page.draw_rect(box, color=None, fill=sampled_background(page, box))
+    writer.write_text(page)
+    return True
 
 
 def apply_ocr_overlay(
@@ -403,6 +468,7 @@ def apply_ocr_overlay(
             lines = strip_recognized_real_text(lines, source_page.get_text("words"))
             output_page = doc_zh[pageno]
             written = 0
+            prepared: list[tuple[OcrBlock, str]] = []
             for block in group_lines(lines):
                 try:
                     translated = translator.translate(block.text)
@@ -419,7 +485,31 @@ def apply_ocr_overlay(
                     # the words used to be painted across the drawing at the
                     # size of the strokes they were mistaken for.
                     continue
-                if _draw(output_page, block, translated, font):
+                prepared.append((block, translated))
+            measured = [
+                (block, text, fitting_size(output_page, block, text, font))
+                for block, text in prepared
+            ]
+            body_height = most_common_height(block for block, _, _ in measured)
+            body_size = min(
+                (
+                    size
+                    for block, _, size in measured
+                    if size is not None and block.height == body_height
+                ),
+                default=None,
+            )
+            for block, text, size in measured:
+                if size is None:
+                    failures.append(block.text)
+                    reasons["OCR text cannot fit inside its image"] += 1
+                    continue
+                if body_size is not None and block.height == body_height:
+                    # Every paragraph of body text on the page takes the size
+                    # the tightest of them can hold, so the reader sees one
+                    # size rather than a step at every paragraph.
+                    size = body_size
+                if _draw(output_page, block, text, font, size):
                     written += 1
                 else:
                     failures.append(block.text)

@@ -17,6 +17,8 @@ from pdf2zh.ocr import (  # noqa: E402
     SCALE,
     apply_ocr_overlay,
     ink_for,
+    level_body_sizes,
+    most_common_height,
     sampled_background,
     group_lines,
     merge_regions,
@@ -144,6 +146,51 @@ class GroupingTests(unittest.TestCase):
         ]
 
         self.assertEqual(len(group_lines(lines)), 2)
+
+
+class SizeLevellingTests(unittest.TestCase):
+    """One uniform 12pt page came back at 9.9, 12.6, 13.1 and 13.8pt, because the
+    size was taken from the detector's box and that box depends on whether a
+    line happens to carry descenders."""
+
+    def test_paragraphs_of_one_page_share_a_size(self):
+        lines = [
+            ("first paragraph", (60.0, 100.0, 500.0, 119.5)),
+            ("second paragraph", (60.0, 200.0, 500.0, 221.2)),
+            ("third paragraph", (60.0, 300.0, 500.0, 315.7)),
+        ]
+
+        heights = {block.height for block in group_lines(lines)}
+
+        self.assertEqual(len(heights), 1)
+
+    def test_a_title_keeps_its_own_size(self):
+        blocks = group_lines(
+            [
+                ("A slide title", (60.0, 40.0, 700.0, 110.0)),
+                ("body line one", (60.0, 200.0, 500.0, 219.0)),
+                ("body line two", (60.0, 260.0, 500.0, 279.0)),
+            ]
+        )
+
+        heights = sorted({block.height for block in blocks})
+
+        self.assertEqual(len(heights), 2)
+        self.assertGreater(heights[1], 3 * heights[0])
+
+    def test_the_page_size_is_the_one_most_of_the_text_uses(self):
+        body = OcrBlockStub(19.0)
+        self.assertEqual(
+            most_common_height([body, OcrBlockStub(19.0), OcrBlockStub(70.0)]), 19.0
+        )
+
+    def test_levelling_an_empty_page_is_not_an_error(self):
+        self.assertEqual(level_body_sizes([]), [])
+
+
+class OcrBlockStub:
+    def __init__(self, height):
+        self.height = height
 
 
 class BackingTests(unittest.TestCase):

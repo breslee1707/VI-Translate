@@ -207,6 +207,7 @@ def translate_patch(
     style_font_names: Dict | None = None,
     style_fonts: Dict | None = None,
     synthetic_styles: set[int] | None = None,
+    skip_backing_pages: set[int] | None = None,
     **kwarg: Any,
 ) -> None:
     rsrcmgr = PDFResourceManager()
@@ -217,6 +218,7 @@ def translate_patch(
     # paragraph is fitted. This is only a measure to compare line ends against.
     class_bounds = {}
     scanned_pages = set()
+    skip_backing_pages = skip_backing_pages or set()
     pages_with_images = set()
     device = TranslateConverter(
         rsrcmgr,
@@ -262,7 +264,7 @@ def translate_patch(
             page_rect = doc_zh[page.pageno].rect
             page_area = page_rect.width * page_rect.height
             page_blocks = doc_zh[page.pageno].get_text("dict")["blocks"]
-            if is_scanned_page(page_blocks, page_area):
+            if is_scanned_page(page_blocks, page_area) and pageno not in skip_backing_pages:
                 scanned_pages.add(pageno)
             if page_has_image(page_blocks):
                 pages_with_images.add(pageno)
@@ -549,6 +551,7 @@ def translate_stream(
     skip_subset_fonts: bool = False,
     create_dual: bool = True,
     ignore_cache: bool = False,
+    skip_backing_pages: set[int] | None = None,
     **kwarg: Any,
 ):
     source_size = len(stream)
@@ -711,6 +714,7 @@ def translate(
     prompt: Template = None,
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
+    skip_backing_pages: set[int] | None = None,
     **kwarg: Any,
 ):
     if not files:

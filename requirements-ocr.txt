@@ -1,0 +1,4 @@
+# Optional OCR mode for scripts/translate_pdf.py. The normal desktop and CLI
+# paths keep their existing dependency set until OCR is explicitly enabled.
+-r requirements.txt
+rapidocr==3.9.2

@@ -41,11 +41,70 @@ def is_clean(text: str) -> bool:
     return private <= max(1, len(text) // 100)
 
 
+def _join_text(left: str, right: str) -> str:
+    if not left or not right:
+        return left + right
+    if left[-1].isspace() or right[0].isspace():
+        return left + right
+    return f"{left} {right}"
+
+
+def merge_visual_lines(lines: list[ocrjson.Line]) -> list[ocrjson.Line]:
+    """Merge PDF producer fragments that occupy one visual baseline.
+
+    Some government PDFs encode every word as a separate PyMuPDF ``line``.
+    OCR engines correctly return the whole printed line, so scoring those
+    fragments one-to-one makes a perfect recognition look catastrophically
+    wrong. Blocks still provide the column boundary; only close fragments in
+    the same block and baseline are merged here.
+    """
+    pending = sorted(lines, key=lambda line: (line.bbox[1], line.bbox[0]))
+    merged: list[ocrjson.Line] = []
+    for line in pending:
+        candidate = None
+        for index in range(len(merged) - 1, -1, -1):
+            previous = merged[index]
+            common = max(
+                0.0,
+                min(previous.bbox[3], line.bbox[3])
+                - max(previous.bbox[1], line.bbox[1]),
+            )
+            smaller_height = min(
+                previous.bbox[3] - previous.bbox[1],
+                line.bbox[3] - line.bbox[1],
+            )
+            gap = line.bbox[0] - previous.bbox[2]
+            maximum_gap = max(36.0, smaller_height * 4.0)
+            if smaller_height > 0 and common / smaller_height >= 0.65 and -2 <= gap <= maximum_gap:
+                candidate = index
+                break
+            if line.bbox[1] - previous.bbox[3] > smaller_height:
+                break
+        if candidate is None:
+            merged.append(line)
+            continue
+        previous = merged[candidate]
+        merged[candidate] = ocrjson.Line(
+            text=_join_text(previous.text, line.text),
+            bbox=(
+                min(previous.bbox[0], line.bbox[0]),
+                min(previous.bbox[1], line.bbox[1]),
+                max(previous.bbox[2], line.bbox[2]),
+                max(previous.bbox[3], line.bbox[3]),
+            ),
+            conf=1.0,
+            baseline=previous.baseline,
+            size=previous.size,
+        )
+    return sorted(merged, key=lambda line: (line.bbox[1], line.bbox[0]))
+
+
 def extract(page: pymupdf.Page) -> ocrjson.Page:
     result = ocrjson.Page(page=page.number, width=page.rect.width, height=page.rect.height)
     for block in page.get_text("dict")["blocks"]:
         if block.get("type") != 0:
             continue
+        block_lines: list[ocrjson.Line] = []
         for line in block.get("lines", []):
             spans = [s for s in line.get("spans", []) if s.get("text", "").strip()]
             if not spans:
@@ -59,7 +118,7 @@ def extract(page: pymupdf.Page) -> ocrjson.Page:
             y1 = max(span["bbox"][3] for span in spans)
             if x1 - x0 <= 1 or y1 - y0 <= 1:
                 continue
-            result.lines.append(
+            block_lines.append(
                 ocrjson.Line(
                     text=text,
                     bbox=(x0, y0, x1, y1),
@@ -70,6 +129,7 @@ def extract(page: pymupdf.Page) -> ocrjson.Page:
                     size=float(spans[0]["size"]),
                 )
             )
+        result.lines.extend(merge_visual_lines(block_lines))
     result.lines = ocrjson.reading_order(result.lines, page.rect.width)
     return result
 

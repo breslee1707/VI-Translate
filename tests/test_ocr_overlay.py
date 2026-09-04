@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pdf2zh.ocr import (  # noqa: E402
     SCALE,
     apply_ocr_overlay,
+    sampled_background,
     group_lines,
     merge_regions,
     quad_to_rect,
@@ -142,6 +143,31 @@ class GroupingTests(unittest.TestCase):
         ]
 
         self.assertEqual(len(group_lines(lines)), 2)
+
+
+class BackingTests(unittest.TestCase):
+    def test_the_patch_takes_the_colour_of_the_paper(self):
+        """Scanned paper is warm grey far more often than white, and a pure
+        white patch turns every translated paragraph into a visible rectangle."""
+        document = pymupdf.open()
+        page = document.new_page()
+        page.draw_rect(page.rect, color=None, fill=(0.8, 0.78, 0.74))
+        try:
+            red, green, blue = sampled_background(page, (100, 100, 300, 140))
+        finally:
+            document.close()
+
+        self.assertAlmostEqual(red, 0.8, places=1)
+        self.assertAlmostEqual(green, 0.78, places=1)
+        self.assertAlmostEqual(blue, 0.74, places=1)
+
+    def test_white_paper_still_gets_a_white_patch(self):
+        document = pymupdf.open()
+        page = document.new_page()
+        try:
+            self.assertEqual(sampled_background(page, (100, 100, 300, 140)), (1.0, 1.0, 1.0))
+        finally:
+            document.close()
 
 
 class OverlayTests(unittest.TestCase):

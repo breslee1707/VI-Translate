@@ -57,6 +57,8 @@ MIN_FONT_SIZE = 4.0
 MAX_FONT_SIZE = 24.0
 # Vietnamese stacks diacritics above and below; see references/preservation-rules.md.
 LINE_HEIGHT = 1.10
+# Only the average colour of a line box is wanted, so read it small.
+BACKGROUND_SAMPLE_DPI = 36
 
 
 class OcrUnavailableError(RuntimeError):
@@ -276,13 +278,33 @@ def _recognize(page: Any, region: Rect, session: Any) -> list[Line]:
     return lines
 
 
+def sampled_background(page: Any, rect: Any) -> tuple[float, float, float]:
+    """The colour of the paper under this line.
+
+    Scanned paper is warm grey far more often than it is white, so a patch
+    painted pure white glows on the page and turns every translated paragraph
+    into a visible rectangle. The glyphs are a minority of the pixels in a line
+    box, so the median colour of the box is the paper it sits on.
+    """
+    try:
+        pixmap = page.get_pixmap(clip=pymupdf.Rect(rect), dpi=BACKGROUND_SAMPLE_DPI)
+    except Exception:  # noqa: BLE001 - an unsampleable box just gets white
+        return (1.0, 1.0, 1.0)
+    if pixmap.width < 1 or pixmap.height < 1 or pixmap.n < 3:
+        return (1.0, 1.0, 1.0)
+    samples = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(-1, pixmap.n)[:, :3]
+    median = np.median(samples, axis=0) / 255.0
+    return (float(median[0]), float(median[1]), float(median[2]))
+
+
 def _draw(page: Any, block: OcrBlock, text: str, font: Font) -> bool:
     """Cover the line that was read and write the translation in its place.
 
     The backing covers the text box only, never the picture around it, so a
-    diagram keeps its artwork and loses just the label it was carrying. A
-    translation that will not fit even at the floor size is left undrawn rather
-    than spilled across the figure, and reported instead.
+    diagram keeps its artwork and loses just the label it was carrying, and it
+    is painted the colour of the paper rather than white. A translation that
+    will not fit even at the floor size is left undrawn rather than spilled
+    across the figure, and reported instead.
     """
     rect = pymupdf.Rect(block.rect) + (-1, -1, 1, 1)
     size = min(MAX_FONT_SIZE, max(MIN_FONT_SIZE, block.height * 0.8))
@@ -296,7 +318,7 @@ def _draw(page: Any, block: OcrBlock, text: str, font: Font) -> bool:
         except (ValueError, RuntimeError):
             return False
         if not leftover:
-            page.draw_rect(rect, color=None, fill=(1, 1, 1))
+            page.draw_rect(rect, color=None, fill=sampled_background(page, rect))
             writer.write_text(page)
             return True
         size -= FONT_SHRINK_STEP

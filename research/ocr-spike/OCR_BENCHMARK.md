@@ -40,6 +40,13 @@ The enhanced PP-OCRv6 medium profile was about 17x slower on the same machine
 without a measurable accuracy improvement, so it remains a benchmark-only
 profile and is not advertised as a quality upgrade.
 
+The compact core run covered 16 content pages across NASA and IRS material in
+184 seconds (11.5 seconds/page, including heavy form pages). Its aggregate
+matched CER was 2.53%, missed-character rate 3.08%, numeric recall 97.75% and
+reading-order tau 0.961. The report includes per-feature scores; form/rule and
+small-font groups are intentionally below the prose gate and remain protected
+or partial in the CLI.
+
 Visual QA found that partial inpainting is unsafe on pages containing formulas,
 nomenclature, forms, dense rules or protected layout regions. The experimental
 CLI now keeps those pages byte-for-byte unchanged and reports a partial result;

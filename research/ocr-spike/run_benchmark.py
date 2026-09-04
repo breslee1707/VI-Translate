@@ -87,6 +87,9 @@ def tasks_for_suite(
     suite: str,
     lock: list[dict[str, Any]],
     variants: list[dict[str, Any]],
+    variant_filter: set[str] | None = None,
+    max_pages: int | None = None,
+    max_documents: int | None = None,
 ) -> list[dict[str, Any]]:
     by_id = {row["id"]: row for row in lock}
     if suite == "smoke":
@@ -98,6 +101,7 @@ def tasks_for_suite(
             )
             for item in variants
             if item["id"] in SMOKE_VARIANT_PAGES
+            and (variant_filter is None or item["variant"] in variant_filter)
         ]
         tasks += [
             dict(item, page_indices=[0], truth_status="provisional-source-ocr")
@@ -112,13 +116,26 @@ def tasks_for_suite(
         dict(item, page_indices=None, truth_status="exact-text-layer")
         for item in variants
         if item["split"] in allowed_splits
+        and (variant_filter is None or item["variant"] in variant_filter)
     ]
     tasks += [
         dict(item, page_indices=None, truth_status="provisional-source-ocr")
         for item in variants
         if item["variant"] == "real-scan"
         and item["split"] in allowed_splits
+        and (variant_filter is None or item["variant"] in variant_filter)
     ]
+    if max_pages is not None:
+        for task in tasks:
+            available = len(task.get("page_indices") or []) or int(task.get("pages", max_pages))
+            # Covers and legal boilerplate dominate page 0 in technical PDFs;
+            # prefer content pages while remaining deterministic.
+            start = 1 if available > 1 else 0
+            task["page_indices"] = [
+                (start + offset) % available for offset in range(min(max_pages, available))
+            ]
+    if max_documents is not None:
+        tasks = tasks[:max_documents]
     return tasks
 
 
@@ -157,7 +174,7 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     total = sum(page["ref_chars"] for page in scored) or 1
     weighted = lambda key: sum(page[key] * page["ref_chars"] for page in scored) / total  # noqa: E731
     real_pages = sum(len(row["hypothesis"]) for row in rows if not row["scores"])
-    return {
+    summary = {
         "documents": len(rows),
         "scored_pages": len(scored),
         "real_pages_pending_manual_truth": real_pages,
@@ -181,12 +198,53 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
             else "fail"
         ),
     }
+    feature_groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        for feature in row["features"]:
+            feature_groups.setdefault(feature, []).append(row)
+    summary["by_feature"] = {}
+    for feature, group in sorted(feature_groups.items()):
+        feature_pages = [page for row in group for page in row["scores"]]
+        feature_chars = sum(page["ref_chars"] for page in feature_pages) or 1
+        weighted_feature = lambda key: sum(  # noqa: E731
+            page[key] * page["ref_chars"] for page in feature_pages
+        ) / feature_chars
+        summary["by_feature"][feature] = {
+            "documents": len(group),
+            "pages": len(feature_pages),
+            "matched_cer": round(weighted_feature("matched_cer"), 4)
+            if feature_pages
+            else None,
+            "missed_char_rate": round(weighted_feature("missed_char_rate"), 4)
+            if feature_pages
+            else None,
+            "numeric_recall": round(weighted_feature("numeric_recall"), 4)
+            if feature_pages
+            else None,
+            "order_tau": round(weighted_feature("order_tau"), 4)
+            if feature_pages
+            else None,
+        }
+    return summary
 
 
-def run_profile(profile: str, suite: str) -> Path:
+def run_profile(
+    profile: str,
+    suite: str,
+    variant_filter: set[str] | None = None,
+    max_pages: int | None = None,
+    max_documents: int | None = None,
+) -> Path:
     lock = json.loads(paths.LOCK.read_text(encoding="utf-8"))
     variants = json.loads(VARIANT_MANIFEST.read_text(encoding="utf-8"))
-    tasks = tasks_for_suite(suite, lock, variants)
+    tasks = tasks_for_suite(
+        suite,
+        lock,
+        variants,
+        variant_filter,
+        max_pages,
+        max_documents,
+    )
     truth_by_id = {
         row["id"]: ocrjson.load(paths.REPO_ROOT / row["truth_path"])
         for row in lock
@@ -241,13 +299,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=("standard", "enhanced", "both"), default="both")
     parser.add_argument("--suite", choices=("smoke", "core", "full"), default="smoke")
+    parser.add_argument(
+        "--variants",
+        help="comma-separated variant names; default runs every variant",
+    )
+    parser.add_argument("--max-pages", type=int, help="limit pages per task")
+    parser.add_argument("--max-documents", type=int, help="limit task count")
     args = parser.parse_args(argv)
     paths.ensure_tree()
     if not paths.LOCK.is_file() or not VARIANT_MANIFEST.is_file():
         raise RuntimeError("fetch and build the benchmark before running it")
     profiles = ("standard", "enhanced") if args.profile == "both" else (args.profile,)
+    variant_filter = set(args.variants.split(",")) if args.variants else None
     for profile in profiles:
-        run_profile(profile, args.suite)
+        run_profile(profile, args.suite, variant_filter, args.max_pages, args.max_documents)
     return 0
 
 

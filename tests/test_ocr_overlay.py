@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pdf2zh.ocr import (  # noqa: E402
     SCALE,
     apply_ocr_overlay,
+    ink_for,
     sampled_background,
     group_lines,
     merge_regions,
@@ -168,6 +169,35 @@ class BackingTests(unittest.TestCase):
             self.assertEqual(sampled_background(page, (100, 100, 300, 140)), (1.0, 1.0, 1.0))
         finally:
             document.close()
+
+
+class InkTests(unittest.TestCase):
+    def test_a_title_on_a_dark_photograph_is_written_light(self):
+        """A slide title is as often white on a picture as black on paper, and
+        the recognizer reports words, not their colour."""
+        self.assertGreater(min(ink_for((0.10, 0.16, 0.24))), 0.5)
+
+    def test_text_on_paper_stays_dark(self):
+        self.assertLess(max(ink_for((0.94, 0.93, 0.90))), 0.5)
+
+
+class BlockLineTests(unittest.TestCase):
+    def test_a_block_keeps_the_boxes_it_was_built_from(self):
+        """The backing is painted over those boxes. Painting the paragraph
+        instead put a slab of flat colour across the picture behind a title
+        whose translation only needed two lines of a five-line box."""
+        lines = [
+            ("Assessing Manufacturing", (239.0, 216.0, 810.0, 283.0)),
+            ("Innovations For Patenting", (234.0, 296.0, 809.0, 369.0)),
+        ]
+
+        blocks = group_lines(lines)
+
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(len(blocks[0].lines), 2)
+        self.assertEqual(blocks[0].rect, (234.0, 216.0, 810.0, 369.0))
+        # And the size comes from a line, not from the whole paragraph.
+        self.assertAlmostEqual(blocks[0].height, 73.0)
 
 
 class OverlayTests(unittest.TestCase):

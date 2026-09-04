@@ -23,7 +23,7 @@ from pdfminer.pdfexceptions import PDFValueError
 from pdfminer.pdfinterp import PDFResourceManager
 from pdfminer.pdfpage import PDFPage
 from pdfminer.pdfparser import PDFParser
-from pymupdf import Document, Font
+from pymupdf import Document, Font, Pixmap
 
 from pdf2zh.converter import TranslateConverter
 from pdf2zh.doclayout import OnnxModel
@@ -34,8 +34,11 @@ from pdf2zh.rules import (
     formula_regions,
     is_scanned_page,
     matching_table_cells,
+    covered_fraction,
+    is_text_effect_image,
     page_has_image,
     should_translate_table_cell,
+    TEXT_EFFECT_MIN_TEXT_COVER,
 )
 from pdf2zh.translator import ENGINES
 
@@ -63,6 +66,10 @@ class TranslationReport:
     def __len__(self) -> int:
         return len(self.failures)
 
+
+# Names the OCR phase for the caller's progress bar. It travels as the tqdm
+# description because that is the only channel the callback already carries.
+OCR_PHASE = "ocr"
 
 NOTO_NAME = "noto"
 STYLE_FONT_NAMES = {
@@ -538,6 +545,74 @@ def translate_patch(
     )
 
 
+def _flat_colour(document: Document, xref: int) -> bool:
+    """Whether every pixel of an image is the same ink."""
+    pixmap = Pixmap(document, xref)
+    samples = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(-1, pixmap.n)
+    return bool((samples == samples[0]).all())
+
+
+def _mean_alpha(document: Document, smask: int) -> float:
+    """How much of its own box a soft mask actually paints."""
+    pixmap = Pixmap(document, smask)
+    return float(np.frombuffer(pixmap.samples, dtype=np.uint8).mean()) / 255.0
+
+
+def drop_text_effect_images(
+    source_bytes: bytes, doc_zh: Document, pages: Optional[list[int]] = None
+) -> int:
+    """Remove the shadow a slide drew under text the translation replaced.
+
+    A deck exported from PowerPoint draws each shadowed text shape twice: the
+    glyphs, and a blurred flat-black raster of the same words behind them. The
+    engine takes the glyphs away and writes the translation in their place, but
+    the raster is graphics and is replayed untouched, so every shadowed line
+    comes back as the English words smeared under the Vietnamese ones.
+
+    Geometry is checked before any pixels are read, because a slide can carry
+    dozens of images and only a few of them sit under text at all.
+    """
+    dropped: set[int] = set()
+    with Document(stream=source_bytes) as original:
+        for pageno in range(min(original.page_count, doc_zh.page_count)):
+            if pages is not None and pageno not in pages:
+                continue
+            source_page = original[pageno]
+            words = [word[:4] for word in source_page.get_text("words")]
+            if not words:
+                continue
+            page_area = source_page.rect.width * source_page.rect.height
+            for image in source_page.get_images(full=True):
+                xref, smask = image[0], image[1]
+                if xref in dropped or not smask:
+                    continue
+                try:
+                    rects = source_page.get_image_rects(xref)
+                    if not rects:
+                        continue
+                    cover = max(covered_fraction(tuple(rect), words) for rect in rects)
+                    if cover < TEXT_EFFECT_MIN_TEXT_COVER:
+                        continue
+                    share = max(rect.width * rect.height for rect in rects) / page_area
+                    if not is_text_effect_image(
+                        _flat_colour(original, xref),
+                        _mean_alpha(original, smask),
+                        cover,
+                        share,
+                    ):
+                        continue
+                    doc_zh[pageno].delete_image(xref)
+                except Exception as error:  # noqa: BLE001 - one image is not the document
+                    logger.warning("Could not examine image %s: %s", xref, error)
+                    continue
+                dropped.add(xref)
+    if dropped:
+        logger.info(
+            "Removed %d text shadows left behind by the translation", len(dropped)
+        )
+    return len(dropped)
+
+
 def run_ocr_overlay(
     source_bytes: bytes,
     doc_zh: Document,
@@ -551,6 +626,7 @@ def run_ocr_overlay(
     prompt: Template = None,
     ignore_cache: bool = False,
     font: Font,
+    callback: object = None,
 ) -> TranslationReport:
     """Translate the text inside the page images and fold the result into the report.
 
@@ -574,7 +650,20 @@ def run_ocr_overlay(
             prompt=prompt,
             ignore_cache=ignore_cache,
         )
-        outcome = apply_ocr_overlay(source_bytes, doc_zh, pages, translator, font)
+        # The pass runs after every page has been translated, so it needs its
+        # own progress or the caller's bar sits at the last page while the
+        # recognizer works and the app reads as hung.
+        with tqdm.tqdm(total=1, desc=OCR_PHASE) as progress:
+            def on_page(done: int, total: int) -> None:
+                progress.total = total
+                progress.n = done
+                progress.refresh()
+                if callback:
+                    callback(progress)
+
+            outcome = apply_ocr_overlay(
+                source_bytes, doc_zh, pages, translator, font, on_page=on_page
+            )
     except OcrUnavailableError:
         raise
     except Exception as error:  # noqa: BLE001 - a translated document is worth more than this pass
@@ -684,6 +773,10 @@ def translate_stream(
         # print(ops_new.encode())
         doc_zh.update_stream(obj_id, ops_new.encode())
 
+    # Before anything is drawn over the page: the source glyphs are gone by
+    # now, so a shadow of them is a blurred copy of words that no longer exist.
+    drop_text_effect_images(source_bytes, doc_zh, pages)
+
     if ocr:
         report = run_ocr_overlay(
             source_bytes,
@@ -697,6 +790,7 @@ def translate_stream(
             prompt=prompt,
             ignore_cache=ignore_cache,
             font=style_fonts[0],
+            callback=callback,
         )
 
     if create_dual:

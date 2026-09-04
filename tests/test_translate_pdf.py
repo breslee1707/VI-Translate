@@ -4,6 +4,7 @@ import argparse
 import tempfile
 from collections import Counter
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -262,6 +263,31 @@ class TranslatePdfTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(translate_pdf.TranslationError, "require --engine handoff"):
             translate_pdf._validate_arguments(args)
+
+    def test_the_ocr_phase_reaches_the_progress_callback(self):
+        """The pass runs after the last page is translated, so a bar with no
+        phase name sits at 22/22 and the app reads as hung."""
+        from pdf2zh.high_level import OCR_PHASE as CORE_OCR_PHASE
+
+        seen = []
+        fake_model = object()
+        with (
+            mock.patch(
+                "pdf2zh.doclayout.OnnxModel.load_available", return_value=fake_model
+            ),
+            mock.patch(
+                "pdf2zh.high_level.translate", return_value=[("x.pdf", "")]
+            ) as core,
+        ):
+            translate_pdf._run_engine(
+                self.source, self.output, "vi", "auto", None, 1, False, "google", {},
+                lambda done, total, phase: seen.append((done, total, phase)),
+            )
+            callback = core.call_args.kwargs["callback"]
+            callback(SimpleNamespace(n=3, total=22, desc=""))
+            callback(SimpleNamespace(n=5, total=22, desc=CORE_OCR_PHASE))
+
+        self.assertEqual(seen, [(3, 22, ""), (5, 22, translate_pdf.OCR_PHASE)])
 
     def test_ocr_is_rejected_for_the_handoff_engine(self):
         """The handoff table is built in one run and consumed in another. OCR

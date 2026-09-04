@@ -54,7 +54,13 @@ COLUMN_OVERLAP_RATIO = 0.3
 MIN_FONT_SCALE = 0.5
 FONT_SHRINK_STEP = 0.5
 MIN_FONT_SIZE = 4.0
-MAX_FONT_SIZE = 24.0
+# The detected box is what the source glyphs occupied, so it sets the size. A
+# fixed ceiling here drew a 70pt slide title at 24pt.
+FONT_SIZE_OF_BOX = 0.8
+# Below this the paper is dark and black text on it cannot be read.
+DARK_BACKGROUND_LUMINANCE = 0.5
+LIGHT_INK = (0.97, 0.97, 0.97)
+DARK_INK = (0.05, 0.05, 0.05)
 # Vietnamese stacks diacritics above and below; see references/preservation-rules.md.
 LINE_HEIGHT = 1.10
 # Only the average colour of a line box is wanted, so read it small.
@@ -67,11 +73,18 @@ class OcrUnavailableError(RuntimeError):
 
 @dataclass(frozen=True)
 class OcrBlock:
-    """One paragraph read out of an image, in page coordinates."""
+    """One paragraph read out of an image, in page coordinates.
+
+    `lines` keeps the box of each line the paragraph was built from. The
+    backing is painted over those boxes rather than over the paragraph, so a
+    short translation of a tall title leaves a couple of covered lines instead
+    of a slab of flat colour across the picture behind it.
+    """
 
     text: str
     rect: Rect
     height: float
+    lines: tuple[Rect, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -222,21 +235,30 @@ def group_lines(lines: Sequence[Line]) -> list[OcrBlock]:
     real text, and OCR output is worse rather than better, because a detector
     cuts wherever the pixels stop rather than where the thought does.
     """
-    blocks: list[tuple[list[str], Rect, list[float]]] = []
+    blocks: list[tuple[list[str], Rect, list[Rect]]] = []
     ordered = sorted(lines, key=lambda line: (round(line[1][1], 1), line[1][0]))
     for text, rect in ordered:
-        height = rect[3] - rect[1]
-        if blocks and _continues(blocks[-1][1], blocks[-1][2][-1], rect):
-            texts, block_rect, heights = blocks[-1]
+        if blocks and _continues(
+            blocks[-1][1], blocks[-1][2][-1][3] - blocks[-1][2][-1][1], rect
+        ):
+            texts, block_rect, boxes = blocks[-1]
             texts.append(text)
-            heights.append(height)
-            blocks[-1] = (texts, _union(block_rect, rect), heights)
+            boxes.append(rect)
+            blocks[-1] = (texts, _union(block_rect, rect), boxes)
         else:
-            blocks.append(([text], rect, [height]))
-    return [
-        OcrBlock(" ".join(texts).strip(), rect, sorted(heights)[len(heights) // 2])
-        for texts, rect, heights in blocks
-    ]
+            blocks.append(([text], rect, [rect]))
+    result = []
+    for texts, rect, boxes in blocks:
+        heights = sorted(box[3] - box[1] for box in boxes)
+        result.append(
+            OcrBlock(
+                " ".join(texts).strip(),
+                rect,
+                heights[len(heights) // 2],
+                tuple(boxes),
+            )
+        )
+    return result
 
 
 def _image_rects(page: Any) -> list[Rect]:
@@ -297,20 +319,34 @@ def sampled_background(page: Any, rect: Any) -> tuple[float, float, float]:
     return (float(median[0]), float(median[1]), float(median[2]))
 
 
-def _draw(page: Any, block: OcrBlock, text: str, font: Font) -> bool:
-    """Cover the line that was read and write the translation in its place.
+def ink_for(background: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Pick an ink that can be read on this background.
 
-    The backing covers the text box only, never the picture around it, so a
-    diagram keeps its artwork and loses just the label it was carrying, and it
-    is painted the colour of the paper rather than white. A translation that
-    will not fit even at the floor size is left undrawn rather than spilled
-    across the figure, and reported instead.
+    The recognizer reports words, not their colour, and a slide title is as
+    often white on a photograph as black on paper. Writing everything in black
+    made those titles invisible.
+    """
+    red, green, blue = background
+    luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+    return DARK_INK if luminance > DARK_BACKGROUND_LUMINANCE else LIGHT_INK
+
+
+def _draw(page: Any, block: OcrBlock, text: str, font: Font) -> bool:
+    """Cover the lines that were read and write the translation in their place.
+
+    The backing covers those line boxes only, never the picture around them, so
+    a diagram keeps its artwork and loses just the label it was carrying, and
+    each box is painted the colour sampled underneath it rather than white. A
+    translation that will not fit even at the floor size is left undrawn rather
+    than spilled across the figure, and reported instead.
     """
     rect = pymupdf.Rect(block.rect) + (-1, -1, 1, 1)
-    size = min(MAX_FONT_SIZE, max(MIN_FONT_SIZE, block.height * 0.8))
+    boxes = [pymupdf.Rect(box) + (-1, -1, 1, 1) for box in block.lines or (block.rect,)]
+    background = sampled_background(page, boxes[0])
+    size = max(MIN_FONT_SIZE, block.height * FONT_SIZE_OF_BOX)
     floor = max(MIN_FONT_SIZE, size * MIN_FONT_SCALE)
     while size >= floor:
-        writer = pymupdf.TextWriter(page.rect)
+        writer = pymupdf.TextWriter(page.rect, color=ink_for(background))
         try:
             leftover = writer.fill_textbox(
                 rect, text, font=font, fontsize=size, lineheight=LINE_HEIGHT
@@ -318,7 +354,8 @@ def _draw(page: Any, block: OcrBlock, text: str, font: Font) -> bool:
         except (ValueError, RuntimeError):
             return False
         if not leftover:
-            page.draw_rect(rect, color=None, fill=sampled_background(page, rect))
+            for box in boxes:
+                page.draw_rect(box, color=None, fill=sampled_background(page, box))
             writer.write_text(page)
             return True
         size -= FONT_SHRINK_STEP
@@ -332,8 +369,14 @@ def apply_ocr_overlay(
     translator: Any,
     font: Font,
     session: Any = None,
+    on_page: Any = None,
 ) -> OcrOutcome:
-    """Translate the text inside every image region and draw it back in place."""
+    """Translate the text inside every image region and draw it back in place.
+
+    `on_page` is called after each page. This pass runs after the whole document
+    has been translated, so without it the caller's progress sits at the last
+    page for as long as the recognizer takes and the app looks hung.
+    """
     session = session or ocr_session()
     wanted = None if pages is None else set(pages)
     touched: list[int] = []
@@ -341,9 +384,15 @@ def apply_ocr_overlay(
     failures: list[str] = []
     reasons: Counter[str] = Counter()
     with Document(stream=source) as original:
-        for pageno in range(min(original.page_count, doc_zh.page_count)):
-            if wanted is not None and pageno not in wanted:
-                continue
+        page_count = min(original.page_count, doc_zh.page_count)
+        selected = [
+            pageno
+            for pageno in range(page_count)
+            if wanted is None or pageno in wanted
+        ]
+        for done, pageno in enumerate(selected, 1):
+            if on_page is not None:
+                on_page(done, len(selected))
             source_page = original[pageno]
             regions = merge_regions(_image_rects(source_page), source_page.rect.width)
             if not regions:

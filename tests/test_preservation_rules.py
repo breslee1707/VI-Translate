@@ -6,9 +6,12 @@ from types import SimpleNamespace
 from pdfminer.pdfinterp import PDFResourceManager
 
 from pdf2zh.converter import TranslateConverter, is_translatable_segment
+from pdf2zh.pdfinterp import pdf_number
 from pdf2zh.rules import (
     BULLET_CHARACTERS,
     classify_preserved_page,
+    covered_fraction,
+    is_text_effect_image,
     cluster_table_words,
     formula_regions,
     is_bullet_character,
@@ -272,6 +275,59 @@ class ImageOnlyPageTests(unittest.TestCase):
         converter.segments_by_page[3] += 0
 
         self.assertEqual(converter.image_only_pages, set())
+
+
+
+class TextEffectImageTests(unittest.TestCase):
+    """A slide draws each shadowed line twice: the glyphs, and a blurred flat
+    raster of the same words behind them. The engine replaces the glyphs, and
+    the raster used to stay, so the slide came back with the English words
+    smeared under the Vietnamese ones."""
+
+    def test_a_text_shadow_is_recognised(self):
+        # Measured off a real deck: flat black ink, a halo of strokes covering
+        # 6% of its own box, sitting under words, one line tall.
+        self.assertTrue(is_text_effect_image(True, 0.061, 0.55, 0.02))
+
+    def test_the_shadow_behind_a_photograph_is_kept(self):
+        """Flat and soft-masked like a text shadow, but it is a solid rectangle
+        and no text sits on it, so the photograph would lose its depth."""
+        self.assertFalse(is_text_effect_image(True, 0.363, 0.0, 0.06))
+
+    def test_a_photograph_is_kept(self):
+        self.assertFalse(is_text_effect_image(False, 1.0, 0.4, 0.06))
+
+    def test_a_watermark_behind_a_paragraph_is_kept(self):
+        """Flat, sparse and under text like a shadow. Only its size says it is
+        artwork rather than the halo of one line."""
+        self.assertFalse(is_text_effect_image(True, 0.08, 0.7, 0.45))
+
+    def test_coverage_is_measured_against_the_image_box(self):
+        rect = (0.0, 0.0, 100.0, 10.0)
+        self.assertAlmostEqual(covered_fraction(rect, [(0, 0, 50, 10)]), 0.5)
+        self.assertEqual(covered_fraction(rect, [(200, 0, 300, 10)]), 0.0)
+        # Overlapping boxes must not push the answer past one.
+        self.assertEqual(
+            covered_fraction(rect, [(0, 0, 100, 10), (0, 0, 100, 10)]), 1.0
+        )
+
+
+class ContentStreamNumberTests(unittest.TestCase):
+    def test_a_small_number_is_never_written_in_exponent_form(self):
+        """MuPDF read `1.489e-05` as an unknown keyword, dropped the `cm` it
+        belonged to, and drew every translated run inside that XObject under
+        the wrong transform."""
+        text = pdf_number(1.4890367711438293e-05)
+
+        self.assertNotIn("e", text)
+        self.assertAlmostEqual(float(text), 1.4890367711438293e-05, places=12)
+
+    def test_ordinary_numbers_stay_readable(self):
+        self.assertEqual(pdf_number(1), "1")
+        self.assertEqual(pdf_number(0), "0")
+        self.assertEqual(pdf_number(-0.5), "-0.5")
+        self.assertEqual(pdf_number(-1e-15), "0")
+
 
 
 if __name__ == "__main__":

@@ -529,3 +529,60 @@ def classify_preserved_page(page_text: str) -> PreservationDecision | None:
             f"refs={all_refs}, years={year_parentheses}, isbn_doi={isbn_doi}",
         )
     return None
+
+
+# A drop shadow or glow exported by a slide tool is a blurred copy of the words
+# it sits under, drawn as one flat ink behind them. The engine replaces the
+# source glyphs with the translation, and that shadow stays: the slide then
+# reads as both languages stacked, the old one smeared under the new. These
+# three thresholds separate it from artwork.
+#
+# A halo of glyph strokes covers very little of its own box. The shadow behind
+# a photograph is flat too, but it is a solid rectangle and sits near 0.35.
+TEXT_EFFECT_MAX_ALPHA = 0.20
+# It has to lie under the words it belongs to. A picture's shadow has none.
+TEXT_EFFECT_MIN_TEXT_COVER = 0.30
+# And it is line-sized. A faint watermark behind a paragraph is flat, sparse
+# and under text as well, and only its size tells the two apart.
+TEXT_EFFECT_MAX_PAGE_AREA = 0.20
+
+
+def covered_fraction(
+    rect: Sequence[float], boxes: Iterable[Sequence[float]]
+) -> float:
+    """How much of `rect` the boxes cover, as a fraction of its own area.
+
+    Overlapping boxes are counted twice, so the result is capped at one. Word
+    boxes from one page barely overlap, and the callers only compare against a
+    threshold.
+    """
+    x0, y0, x1, y1 = (float(value) for value in rect[:4])
+    area = (x1 - x0) * (y1 - y0)
+    if area <= 0:
+        return 0.0
+    covered = 0.0
+    for box in boxes:
+        bx0, by0, bx1, by1 = (float(value) for value in box[:4])
+        width = min(x1, bx1) - max(x0, bx0)
+        height = min(y1, by1) - max(y0, by0)
+        if width > 0 and height > 0:
+            covered += width * height
+    return min(covered / area, 1.0)
+
+
+def is_text_effect_image(
+    flat_colour: bool, mean_alpha: float, text_cover: float, page_area_share: float
+) -> bool:
+    """Whether a raster is the shadow or glow of a run of text.
+
+    All four signals are needed. A photograph is not one flat colour. The
+    shadow behind a photograph is flat, but it is a solid rectangle rather than
+    a halo of strokes, so its coverage is far higher and no text sits on it. A
+    watermark can be flat, sparse and under text, and is ruled out by its size.
+    """
+    return (
+        flat_colour
+        and mean_alpha < TEXT_EFFECT_MAX_ALPHA
+        and text_cover >= TEXT_EFFECT_MIN_TEXT_COVER
+        and page_area_share <= TEXT_EFFECT_MAX_PAGE_AREA
+    )

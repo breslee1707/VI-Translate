@@ -45,6 +45,7 @@ from app.update import (  # noqa: E402
 )
 from scripts.translate_pdf import (  # noqa: E402
     DEFAULT_TARGET_LANGUAGE,
+    OCR_PHASE,
     TARGET_LANGUAGES,
     load_layout_model,
     preload_layout_model,
@@ -761,8 +762,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.events.put(("status", path, "running", "", None))
             destination = path.parent / "translated"
 
-            def report(done: int, total: int, _p: Path = path) -> None:
-                self.events.put(("page", _p, done, total))
+            def report(done: int, total: int, phase: str = "", _p: Path = path) -> None:
+                self.events.put(("page", _p, done, total, phase))
 
             try:
                 result = translate_pdf(
@@ -940,12 +941,15 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             elif event[0] == "page":
                 # Per-page progress inside the file being translated. A textbook
                 # is hundreds of pages, so file-level progress alone looks stuck.
-                _, path, done, total = event
+                _, path, done, total, phase = event
                 if self.states.get(path) == "running" and total:
                     self._go_determinate()
+                    # OCR runs after the last page is translated, so without its
+                    # own label the bar stops at 22/22 and the app looks hung.
+                    action = "Đang đọc chữ trong ảnh" if phase == OCR_PHASE else "Đang dịch"
                     self.rows[path].detail.configure(text=f"trang {done}/{total}")
                     self.progress.set((self.batch_done + done / total) / max(self.batch_total, 1))
-                    self.status.configure(text=f"Đang dịch {path.name}   trang {done}/{total}")
+                    self.status.configure(text=f"{action} {path.name}   trang {done}/{total}")
             elif event[0] == "progress":
                 _, fraction, done_files, total_files = event
                 self.batch_done, self.batch_total = done_files, total_files

@@ -54,6 +54,17 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   questions: `is_scanned_page` (one image over half the page) drives backing
   rectangles; `page_has_image` (any image at all) drives the image-only report,
   because a scanner routinely emits one page as dozens of small tiles.
+- A slide tool draws a shadowed text shape twice: the glyphs, and a blurred
+  flat raster of the same words behind them. The glyphs are replaced and the
+  raster is graphics, so it used to survive and print the source words under
+  the translated ones. `drop_text_effect_images` removes it, on all four of
+  `is_text_effect_image`: one flat ink, mean alpha under 0.20, at least 30% of
+  its box under source words, and no more than a fifth of the page. Geometry is
+  checked before any pixels are decoded.
+- Numbers written into a content stream go through `pdf_number`. PDF has no
+  exponent notation and `str()` reaches for it below 1e-4, which is ordinary
+  for the inverse of a scaled Form XObject matrix; MuPDF then dropped the `cm`
+  and drew every translated run in that XObject under the wrong transform.
 - The optional OCR mode is `pdf2zh/ocr.py`, a pass over the finished document
   rather than a change to the converter. It rasterizes each image region of the
   **source** at 200 dpi (rasterizing `doc_zh` would re-read the translation just

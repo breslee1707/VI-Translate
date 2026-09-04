@@ -43,6 +43,20 @@ from pdfminer.utils import (
 
 log = logging.getLogger(__name__)
 
+
+def pdf_number(value: float) -> str:
+    """Write a number the way a content stream can read it back.
+
+    PDF has no exponent notation, but `str()` reaches for it as soon as a float
+    is small enough, and a matrix inverse taken from a scaled Form XObject is
+    routinely that small. MuPDF then reads `1.489e-05` as an unknown keyword,
+    drops the `cm` it belonged to, and every translated run inside that XObject
+    is drawn under the wrong transform. Twelve places keep the precision such a
+    matrix needs; the trailing zeros are noise in a content stream.
+    """
+    text = f"{float(value):.12f}".rstrip("0").rstrip(".")
+    return text if text not in ("", "-", "-0") else "0"
+
 # Colour operators worth replaying in front of translated text, grouped by the
 # piece of state each one sets. `g`, `rg`, `k`, `sc` and `scn` all write the
 # same non-stroking colour, so only the last of them is in force; replaying one
@@ -381,11 +395,23 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                     pos_inv = -np.mat(ctm[4:]) * ctm_inv
                 a, b, c, d = ctm_inv.reshape(4).tolist()
                 e, f = pos_inv.tolist()[0]
-                self.obj_patch[self.xobjmap[xobjid].objid] = (
-                    f"q {ops_base}Q {a} {b} {c} {d} {e} {f} cm {ops_new}"
+                transform = " ".join(
+                    pdf_number(value) for value in (a, b, c, d, e, f)
                 )
-            except Exception:
-                pass
+                self.obj_patch[self.xobjmap[xobjid].objid] = (
+                    f"q {ops_base}Q {transform} cm {ops_new}"
+                )
+            except Exception as error:
+                # Swallowing this left the XObject holding its original stream
+                # while the translation was drawn over it from the page, so the
+                # slide carried both languages stacked. It is still not fatal -
+                # one figure in source language beats losing the document - but
+                # it has to be visible.
+                log.warning(
+                    "Form XObject %s kept its source text: %s",
+                    xobjid,
+                    error,
+                )
         elif subtype is LITERAL_IMAGE and "Width" in xobj and "Height" in xobj:
             self.device.begin_figure(xobjid, (0, 0, 1, 1), MATRIX_IDENTITY)
             self.device.render_image(xobjid, xobj)
@@ -413,7 +439,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         self.device.fontmap = self.fontmap
         ops_new = self.device.end_page(page)
         self.obj_patch[page.page_xref] = (
-            f"q {ops_base}Q 1 0 0 1 {x0} {y0} cm {ops_new}"
+            f"q {ops_base}Q 1 0 0 1 {pdf_number(x0)} {pdf_number(y0)} cm {ops_new}"
         )
         for obj in page.contents:
             self.obj_patch[obj.objid] = ""

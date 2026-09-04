@@ -47,6 +47,12 @@ ENGINES = ("google", "handoff")
 DEFAULT_THREADS = 4
 MAX_THREADS = 8
 
+# The phase name a progress callback receives while the OCR pass is running.
+# Defined here rather than imported from the core so the GUI can react to it
+# without loading the native stack at startup; _run_engine maps the core's own
+# constant onto it, so a rename there fails loudly instead of drifting.
+OCR_PHASE = "ocr"
+
 
 class TranslationError(RuntimeError):
     """Raised when input validation or the translation engine fails."""
@@ -341,11 +347,12 @@ def _run_engine(
     ignore_cache: bool,
     engine: str,
     envs: dict[str, str],
-    on_progress: Callable[[int, int], None] | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
     *,
     ocr: bool = False,
 ) -> "TranslationReport":
     """Run the core and return what it could not translate, and why."""
+    from pdf2zh.high_level import OCR_PHASE as CORE_OCR_PHASE
     from pdf2zh.high_level import translate
 
     # A packaged build ships the layout model so the first run needs no network.
@@ -355,7 +362,15 @@ def _run_engine(
     callback = None
     if on_progress is not None:
         def callback(progress: object) -> None:
-            on_progress(getattr(progress, "n", 0), getattr(progress, "total", 0) or 0)
+            # The bar's description names the phase. Translation leaves it
+            # empty; the OCR pass sets it, because it runs after the last page
+            # is translated and would otherwise look like a hang at 22/22.
+            phase = getattr(progress, "desc", "") or ""
+            on_progress(
+                getattr(progress, "n", 0),
+                getattr(progress, "total", 0) or 0,
+                OCR_PHASE if phase == CORE_OCR_PHASE else "",
+            )
 
     result = translate(
         files=[str(source)],
@@ -390,7 +405,7 @@ def translate_pdf(
     segments: Path | None = None,
     emit_segments: Path | None = None,
     ocr: bool = False,
-    on_progress: Callable[[int, int], None] | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
 ) -> Translation:
     """Translate one PDF, reporting any segments the engine could not translate."""
     _require_core()

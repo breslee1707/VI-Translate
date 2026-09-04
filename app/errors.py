@@ -72,8 +72,9 @@ _RULES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
         "E-PDF-03",
         ("scanned", "image-only", "OCR", "no extractable text"),
         "PDF chỉ chứa ảnh scan",
-        "Ứng dụng không có OCR nên không đọc được chữ trong ảnh. Cần bản PDF "
-        "có chữ thật (text-based).",
+        "Bật ô \"Dịch cả chữ trong ảnh (OCR)\" rồi dịch lại. Nếu đã bật mà vẫn "
+        "báo lỗi này thì bản scan quá mờ hoặc bị xoay, hãy dùng bản PDF có chữ "
+        "thật (text-based).",
     ),
     (
         "E-NET-04",

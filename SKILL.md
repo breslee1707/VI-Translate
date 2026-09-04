@@ -1,6 +1,6 @@
 ---
 name: pdf-translate
-description: Translate local, text-based PDFs into Vietnamese or another supported Latin-script language while preserving the original layout, formulas, tables, and figures. Use for PDF translation, batch translation, terminology-sensitive handoff translation, or diagnosing incomplete translated output. Do not use for image-only scans that need OCR or targets requiring CJK, right-to-left, or complex-script shaping.
+description: Translate local, text-based PDFs into Vietnamese or another supported Latin-script language while preserving the original layout, formulas, tables, and figures. Use for PDF translation, batch translation, terminology-sensitive handoff translation, or diagnosing incomplete translated output. Handles image-only scans through an opt-in OCR mode. Do not use for targets requiring CJK, right-to-left, or complex-script shaping.
 license: AGPL-3.0-only
 ---
 
@@ -37,7 +37,7 @@ Default to Google. Offer handoff when the user asks for higher quality, rejects 
 - Use the bundled `pdf2zh/` core. Never substitute the PyPI `pdf2zh` package; the runner checks version `1.9.11` and preservation ruleset `code4life-preservation-v1` and refuses an external core.
 - Google mode sends extracted document text to Google. Tell the user before processing sensitive material and obtain explicit confirmation unless their request already authorizes that disclosure. Handoff mode does not contact Google.
 - Supported targets are the Latin-script codes enforced by `scripts/translate_pdf.py`. CJK, right-to-left, Thai, Devanagari, and other complex-shaping targets are rejected because the bundled font and layout engine cannot render them reliably.
-- There is no OCR. If a source page is image-only, report that OCR is required instead of claiming it was translated.
+- OCR is off unless `--ocr` is passed. Without it, an image-only page is reported as such and never claimed as translated. With it, the text inside every image is recognized, translated and drawn back in place; it is slower, it is not available with `--engine handoff`, and a label that will not fit its box stays as pixels and is reported. Recognition quality is the recognizer's, so read the output before treating an OCR'd passage as accurate.
 - Text inside detected tables, figures, contents pages, indexes, symbol lists, or references may intentionally remain in the source language. Report material untranslated regions as partial translation.
 - Preserve the source. Write results to a separate output directory. Do not pass `--overwrite` without explicit replacement authorization.
 
@@ -63,7 +63,7 @@ python3 -m venv "<skill-root>/.venv"
 "<skill-root>/.venv/bin/python" -m pip install -r "<skill-root>/requirements.txt"
 ```
 
-Shared runner options include `--target-language` (default `vi`), `--source-language auto`, one-based `--pages 1,3-5`, `--threads 1..8` (default `4`), `--ignore-cache`, and `--overwrite`.
+Shared runner options include `--target-language` (default `vi`), `--source-language auto`, one-based `--pages 1,3-5`, `--threads 1..8` (default `4`), `--ocr`, `--ignore-cache`, and `--overwrite`.
 
 ## Google mode
 

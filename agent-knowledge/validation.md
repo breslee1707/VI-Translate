@@ -27,6 +27,12 @@ Keep source and output hashes/paths separate. For every delivered PDF:
 5. Confirm formulas, technical identifiers, URLs, figures, borders, bullets,
    bold/italic runs, and page numbers remain legible and correctly placed.
 6. Report every fallback segment or materially untranslated region as partial.
+7. When `--ocr` was used, also run the same document without it and diff the
+   extracted text: everything the engine translates on its own must come out
+   identical, and only the text inside images may differ. Then check on the
+   render that each translated label sits inside its own figure and that the
+   artwork around it survived. Recognition is unverified by anything in the
+   pipeline, so read the OCR'd passages before delivering them.
 
 Use `tmp/pdfs/` for render/diagnostic intermediates and `output/pdf/` for final
 PDFs. Never overwrite a source or an existing user output without explicit

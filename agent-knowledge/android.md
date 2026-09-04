@@ -3,7 +3,8 @@
 The Android app in `android/` is a second product, not the desktop pipeline
 recompiled. It reimplements layout preservation on PDFBox-Android
 (`PdfLayoutPreserver.kt`) instead of PyMuPDF and pdfminer.six, uses spatial
-heuristics where the desktop build uses BabelDOC/YOLOv8, reads text-based PDFs
+heuristics where the desktop build uses BabelDOC/YOLOv8, has no counterpart to the
+desktop OCR mode (ML Kit text recognition would be the port), reads text-based PDFs
 only, and translates through `GoogleTranslateEngine`. Do not describe a desktop
 fix as fixed on Android, or the reverse, without checking both.
 

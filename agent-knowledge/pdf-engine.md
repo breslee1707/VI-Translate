@@ -46,14 +46,26 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   A glyph-stable alternative would be a fontTools subset with `retain_gids`.
 - A paragraph takes its size from the first characters that draw ink, so an
   oversized bullet and its tab cannot set the size for a whole list item.
-- Scanned image-only pages are not OCRed. Source pixels under translated text
-  receive backing only where required by the scan path. A page carrying an
-  image that yields no translatable segment is reported as image-only, and a
-  document with no translatable segment at all is refused rather than
-  delivered as a translation of nothing. Note the two different questions:
-  `is_scanned_page` (one image over half the page) drives backing rectangles;
-  `page_has_image` (any image at all) drives the image-only report, because a
-  scanner routinely emits one page as dozens of small tiles.
+- Scanned image-only pages are not OCRed unless the caller asks. Source pixels
+  under translated text receive backing only where required by the scan path. A
+  page carrying an image that yields no translatable segment is reported as
+  image-only, and a document with no translatable segment at all is refused
+  rather than delivered as a translation of nothing. Note the two different
+  questions: `is_scanned_page` (one image over half the page) drives backing
+  rectangles; `page_has_image` (any image at all) drives the image-only report,
+  because a scanner routinely emits one page as dozens of small tiles.
+- The optional OCR mode is `pdf2zh/ocr.py`, a pass over the finished document
+  rather than a change to the converter. It rasterizes each image region of the
+  **source** at 200 dpi (rasterizing `doc_zh` would re-read the translation just
+  written), recognizes it with RapidOCR - PaddleOCR's PP-OCRv4 models on the
+  same onnxruntime the layout model uses, with the weights inside the wheel so
+  it works offline - groups the lines into paragraphs, translates through the
+  same engine and cache, and writes them back with a `TextWriter` fitted to the
+  box. Touching image placements merge before the size filter, so a scan that
+  arrives as a grid of tiles is one region. Lines sitting where the source had
+  real words are dropped, because the converter has already translated those.
+  Failures land in the same `TranslationReport`, never as an exception that
+  loses a document that did translate.
 
 ## Colour and Emphasis
 

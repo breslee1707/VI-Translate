@@ -437,7 +437,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             checkbox_width=18, checkbox_height=18,
             font=ctk.CTkFont(self.ui_font, size=12),
         )
-        self.overwrite.grid(row=1, column=0, columnspan=2, padx=GAP, pady=(0, GAP), sticky="w")
+        self.overwrite.grid(row=1, column=0, columnspan=2, padx=GAP, pady=(0, PAD), sticky="w")
+
+        self.ocr = ctk.CTkCheckBox(
+            controls, text="Dịch cả chữ trong ảnh (OCR) – chậm hơn",
+            checkbox_width=18, checkbox_height=18,
+            font=ctk.CTkFont(self.ui_font, size=12),
+        )
+        self.ocr.grid(row=2, column=0, columnspan=2, padx=GAP, pady=(0, GAP), sticky="w")
 
     def _build_queue(self) -> None:
         # A separate header, because CTkScrollableFrame's label_text cannot hold
@@ -729,6 +736,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         names = {name: code for code, name in LANGUAGE_NAMES.items()}
         language = names[self.language.get()]
         overwrite = bool(self.overwrite.get())
+        ocr = bool(self.ocr.get())
 
         self.translate_button.configure(state="disabled", text="Đang dịch…")
         self.clear_button.configure(state="disabled")
@@ -744,11 +752,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.batch_done, self.batch_total = 0, len(pending)
         self.worker = threading.Thread(
-            target=self._run, args=(pending, language, overwrite), daemon=True
+            target=self._run, args=(pending, language, overwrite, ocr), daemon=True
         )
         self.worker.start()
 
-    def _run(self, files: list[Path], language: str, overwrite: bool) -> None:
+    def _run(self, files: list[Path], language: str, overwrite: bool, ocr: bool = False) -> None:
         for index, path in enumerate(files, 1):
             self.events.put(("status", path, "running", "", None))
             destination = path.parent / "translated"
@@ -762,6 +770,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     destination,
                     target_language=language,
                     overwrite=overwrite,
+                    ocr=ocr,
                     on_progress=report,
                 )
                 detail = (

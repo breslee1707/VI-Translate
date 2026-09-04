@@ -59,6 +59,7 @@ class Translation(NamedTuple):
     untranslated: int = 0
     reasons: Mapping[str, int] = MappingProxyType({})
     image_only_pages: tuple[int, ...] = ()
+    ocr_pages: tuple[int, ...] = ()
 
 
 # record_translation_failure passes up either an exception class name or one of
@@ -171,6 +172,12 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="handoff engine: write the segments left untranslated here, as JSONL",
     )
+    parser.add_argument(
+        "--ocr",
+        action="store_true",
+        help="also translate the text drawn inside images, such as a scan or a "
+        "labelled diagram; slower, and needs no network beyond the translator",
+    )
     parser.add_argument("--ignore-cache", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser
@@ -182,6 +189,12 @@ def _validate_arguments(args: argparse.Namespace) -> None:
     if args.engine == "handoff":
         if args.segments is None and args.emit_segments is None:
             raise TranslationError("--engine handoff needs --segments, --emit-segments, or both")
+        # The handoff flow emits every segment once and rebuilds from the filled
+        # table. OCR text would have to survive both runs identically, which
+        # means recognizing the same pixels twice and trusting the result to
+        # match. Refuse rather than emit a table the rebuild cannot honour.
+        if args.ocr:
+            raise TranslationError("--ocr is not supported with --engine handoff")
     elif args.segments is not None or args.emit_segments is not None:
         raise TranslationError("--segments and --emit-segments require --engine handoff")
 
@@ -329,6 +342,8 @@ def _run_engine(
     engine: str,
     envs: dict[str, str],
     on_progress: Callable[[int, int], None] | None = None,
+    *,
+    ocr: bool = False,
 ) -> "TranslationReport":
     """Run the core and return what it could not translate, and why."""
     from pdf2zh.high_level import translate
@@ -354,6 +369,7 @@ def _run_engine(
         envs=envs,
         callback=callback,
         ignore_cache=ignore_cache,
+        ocr=ocr,
     )
     if len(result) != 1:
         raise TranslationError("PDF core did not report one translated result")
@@ -373,6 +389,7 @@ def translate_pdf(
     engine: str = "google",
     segments: Path | None = None,
     emit_segments: Path | None = None,
+    ocr: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> Translation:
     """Translate one PDF, reporting any segments the engine could not translate."""
@@ -406,6 +423,7 @@ def translate_pdf(
                 engine,
                 envs,
                 on_progress,
+                ocr=ocr,
             )
         except TranslationError:
             raise
@@ -417,17 +435,38 @@ def translate_pdf(
         # translation is the one outcome the preservation rules forbid outright:
         # say what the document actually needs instead. The message carries the
         # words app/errors.py matches for E-PDF-03.
-        if report.translatable_segments == 0:
+        if report.translatable_segments == 0 and report.ocr_segments == 0:
+            # Nothing outside the images was translatable, so every reason in
+            # the report came from the OCR pass. It read the page and lost the
+            # text somewhere later - to the network, most often - and saying
+            # the scan is illegible would send the user to fix the wrong thing.
+            # The word "OCR" is deliberately absent: app/errors.py matches it
+            # for E-PDF-03, and this failure is not the scan's fault.
+            if ocr and report.reasons:
+                why = "; ".join(_describe_failures(report.reasons))
+                raise TranslationError(
+                    f"Nothing in {source.name} could be translated: the text inside the "
+                    f"images was read, but {why}."
+                )
+            if ocr:
+                raise TranslationError(
+                    f"No text could be extracted from {source.name}: the selected pages "
+                    "are image-only scans and OCR read nothing in them. Check that the "
+                    "scan is legible and the right way up."
+                )
             raise TranslationError(
                 f"No text could be extracted from {source.name}: the selected pages are "
-                "image-only scans. This tool does not perform OCR, so run OCR on the "
+                "image-only scans. Translate again with OCR enabled, or run OCR on the "
                 "PDF first and translate the result."
             )
 
         untranslated = len(report.failures)
-        image_only = tuple(sorted(report.image_only_pages))
+        # A page the OCR pass translated is no longer an untranslated scan, and
+        # reporting it as one would send the user to fix what is already fixed.
+        ocr_pages = tuple(sorted(report.ocr_pages))
+        image_only = tuple(sorted(set(report.image_only_pages) - set(ocr_pages)))
         if destination is None:
-            return Translation(None, untranslated, report.reasons, image_only)
+            return Translation(None, untranslated, report.reasons, image_only, ocr_pages)
 
         generated = temp_output / f"{source.stem}-mono.pdf"
         if not generated.is_file():
@@ -444,7 +483,7 @@ def translate_pdf(
         finally:
             staged.unlink(missing_ok=True)
 
-    return Translation(destination, untranslated, report.reasons, image_only)
+    return Translation(destination, untranslated, report.reasons, image_only, ocr_pages)
 
 
 def _use_utf8_output() -> None:
@@ -475,20 +514,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             engine=args.engine,
             segments=args.segments,
             emit_segments=args.emit_segments,
+            ocr=args.ocr,
         )
     except TranslationError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     if result.path is not None:
         print(f"Translated PDF: {result.path}")
+    if result.ocr_pages:
+        numbers = ", ".join(str(page + 1) for page in result.ocr_pages)
+        label = "page" if len(result.ocr_pages) == 1 else "pages"
+        print(f"OCR translated the text inside images on {label} {numbers}")
     if result.image_only_pages:
         numbers = ", ".join(str(page + 1) for page in result.image_only_pages)
+        advice = "run again with --ocr" if not args.ocr else "OCR read nothing there"
         print(
-            f"warning: page {numbers} is an image-only scan and was left untranslated; "
-            "this tool has no OCR"
+            f"warning: page {numbers} is an image-only scan and was left "
+            f"untranslated; {advice}"
             if len(result.image_only_pages) == 1
             else f"warning: pages {numbers} are image-only scans and were left "
-            "untranslated; this tool has no OCR",
+            f"untranslated; {advice}",
             file=sys.stderr,
         )
     for line in _describe_failures(result.reasons):

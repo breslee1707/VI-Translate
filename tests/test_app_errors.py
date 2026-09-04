@@ -112,6 +112,21 @@ class ScannedDocumentTests(unittest.TestCase):
         self.assertEqual(failure.code, "E-PDF-03")
         self.assertIn("scan", failure.summary.lower())
 
+    def test_a_scan_that_read_fine_but_lost_the_network_is_a_network_problem(self):
+        """OCR mode can read every page and still deliver nothing when the
+        translator is unreachable. Telling that user their scan is illegible
+        sends them to fix the one thing that is not broken."""
+        failure = describe_failure(
+            raised(
+                RuntimeError(
+                    "Nothing in scan.pdf could be translated: the text inside the "
+                    "images was read, but 3 segments stayed in the source language "
+                    "because the translation engine failed (ConnectTimeout x3)."
+                )
+            )
+        )
+        self.assertEqual(failure.code, "E-NET-04")
+
 
 if __name__ == "__main__":
     unittest.main()

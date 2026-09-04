@@ -10,7 +10,8 @@ here and must be updated with the code that changes it.
 - Prefer a partial but structurally valid translation over damaged formulas,
   missing markers, broken tables, lost styles, or clipped text.
 - Use the bundled `pdf2zh/` core and supported CLI. Do not silently substitute
-  the PyPI package or add OCR/complex-script support that the engine lacks.
+  the PyPI package or add complex-script support that the engine lacks. OCR
+  exists as an opt-in mode only; it never runs unless the caller asks for it.
 - Generated PDFs, models, optimized graphs, caches, build folders, virtual
   environments, and release archives stay out of commits.
 - Diagnose with evidence from the actual PDF: matrices, font resources,

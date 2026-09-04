@@ -52,7 +52,7 @@ class TranslatePdfTests(unittest.TestCase):
         self.temp_directory.cleanup()
 
     @staticmethod
-    def _engine_side_effect(source, temp_output, *_args):
+    def _engine_side_effect(source, temp_output, *_args, **_kwargs):
         (Path(temp_output) / f"{Path(source).stem}-mono.pdf").write_bytes(
             b"%PDF-1.7\ntranslated"
         )
@@ -70,7 +70,8 @@ class TranslatePdfTests(unittest.TestCase):
         self.assertEqual(result.untranslated, 0)
         self.assertEqual(result.path.read_bytes(), b"%PDF-1.7\ntranslated")
         run.assert_called_once_with(
-            self.source, mock.ANY, "vi", "auto", None, translate_pdf.DEFAULT_THREADS, False, "google", {}, None
+            self.source, mock.ANY, "vi", "auto", None, translate_pdf.DEFAULT_THREADS, False, "google", {}, None,
+            ocr=False,
         )
 
     @mock.patch.object(translate_pdf, "_require_core")
@@ -145,10 +146,11 @@ class TranslatePdfTests(unittest.TestCase):
             envs={"segments_in": "table.jsonl"},
             callback=None,
             ignore_cache=True,
+            ocr=False,
         )
 
     def test_reports_segments_the_engine_could_not_translate(self):
-        def partial(source, temp_output, *_args):
+        def partial(source, temp_output, *_args, **_kwargs):
             (Path(temp_output) / f"{Path(source).stem}-mono.pdf").write_bytes(b"%PDF-1.7\n")
             return TranslationReport(
                 failures=["a"] * 7,
@@ -168,7 +170,7 @@ class TranslatePdfTests(unittest.TestCase):
 
     def test_refuses_a_document_with_no_extractable_text(self):
         """An image-only scan must not be handed over as a finished translation."""
-        def scanned(source, temp_output, *_args):
+        def scanned(source, temp_output, *_args, **_kwargs):
             (Path(temp_output) / f"{Path(source).stem}-mono.pdf").write_bytes(b"%PDF")
             return TranslationReport(
                 image_only_pages={0, 1, 2, 3}, translatable_segments=0, pages_processed=4
@@ -188,7 +190,7 @@ class TranslatePdfTests(unittest.TestCase):
         self.assertFalse((self.output / "guide-vi.pdf").exists())
 
     def test_reports_image_only_pages_of_a_mixed_document(self):
-        def mixed(source, temp_output, *_args):
+        def mixed(source, temp_output, *_args, **_kwargs):
             (Path(temp_output) / f"{Path(source).stem}-mono.pdf").write_bytes(b"%PDF")
             return TranslationReport(image_only_pages={2, 6}, translatable_segments=30)
 
@@ -260,6 +262,64 @@ class TranslatePdfTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(translate_pdf.TranslationError, "require --engine handoff"):
             translate_pdf._validate_arguments(args)
+
+    def test_ocr_is_rejected_for_the_handoff_engine(self):
+        """The handoff table is built in one run and consumed in another. OCR
+        text would have to be recognized identically both times, so the
+        combination is refused rather than emitted as a table that cannot be
+        honoured on rebuild."""
+        args = translate_pdf._parser().parse_args(
+            [
+                str(self.source),
+                "--output-dir",
+                str(self.output),
+                "--engine",
+                "handoff",
+                "--segments",
+                "t.jsonl",
+                "--ocr",
+            ]
+        )
+        with self.assertRaisesRegex(translate_pdf.TranslationError, "not supported with"):
+            translate_pdf._validate_arguments(args)
+
+    def test_a_scan_is_still_refused_when_ocr_read_nothing(self):
+        def unreadable(source, temp_output, *_args, **_kwargs):
+            (Path(temp_output) / f"{Path(source).stem}-mono.pdf").write_bytes(b"%PDF")
+            return TranslationReport(
+                image_only_pages={0}, translatable_segments=0, pages_processed=1
+            )
+
+        with (
+            mock.patch.object(translate_pdf, "_require_core"),
+            mock.patch.object(translate_pdf, "_run_engine", side_effect=unreadable),
+        ):
+            with self.assertRaises(translate_pdf.TranslationError) as caught:
+                translate_pdf.translate_pdf(self.source, self.output, ocr=True)
+
+        # Must not tell someone who already enabled OCR to enable OCR.
+        message = str(caught.exception)
+        self.assertIn("OCR read nothing", message)
+        self.assertFalse((self.output / "guide-vi.pdf").exists())
+
+    def test_a_page_ocr_translated_is_not_reported_as_an_untranslated_scan(self):
+        def with_ocr(source, temp_output, *_args, **_kwargs):
+            (Path(temp_output) / f"{Path(source).stem}-mono.pdf").write_bytes(b"%PDF")
+            return TranslationReport(
+                image_only_pages={2, 6},
+                translatable_segments=0,
+                ocr_pages=(2,),
+                ocr_segments=9,
+            )
+
+        with (
+            mock.patch.object(translate_pdf, "_require_core"),
+            mock.patch.object(translate_pdf, "_run_engine", side_effect=with_ocr),
+        ):
+            result = translate_pdf.translate_pdf(self.source, self.output, ocr=True)
+
+        self.assertEqual(result.ocr_pages, (2,))
+        self.assertEqual(result.image_only_pages, (6,))
 
     def test_handoff_engine_requires_a_segments_file(self):
         args = translate_pdf._parser().parse_args(

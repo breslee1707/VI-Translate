@@ -1,6 +1,6 @@
 ---
 name: pdf-translate
-description: Translate or diagnose local text-based PDFs in this repository while preserving layout, formulas, tables, figures, styles, rotation, and technical glyphs. Use for PDF translation, incomplete output, visual regressions, or preservation fixes; not for OCR-only scans or complex-script targets.
+description: Translate or diagnose local text-based PDFs in this repository while preserving layout, formulas, tables, figures, styles, rotation, and technical glyphs. Use for PDF translation, incomplete output, visual regressions, or preservation fixes; OCR-only scans need the opt-in `--ocr` mode; not for complex-script targets.
 ---
 
 # PDF Translate Project Skill

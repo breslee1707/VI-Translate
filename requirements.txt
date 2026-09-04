@@ -28,3 +28,12 @@ onnx==1.22.0
 onnxruntime==1.20.1
 opencv-python==5.0.0.93
 peewee==3.17.9
+
+# The optional OCR mode. rapidocr-onnxruntime is PaddleOCR's PP-OCRv4
+# detect/classify/recognize models ported to onnxruntime, with the models
+# inside the wheel, so the mode needs no download and no PaddlePaddle. It
+# arrived transitively through babeldoc; pdf2zh/ocr.py imports it directly
+# now, and so do its own two dependencies, so all three are pinned here.
+rapidocr-onnxruntime==1.4.4
+pyclipper==1.4.0
+shapely==2.1.2

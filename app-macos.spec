@@ -33,6 +33,9 @@ for optional in ("app/fonts", "app/assets"):
 datas += collect_data_files("customtkinter")
 datas += collect_data_files("tkinterdnd2")
 datas += collect_data_files("babeldoc")
+# The OCR models and config live inside the wheel, so the OCR mode works
+# offline in a packaged build the way it does from source.
+datas += collect_data_files("rapidocr_onnxruntime")
 
 hiddenimports = [
     "peewee",
@@ -44,6 +47,8 @@ hiddenimports = [
     # extension and its vendored qpdf in the bundle even if that trail changes.
     "pikepdf",
     "pikepdf._core",
+    # Imported lazily by pdf2zh.ocr so a run without OCR never loads it.
+    "rapidocr_onnxruntime",
 ]
 
 analysis = Analysis(

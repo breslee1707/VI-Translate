@@ -64,7 +64,9 @@ These classifications preserve the complete page layout instead of reflowing num
 ## Scan and source safety
 
 - A rendered image covering more than half the page marks the page as scanned; translated text regions receive white backing rectangles so source pixels do not show through.
-- The core does not perform OCR. A page that carries an image but yields no translatable text is named as image-only in the result, and a document with no translatable text anywhere is refused with an instruction to run OCR first, never handed over as a finished translation.
+- OCR is off by default and translates nothing inside an image. With it enabled (`--ocr`, or the GUI checkbox), every image region is recognized, translated a paragraph at a time, and drawn back over the lines it read; the white backing covers those line boxes only, never the artwork around them, and a translation that will not fit its box even at half the size it was read at is left as pixels and reported.
+- Text the engine already holds as real glyphs is never re-read from an image behind it, so a page with a picture under its prose is not translated twice.
+- A page that carries an image but yields no translatable text is named as image-only in the result. A document with no translatable text anywhere is refused rather than handed over as a finished translation: with OCR off the refusal says to enable it, with OCR on it distinguishes a page nothing could be read from from one that was read and lost its translation later.
 - A segment left in the source language is reported with the reason it was left: it did not fit at the smallest allowed size, the translation came back with damaged formula markers, or the engine failed.
 - Structural PDF repair uses a temporary copy. The source file is never
   overwritten. Repair is triggered by the engine failing to rewrite the
@@ -79,4 +81,4 @@ These classifications preserve the complete page layout instead of reflowing num
 
 ## Known limits
 
-Text inside an unmatched table or protected figure can remain in the source language. Complex embedded fonts, malformed content streams, or inaccurate layout-model classifications can also require manual review. Treat any substantial untranslated passage or visual defect as a partial result.
+Text inside an unmatched table or protected figure can remain in the source language. OCR mode adds the recognizer's own limits on top of these: a faint, skewed, or decorative label is misread or skipped rather than translated, and what it reads is not checked against anything. Complex embedded fonts, malformed content streams, or inaccurate layout-model classifications can also require manual review. Treat any substantial untranslated passage or visual defect as a partial result.

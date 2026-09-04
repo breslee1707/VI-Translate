@@ -9,7 +9,7 @@ import sys
 import tempfile
 from asyncio import CancelledError
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from string import Template
 from typing import Any, BinaryIO, Dict, List, Optional
@@ -37,6 +37,7 @@ from pdf2zh.rules import (
     page_has_image,
     should_translate_table_cell,
 )
+from pdf2zh.translator import ENGINES
 
 @dataclass(frozen=True)
 class TranslationReport:
@@ -53,6 +54,11 @@ class TranslationReport:
     image_only_pages: set[int] = field(default_factory=set)
     translatable_segments: int = 0
     pages_processed: int = 0
+    # Filled in only when the optional OCR pass ran. A page listed here carried
+    # text inside an image that was recognized and translated, so the caller
+    # must not also report it as an untranslated scan.
+    ocr_pages: tuple[int, ...] = ()
+    ocr_segments: int = 0
 
     def __len__(self) -> int:
         return len(self.failures)
@@ -532,6 +538,62 @@ def translate_patch(
     )
 
 
+def run_ocr_overlay(
+    source_bytes: bytes,
+    doc_zh: Document,
+    pages: Optional[list[int]],
+    report: TranslationReport,
+    *,
+    lang_in: str,
+    lang_out: str,
+    service: str,
+    envs: Dict = None,
+    prompt: Template = None,
+    ignore_cache: bool = False,
+    font: Font,
+) -> TranslationReport:
+    """Translate the text inside the page images and fold the result into the report.
+
+    Kept out of the converter deliberately: the pass needs the finished
+    document rather than a glyph stream, and everything it can go wrong with -
+    a missing recognizer, a label that will not fit, a translator refusing one
+    block - has to end up in the same report the rest of the run uses, not as
+    an exception that loses a document already translated.
+    """
+    from pdf2zh.ocr import OcrUnavailableError, apply_ocr_overlay
+
+    # The converter parses "handoff:model" the same way; the model half is
+    # unused by both engines but must not be read as part of the name.
+    service_name, _, service_model = service.partition(":")
+    try:
+        translator = ENGINES[service_name](
+            lang_in,
+            lang_out,
+            service_model or None,
+            envs=envs or {},
+            prompt=prompt,
+            ignore_cache=ignore_cache,
+        )
+        outcome = apply_ocr_overlay(source_bytes, doc_zh, pages, translator, font)
+    except OcrUnavailableError:
+        raise
+    except Exception as error:  # noqa: BLE001 - a translated document is worth more than this pass
+        logger.warning("OCR pass failed, delivering the document without it: %s", error)
+        return report
+    if outcome.failures:
+        logger.warning(
+            "%d OCR paragraphs could not be placed and were left as pixels",
+            len(outcome.failures),
+        )
+    return replace(
+        report,
+        failures=report.failures + outcome.failures,
+        reasons=report.reasons + outcome.reasons,
+        ocr_pages=outcome.pages,
+        ocr_segments=outcome.segments,
+    )
+
+
 def translate_stream(
     stream: bytes,
     pages: Optional[list[int]] = None,
@@ -549,9 +611,13 @@ def translate_stream(
     skip_subset_fonts: bool = False,
     create_dual: bool = True,
     ignore_cache: bool = False,
+    ocr: bool = False,
     **kwarg: Any,
 ):
     source_size = len(stream)
+    # The OCR pass reads its pixels from the source, and `stream` is rebound to
+    # a buffer a few lines below.
+    source_bytes = stream
     font_path = download_remote_fonts(lang_out.lower())
     style_paths = output_style_font_paths(lang_out.lower(), font_path)
     style_font_names = dict(STYLE_FONT_NAMES)
@@ -617,6 +683,21 @@ def translate_stream(
         # print(ops_old)
         # print(ops_new.encode())
         doc_zh.update_stream(obj_id, ops_new.encode())
+
+    if ocr:
+        report = run_ocr_overlay(
+            source_bytes,
+            doc_zh,
+            pages,
+            report,
+            lang_in=lang_in,
+            lang_out=lang_out,
+            service=service,
+            envs=envs,
+            prompt=prompt,
+            ignore_cache=ignore_cache,
+            font=style_fonts[0],
+        )
 
     if create_dual:
         doc_en.insert_file(doc_zh)
@@ -711,6 +792,7 @@ def translate(
     prompt: Template = None,
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
+    ocr: bool = False,
     **kwarg: Any,
 ):
     if not files:

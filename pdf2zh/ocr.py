@@ -10,6 +10,7 @@ copy. Protected structures never enter the cleanup mask.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -46,6 +47,8 @@ OCR_PROFILES = {
     "standard": OcrProfile("standard", 200, "small", 0.55, 2.0),
     "enhanced": OcrProfile("enhanced", 300, "medium", 0.50, 3.0),
 }
+_OCR_ENGINES: dict[str, Callable[[np.ndarray], Any]] = {}
+_OCR_ENGINE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -90,32 +93,40 @@ def load_ocr_engine(mode: str) -> Callable[[np.ndarray], Any]:
     if mode not in OCR_PROFILES:
         raise ValueError(f"Unknown OCR mode: {mode}")
     profile = OCR_PROFILES[mode]
-    try:
-        from rapidocr import EngineType, LangDet, LangRec, ModelType, OCRVersion, RapidOCR
-    except ImportError as error:
-        raise OcrUnavailableError(
-            "OCR dependencies are missing. Install requirements-ocr.txt first."
-        ) from error
+    with _OCR_ENGINE_LOCK:
+        if mode in _OCR_ENGINES:
+            return _OCR_ENGINES[mode]
+        try:
+            from rapidocr import EngineType, LangDet, LangRec, ModelType, OCRVersion, RapidOCR
+        except ImportError as error:
+            raise OcrUnavailableError(
+                "OCR dependencies are missing. Install requirements-ocr.txt first."
+            ) from error
 
-    model_type = ModelType(profile.model_type)
-    try:
-        return RapidOCR(
-            params={
-                "Det.engine_type": EngineType.ONNXRUNTIME,
-                # PP-OCRv6 uses one multilingual detector regardless of this
-                # routing label; ``multi`` is not accepted by RapidOCR 3.9.2.
-                "Det.lang_type": LangDet.EN,
-                "Det.model_type": model_type,
-                "Det.ocr_version": OCRVersion.PPOCRV6,
-                "Rec.engine_type": EngineType.ONNXRUNTIME,
-                "Rec.lang_type": LangRec.EN,
-                "Rec.model_type": model_type,
-                "Rec.ocr_version": OCRVersion.PPOCRV6,
-                "Global.use_cls": True,
-            }
-        )
-    except Exception as error:
-        raise OcrUnavailableError(f"Could not load the {profile.name} OCR model: {error}") from error
+        model_type = ModelType(profile.model_type)
+        try:
+            engine = RapidOCR(
+                params={
+                    "Det.engine_type": EngineType.ONNXRUNTIME,
+                    # PP-OCRv6 uses one multilingual detector regardless of
+                    # this routing label; ``multi`` is not accepted by
+                    # RapidOCR 3.9.2.
+                    "Det.lang_type": LangDet.EN,
+                    "Det.model_type": model_type,
+                    "Det.ocr_version": OCRVersion.PPOCRV6,
+                    "Rec.engine_type": EngineType.ONNXRUNTIME,
+                    "Rec.lang_type": LangRec.EN,
+                    "Rec.model_type": model_type,
+                    "Rec.ocr_version": OCRVersion.PPOCRV6,
+                    "Global.use_cls": True,
+                }
+            )
+        except Exception as error:
+            raise OcrUnavailableError(
+                f"Could not load the {profile.name} OCR model: {error}"
+            ) from error
+        _OCR_ENGINES[mode] = engine
+        return engine
 
 
 def _normalise_result(result: Any) -> list[OcrLine]:

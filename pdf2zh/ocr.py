@@ -411,7 +411,13 @@ def apply_ocr_overlay(
                     reasons[type(error).__name__] += 1
                     continue
                 translated = (translated or "").strip()
-                if not translated:
+                if not translated or translated == block.text:
+                    # Nothing was gained, and drawing it anyway costs the
+                    # picture underneath. This is also what saves a page of
+                    # line art: the recognizer reads a patent drawing as
+                    # "ABN Skelga", the translator hands it straight back, and
+                    # the words used to be painted across the drawing at the
+                    # size of the strokes they were mistaken for.
                     continue
                 if _draw(output_page, block, translated, font):
                     written += 1

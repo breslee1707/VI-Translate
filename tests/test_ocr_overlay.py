@@ -230,6 +230,30 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(outcome.segments, 1)
         self.assertIn("[inlet pressure]", written)
 
+    def test_a_translation_identical_to_the_source_is_not_drawn(self):
+        """A design patent drawing of the letters ABN Skelga was read correctly,
+        handed back unchanged by the translator, and painted over the artwork it
+        came from. Nothing is gained by drawing it, and the picture is lost."""
+        class Echo:
+            def translate(self, text):
+                return text
+
+        session = StubSession(
+            [([[20, 20], [300, 20], [300, 60], [20, 60]], "ABN Skelga", 0.9)]
+        )
+        source = source_with_image()
+        output = pymupdf.open(stream=source)
+        try:
+            outcome = apply_ocr_overlay(
+                source, output, None, Echo(), pymupdf.Font("helv"), session=session
+            )
+            written = output[0].get_text()
+        finally:
+            output.close()
+
+        self.assertEqual(outcome.segments, 0)
+        self.assertNotIn("ABN Skelga", written)
+
     def test_a_faint_reading_is_left_as_pixels(self):
         session = StubSession(
             [([[20, 20], [300, 20], [300, 60], [20, 60]], "smudge", 0.2)]

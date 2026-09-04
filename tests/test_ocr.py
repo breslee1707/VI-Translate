@@ -12,6 +12,9 @@ import pymupdf
 
 from pdf2zh.ocr import (
     _page_safety_reasons,
+    _residual_ink_fraction,
+    _is_standalone_marker,
+    _has_multiple_columns,
     page_is_image_only,
     prepare_ocr_pdf,
     replace_ocr_page_images,
@@ -30,9 +33,9 @@ class FakeRecognizer:
             boxes=np.asarray(
                 [[
                     [width * 0.08, height * 0.25],
-                    [width * 0.92, height * 0.25],
-                    [width * 0.92, height * 0.72],
-                    [width * 0.08, height * 0.72],
+                    [width * 0.82, height * 0.25],
+                    [width * 0.82, height * 0.62],
+                    [width * 0.08, height * 0.62],
                 ]],
                 dtype=float,
             ),
@@ -163,7 +166,16 @@ class OcrPreparationTests(unittest.TestCase):
     def test_fragmented_ocr_is_preserved_as_a_whole_page(self):
         image = np.full((400, 600, 3), 255, dtype=np.uint8)
         lines = [
-            SimpleNamespace(text=value, bbox=(10, 10 + index * 20, 80, 25 + index * 20))
+            SimpleNamespace(
+                text=value,
+                bbox=(10, 10 + index * 20, 80, 25 + index * 20),
+                polygon=(
+                    (10, 10 + index * 20),
+                    (80, 10 + index * 20),
+                    (80, 25 + index * 20),
+                    (10, 25 + index * 20),
+                ),
+            )
             for index, value in enumerate(("a", "b", "c", "d", "e", "f"))
         ]
         reasons = _page_safety_reasons(image, lines, [], None)
@@ -171,9 +183,113 @@ class OcrPreparationTests(unittest.TestCase):
 
     def test_any_detected_protected_region_preserves_the_page(self):
         image = np.full((400, 600, 3), 255, dtype=np.uint8)
-        lines = [SimpleNamespace(text="ordinary prose", bbox=(10, 10, 180, 30))]
+        lines = [
+            SimpleNamespace(
+                text="ordinary prose",
+                bbox=(10, 10, 180, 30),
+                polygon=((10, 10), (180, 10), (180, 30), (10, 30)),
+            )
+        ]
         reasons = _page_safety_reasons(image, lines, [(0, 0, 200, 200)], None)
         self.assertIn("protected layout region", reasons)
+
+    def test_tiny_single_layout_detection_does_not_block_prose(self):
+        image = np.full((400, 600, 3), 255, dtype=np.uint8)
+        lines = [
+            SimpleNamespace(
+                text="ordinary prose",
+                bbox=(10, 10, 180, 30),
+                polygon=((10, 10), (180, 10), (180, 30), (10, 30)),
+            )
+        ]
+        reasons = _page_safety_reasons(image, lines, [(550, 10, 560, 20)], None)
+        self.assertNotIn("protected layout region", reasons)
+
+    def test_mojibake_preserves_the_whole_page(self):
+        image = np.full((400, 600, 3), 255, dtype=np.uint8)
+        lines = [
+            SimpleNamespace(
+                text="NA\ufffdA",
+                bbox=(10, 10, 180, 30),
+                polygon=((10, 10), (180, 10), (180, 30), (10, 30)),
+            )
+        ]
+        reasons = _page_safety_reasons(image, lines, [], None)
+        self.assertIn("damaged OCR characters", reasons)
+
+    def test_dense_text_boxes_without_reflow_room_preserve_the_page(self):
+        image = np.full((400, 600, 3), 255, dtype=np.uint8)
+        lines = []
+        for index in range(8):
+            top = index * 45
+            bottom = top + 40
+            lines.append(
+                SimpleNamespace(
+                    text="dense prose line with no spare room",
+                    bbox=(20, top, 580, bottom),
+                    polygon=((20, top), (580, top), (580, bottom), (20, bottom)),
+                )
+            )
+        reasons = _page_safety_reasons(image, lines, [], None)
+        self.assertIn("dense text without reflow headroom", reasons)
+
+    def test_residual_ink_check_distinguishes_clean_and_dirty_regions(self):
+        line = SimpleNamespace(
+            polygon=((20, 20), (180, 20), (180, 70), (20, 70))
+        )
+        clean = np.full((100, 200, 3), 255, dtype=np.uint8)
+        dirty = clean.copy()
+        cv2.putText(dirty, "OCR", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 3)
+        self.assertEqual(_residual_ink_fraction(clean, line), 0.0)
+        self.assertGreater(_residual_ink_fraction(dirty, line), 0.02)
+
+    def test_standalone_bullets_stay_in_the_source_raster(self):
+        self.assertTrue(_is_standalone_marker("●"))
+        self.assertTrue(_is_standalone_marker("•"))
+        self.assertFalse(_is_standalone_marker("• translated item"))
+
+    def test_two_populated_columns_are_not_reflowed_as_one_page(self):
+        lines = []
+        for column_x in (20, 340):
+            for index in range(4):
+                top = 40 + index * 40
+                lines.append(
+                    SimpleNamespace(
+                        bbox=(column_x, top, column_x + 220, top + 25)
+                    )
+                )
+        self.assertTrue(_has_multiple_columns(lines, 600))
+
+    def test_code_heavy_page_is_preserved(self):
+        image = np.full((400, 600, 3), 255, dtype=np.uint8)
+        lines = []
+        for index in range(6):
+            top = 20 + index * 45
+            text = f"if ($which =~ /host/) {{ push @HOSTS, $value; }} # {index}"
+            lines.append(
+                SimpleNamespace(
+                    text=text,
+                    bbox=(30, top, 500, top + 25),
+                    polygon=((30, top), (500, top), (500, top + 25), (30, top + 25)),
+                )
+            )
+        reasons = _page_safety_reasons(image, lines, [], None)
+        self.assertIn("code-heavy page", reasons)
+
+    def test_long_scan_page_is_preserved_until_reflow_is_proven(self):
+        image = np.full((1000, 800, 3), 255, dtype=np.uint8)
+        lines = []
+        for index in range(25):
+            top = 20 + index * 35
+            lines.append(
+                SimpleNamespace(
+                    text="a normal line of prose",
+                    bbox=(30, top, 700, top + 22),
+                    polygon=((30, top), (700, top), (700, top + 22), (30, top + 22)),
+                )
+            )
+        reasons = _page_safety_reasons(image, lines, [], None)
+        self.assertIn("too many OCR lines for safe reflow", reasons)
 
 
 if __name__ == "__main__":

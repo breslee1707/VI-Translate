@@ -58,8 +58,10 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   It adds an invisible sidecar only for image-only pages, never paints white
   backing rectangles on those pages, and replaces the scan image only after a
   safe inpainting pass. Pages with protected layout regions, dense rules,
-  formula/numeric content, or fragmented OCR are kept unchanged and reported
-  partial; the default `--ocr off` path is unchanged.
+  formula/numeric content, mojibake, insufficient reflow room, residual source
+  ink, or fragmented OCR are kept unchanged and reported partial. Standalone
+  bullets remain raster pixels instead of passing through the prose font. The
+  default `--ocr off` path is unchanged.
 
 ## Colour and Emphasis
 

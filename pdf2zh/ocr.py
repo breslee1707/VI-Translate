@@ -32,6 +32,12 @@ OCR_FONT_PATH = Path(__file__).resolve().parents[1] / "app" / "fonts" / "BeVietn
 MIN_FONT_SIZE = 3.0
 MAX_FONT_SIZE = 72.0
 MAX_ROTATION_DEGREES = 10.0
+MAX_TEXT_BOX_COVERAGE = 0.45
+MAX_RESIDUAL_INK = 0.02
+MIN_PROTECTED_PAGE_COVERAGE = 0.01
+MAX_SAFE_OCR_LINES = 24
+MOJIBAKE_MARKERS = ("\ufffd", "Ã", "Â", "â€", "âˆ", "Å")
+OCR_MARKER_CHARACTERS = frozenset("•●▪◦○■□◆◇–—-*")
 
 
 @dataclass(frozen=True)
@@ -180,6 +186,11 @@ def _line_rotation(line: OcrLine) -> float:
     return abs(math.degrees(math.atan2(second[1] - first[1], second[0] - first[0])))
 
 
+def _is_standalone_marker(text: str) -> bool:
+    clean = text.strip()
+    return bool(clean) and all(character in OCR_MARKER_CHARACTERS for character in clean)
+
+
 def _protected_boxes(model: object, image: np.ndarray) -> list[tuple[float, float, float, float]]:
     prediction = model.predict(
         image[:, :, ::-1], imgsz=max(32, int(image.shape[0] / 32) * 32)
@@ -272,8 +283,19 @@ def _page_safety_reasons(
     reasons: list[str] = []
     if page_decision is not None:
         reasons.append(page_decision.kind.lower())
-    if protected:
+    protected_area = sum(
+        max(0.0, min(float(image.shape[1]), x1) - max(0.0, x0))
+        * max(0.0, min(float(image.shape[0]), y1) - max(0.0, y0))
+        for x0, y0, x1, y1 in protected
+    )
+    protected_coverage = protected_area / max(1, image.shape[0] * image.shape[1])
+    if len(protected) >= 2 or protected_coverage >= MIN_PROTECTED_PAGE_COVERAGE:
         reasons.append("protected layout region")
+
+    if any(any(marker in line.text for marker in MOJIBAKE_MARKERS) for line in lines):
+        reasons.append("damaged OCR characters")
+    if _has_multiple_columns(lines, image.shape[1]):
+        reasons.append("multi-column OCR ownership")
 
     short_lines = sum(len(line.text) <= 3 for line in lines)
     one_character_lines = sum(len(line.text) == 1 for line in lines)
@@ -281,15 +303,38 @@ def _page_safety_reasons(
         reasons.append("fragmented OCR lines")
     if lines and one_character_lines / len(lines) > 0.08:
         reasons.append("single-character OCR fragments")
+    if len(lines) > MAX_SAFE_OCR_LINES:
+        reasons.append("too many OCR lines for safe reflow")
 
     formula_chars = sum(
         sum(character in "=+−-*/^_<>≤≥√∫Σπαβγδ" for character in line.text)
+        for line in lines
+    )
+    code_chars = sum(
+        sum(character in "{}[]$@#\\|;~`" for character in line.text)
         for line in lines
     )
     digit_chars = sum(sum(character.isdigit() for character in line.text) for line in lines)
     total_chars = sum(len(line.text) for line in lines)
     if total_chars and (formula_chars / total_chars > 0.10 or digit_chars / total_chars > 0.30):
         reasons.append("formula or numeric-heavy page")
+    code_lines = sum(
+        bool(
+            any(token in line.text for token in ("$", "@", "{", "}", "#", "sub ", "if ("))
+        )
+        for line in lines
+    )
+    if total_chars and (code_chars / total_chars > 0.04 or code_lines >= 5):
+        reasons.append("code-heavy page")
+
+    text_boxes = np.zeros(image.shape[:2], dtype=np.uint8)
+    for line in lines:
+        polygon = np.rint(np.asarray(line.polygon)).astype(np.int32)
+        polygon[:, 0] = np.clip(polygon[:, 0], 0, image.shape[1] - 1)
+        polygon[:, 1] = np.clip(polygon[:, 1], 0, image.shape[0] - 1)
+        cv2.fillConvexPoly(text_boxes, polygon, 255)
+    if np.count_nonzero(text_boxes) / max(1, text_boxes.size) > MAX_TEXT_BOX_COVERAGE:
+        reasons.append("dense text without reflow headroom")
 
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     dark = np.where(gray < 190, 255, 0).astype(np.uint8)
@@ -316,6 +361,59 @@ def _page_safety_reasons(
     if rule_count >= 2:
         reasons.append("dense rules or form grid")
     return list(dict.fromkeys(reasons))
+
+
+def _has_multiple_columns(lines: Sequence[OcrLine], page_width: int) -> bool:
+    """Return whether two populated text columns overlap vertically.
+
+    The downstream converter groups OCR sidecar glyphs by its own layout
+    classes. On a dense two-column scan, a continuation from the left column
+    can otherwise attach to a later right-column block. Preserve the page
+    until OCR regions have explicit column ownership.
+    """
+    if len(lines) < 6 or page_width <= 0:
+        return False
+    left = [
+        line
+        for line in lines
+        if (line.bbox[0] + line.bbox[2]) / 2 < page_width * 0.45
+        and line.bbox[2] < page_width * 0.62
+    ]
+    right = [
+        line
+        for line in lines
+        if (line.bbox[0] + line.bbox[2]) / 2 > page_width * 0.55
+        and line.bbox[0] > page_width * 0.38
+    ]
+    if len(left) < 3 or len(right) < 3:
+        return False
+    left_range = (min(line.bbox[1] for line in left), max(line.bbox[3] for line in left))
+    right_range = (
+        min(line.bbox[1] for line in right),
+        max(line.bbox[3] for line in right),
+    )
+    overlap = max(0.0, min(left_range[1], right_range[1]) - max(left_range[0], right_range[0]))
+    smaller_span = min(left_range[1] - left_range[0], right_range[1] - right_range[0])
+    return smaller_span > 0 and overlap / smaller_span >= 0.25
+
+
+def _residual_ink_fraction(image: np.ndarray, line: OcrLine) -> float:
+    """Measure dark contrast left inside a supposedly cleaned text polygon."""
+    height, width = image.shape[:2]
+    polygon = np.rint(np.asarray(line.polygon)).astype(np.int32)
+    polygon[:, 0] = np.clip(polygon[:, 0], 0, width - 1)
+    polygon[:, 1] = np.clip(polygon[:, 1], 0, height - 1)
+    region = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillConvexPoly(region, polygon, 255)
+    border = cv2.dilate(region, np.ones((5, 5), dtype=np.uint8), iterations=1)
+    border = cv2.subtract(border, region)
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    samples = gray[border > 0]
+    if samples.size < 8:
+        return 1.0
+    background = float(np.median(samples))
+    residual = (region > 0) & (np.abs(gray.astype(np.float32) - background) >= 24)
+    return float(np.count_nonzero(residual)) / max(1, int(np.count_nonzero(region)))
 
 
 def _font_size(line: OcrLine, scale: float, font: pymupdf.Font) -> float:
@@ -416,6 +514,12 @@ def prepare_ocr_pdf(
                 if _overlap_fraction(line.bbox, protected) >= 0.5:
                     protected_count += 1
                     continue
+                # Keep bullets and list rules in the scan. Redrawing a
+                # standalone U+25CF through the prose font produced glyph 0
+                # (U+0000) and detached the marker from its paragraph.
+                if _is_standalone_marker(line.text):
+                    protected_count += 1
+                    continue
                 if line.confidence < profile.minimum_confidence or _line_rotation(line) > MAX_ROTATION_DEGREES:
                     skipped += 1
                     continue
@@ -432,7 +536,23 @@ def prepare_ocr_pdf(
                 output.insert_pdf(document, from_page=index, to_page=index)
                 continue
 
+            # One final pixel catches anti-aliased glyph rims that survive the
+            # per-line mask. This runs only after page-level structure guards,
+            # so it cannot eat a protected table rule or formula.
+            combined_mask = cv2.dilate(
+                combined_mask,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+                iterations=1,
+            )
             cleaned = cv2.inpaint(image, combined_mask, profile.inpaint_radius, cv2.INPAINT_TELEA)
+            residual = max(_residual_ink_fraction(cleaned, line) for line in accepted)
+            if residual > MAX_RESIDUAL_INK:
+                warnings.append(
+                    f"page {index + 1}: preserved (residual source ink {residual:.1%})"
+                )
+                protected_count += len(accepted)
+                output.insert_pdf(document, from_page=index, to_page=index)
+                continue
             ok, encoded = cv2.imencode(".png", cv2.cvtColor(cleaned, cv2.COLOR_RGB2BGR))
             if not ok:
                 warnings.append(f"page {index + 1}: could not encode cleaned raster")

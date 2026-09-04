@@ -52,3 +52,8 @@ nomenclature, forms, dense rules or protected layout regions. The experimental
 CLI now keeps those pages byte-for-byte unchanged and reports a partial result;
 it only cleans a page when OCR and layout safety checks both pass. This is a
 fail-safe research mode, not a claim that arbitrary scans are production-ready.
+Multi-column pages, code-heavy pages, mojibake, standalone markers and pages
+with more than 24 OCR lines are also preserved until region-aware reflow has a
+separate regression suite. A real Vietnamese smoke render is kept under
+`tmp/ocr-benchmark/qa-real-vietnamese-v2/`; it has no residual source ink,
+replacement glyphs or out-of-canvas spans.

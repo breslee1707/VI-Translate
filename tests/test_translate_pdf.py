@@ -11,10 +11,39 @@ from pdf2zh.high_level import TranslationReport
 from scripts import translate_pdf
 
 
+class FailureReportingTests(unittest.TestCase):
+    def test_an_over_long_segment_is_reported_as_its_own_reason(self):
+        """Truncating it silently loses the tail; saying so lets the user act.
+
+        It is neither a fit failure nor a dead connection, and telling the user
+        their network is down would send them to check the wrong thing.
+        """
+        lines = translate_pdf._describe_failures(Counter({"SegmentTooLongError": 2}))
+        self.assertEqual(len(lines), 1)
+        self.assertIn("2 segments", lines[0])
+        self.assertIn("longer than the translation service accepts", lines[0])
+
+    def test_each_kind_of_failure_gets_its_own_line(self):
+        lines = translate_pdf._describe_failures(
+            Counter(
+                {
+                    "SegmentTooLongError": 1,
+                    "FormulaPlaceholderError": 1,
+                    "single line needs less than 50% font size": 1,
+                    "ConnectionError": 1,
+                }
+            )
+        )
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(
+            sum("translation engine failed" in line for line in lines), 1
+        )
+
+
 class TranslatePdfTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_directory = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_directory.name)
+        self.root = Path(self.temp_directory.name).resolve()
         self.source = self.root / "guide.pdf"
         self.source.write_bytes(b"%PDF-1.7\nsource")
         self.output = self.root / "output"

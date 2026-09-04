@@ -42,7 +42,7 @@
 
 ---
 
-PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows và macOS. Công cụ phân tích bố cục từng trang, bảo vệ công thức và code, dịch phần văn xuôi rồi đặt nội dung trở lại đúng vị trí trong tài liệu gốc — không biến PDF của bạn thành một trang chữ trắng đơn giản.
+PDF Translate là ứng dụng mã nguồn mở dành cho Windows, macOS và Android. Công cụ phân tích bố cục từng trang, bảo vệ công thức và code, dịch phần văn xuôi rồi đặt nội dung trở lại đúng vị trí trong tài liệu gốc — không biến PDF của bạn thành một trang chữ trắng đơn giản.
 
 Đây không phải bản dịch giao diện của một công cụ có sẵn. Dự án mượn ý tưởng và phần nhân đọc/ghi PDF từ hai dự án mã nguồn mở, rồi tự xây phần quyết định chất lượng đầu ra: ứng dụng desktop, bộ quy tắc bảo toàn bố cục, lớp xử lý tiếng Việt và hàng loạt bản sửa lỗi ngay trong nhân. Chi tiết ở mục [Được phát triển ở đây](#được-phát-triển-ở-đây).
 
@@ -70,8 +70,24 @@ PDF Translate là ứng dụng desktop mã nguồn mở dành cho Windows và ma
 2. Mở file `.dmg`, kéo **PDF Translate** vào thư mục **Applications**.
 3. Trong lần chạy đầu, bấm chuột phải vào ứng dụng → **Open** → **Open**.
 
+### Android
+
+1. **[Tải APK từ bản phát hành Android mới nhất](https://github.com/breslee1707/VI-Translate/releases?q=android-v)** (`PDFTranslate-android-*.apk`). Bản Android được đánh tag riêng theo dạng `android-v*`.
+2. Trên điện thoại, cho phép trình duyệt hoặc trình quản lý file **cài ứng dụng từ nguồn không xác định**, rồi mở file APK.
+3. Ứng dụng cần Android 8.0 trở lên.
+
+Muốn tự biên dịch:
+
+```bash
+cd android
+./gradlew assembleDebug
+```
+
 > [!NOTE]
 > Bản macOS yêu cầu **macOS 14 Sonoma trở lên**. Tất cả bản desktop đều không cần cài Python và không phải tải thêm model ở lần chạy đầu. Quá trình dịch bằng Google vẫn cần kết nối Internet.
+
+> [!IMPORTANT]
+> Bản Android là một bản viết lại trên PDFBox-Android, không phải bản desktop biên dịch lại. Nó chỉ đọc PDF dạng văn bản (chưa có OCR) và dùng heuristic thay cho model bố cục BabelDOC/YOLOv8, nên PDF nhiều công thức có thể còn sai chỉ số trên/dưới hoặc phân số. Chi tiết build và phát hành nằm ở [`docs/android-release.md`](docs/android-release.md).
 
 > [!WARNING]
 > Windows SmartScreen có thể cảnh báo vì ứng dụng chưa được ký số. Chọn **More info** → **Run anyway** nếu bạn tải file từ trang Releases chính thức của repo này.

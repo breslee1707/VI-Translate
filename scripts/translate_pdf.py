@@ -66,6 +66,7 @@ class Translation(NamedTuple):
 # a network that was never the problem, so they are separated here.
 _FIT_MARKERS = ("font size", "cannot fit")
 _FORMULA_REASON = "FormulaPlaceholderError"
+_TOO_LONG_REASON = "SegmentTooLongError"
 
 
 def _count_of_segments(count: int) -> str:
@@ -79,10 +80,11 @@ def _describe_failures(reasons: Mapping[str, int]) -> list[str]:
 
     fit = sum(count for reason, count in reasons.items() if is_fit(reason))
     formula = reasons.get(_FORMULA_REASON, 0)
+    too_long = reasons.get(_TOO_LONG_REASON, 0)
     engine = {
         reason: count
         for reason, count in reasons.items()
-        if reason != _FORMULA_REASON and not is_fit(reason)
+        if reason not in (_FORMULA_REASON, _TOO_LONG_REASON) and not is_fit(reason)
     }
 
     lines: list[str] = []
@@ -95,6 +97,11 @@ def _describe_failures(reasons: Mapping[str, int]) -> list[str]:
         lines.append(
             f"{_count_of_segments(formula)} stayed in the source language because the "
             "translation came back with damaged formula markers"
+        )
+    if too_long:
+        lines.append(
+            f"{_count_of_segments(too_long)} stayed in the source language because the "
+            "paragraph was longer than the translation service accepts in one request"
         )
     if engine:
         names = ", ".join(f"{name} x{count}" for name, count in sorted(engine.items()))

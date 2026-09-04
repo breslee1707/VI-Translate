@@ -1,0 +1,1715 @@
+package com.vitranslate.pdf.repository
+
+import android.content.Context
+import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
+import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
+import com.tom_roush.pdfbox.pdmodel.PDDocument
+import com.tom_roush.pdfbox.pdmodel.PDPage
+import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
+import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
+import com.tom_roush.pdfbox.pdmodel.font.PDFont
+import com.tom_roush.pdfbox.pdmodel.font.PDSimpleFont
+import com.tom_roush.pdfbox.pdmodel.font.PDType0Font
+import com.tom_roush.pdfbox.text.PDFTextStripper
+import com.tom_roush.pdfbox.text.TextPosition
+import com.tom_roush.pdfbox.util.Matrix
+import com.tom_roush.pdfbox.contentstream.operator.Operator
+import com.tom_roush.pdfbox.cos.COSArray
+import com.tom_roush.pdfbox.cos.COSString
+import com.tom_roush.pdfbox.pdfparser.PDFStreamParser
+import com.tom_roush.pdfbox.pdfwriter.ContentStreamWriter
+import java.io.File
+import java.io.FileOutputStream
+import java.io.OutputStream
+import java.util.regex.Pattern
+import kotlin.math.abs
+
+data class TranslationResult(
+    val outputPath: String,
+    val untranslatedCount: Int
+)
+
+/**
+ * Raised when the user stops a run. A half-written PDF is worse than none, so
+ * whoever throws this is responsible for having deleted the partial output.
+ */
+class TranslationCancelledException : Exception("Translation cancelled")
+
+class PdfLayoutPreserver(private val context: Context) {
+
+    init {
+        try {
+            PDFBoxResourceLoader.init(context)
+        } catch (_: Exception) {
+            // Already initialized or fallback
+        }
+    }
+
+    fun countPages(uri: Uri): Int {
+        return try {
+            context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                PDDocument.load(inputStream).use { doc ->
+                    doc.numberOfPages
+                }
+            } ?: 0
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    fun translatePdf(
+        inputUri: Uri,
+        outputDirUriOrPath: String?,
+        targetLang: String,
+        overwrite: Boolean,
+        onProgress: (done: Int, total: Int) -> Unit,
+        onLog: ((String) -> Unit)? = null,
+        isCancelled: () -> Boolean = { false }
+    ): TranslationResult {
+        val originalFileName = getFileName(inputUri)
+        onLog?.invoke("Bắt đầu xử lý file: $originalFileName (Ngôn ngữ đích: $targetLang, Ghi đè: $overwrite)")
+
+        val baseName = if (originalFileName.endsWith(".pdf", ignoreCase = true)) {
+            originalFileName.substring(0, originalFileName.length - 4)
+        } else {
+            originalFileName
+        }
+        val outputFileName = "$baseName-$targetLang.pdf"
+        val (outputStream, resultPath) = prepareOutputStream(outputDirUriOrPath, outputFileName, overwrite)
+        val engine = GoogleTranslateEngine(sourceLang = "auto", targetLang = targetLang)
+        var untranslatedCount = 0
+
+        try {
+            outputStream.use { outStream ->
+                context.contentResolver.openInputStream(inputUri)?.use { inputStream ->
+                    PDDocument.load(inputStream).use { document ->
+                        val totalPages = document.numberOfPages
+                        onProgress(0, totalPages)
+                        onLog?.invoke("Mở file PDF thành công. Tổng số trang: $totalPages")
+                        val font: PDFont = loadBundledFont(document)
+
+                        for (pageIndex in 0 until totalPages) {
+                            if (isCancelled()) throw TranslationCancelledException()
+                            val page = document.getPage(pageIndex)
+                            val textCollector = PageTextCollector()
+                            textCollector.extractPageText(document, page, pageIndex)
+                            val collapsedBlocks = collapseVerticalFractions(textCollector.blocks)
+                            val textBlocks = groupIntoLineRuns(collapsedBlocks)
+
+                            if (textBlocks.isNotEmpty()) {
+                                val pageRight = textCollector.cropBox.upperRightX
+                                val rightLimits = computeRightLimits(textBlocks, pageRight)
+                                val paragraphs = groupIntoParagraphs(textBlocks, rightLimits, pageRight)
+                                val translations = mutableListOf<ParagraphTranslation>()
+                                var skippedMathCount = 0
+
+                                for (paragraph in paragraphs) {
+                                    if (isCancelled()) throw TranslationCancelledException()
+                                    val originalText = paragraph.text.trim()
+                                    if (originalText.isBlank()) continue
+
+                                    // Separate option label prefix (e.g. "A.") from content before translating
+                                    val (optionLabel, remainder) = splitOptionLabel(originalText)
+                                    val textToTranslate = remainder.trim()
+
+                                    // Skip translating standalone math formulas and numeric choices, but preserve them in translations list
+                                    if (textToTranslate.isBlank() || isPureMathOrFormula(textToTranslate)) {
+                                        skippedMathCount++
+                                        translations.add(ParagraphTranslation(paragraph, originalText))
+                                        continue
+                                    }
+
+                                    val encodedText = FormulaPlaceholder.encodeFormulaPlaceholders(textToTranslate)
+                                    var translatedRaw = encodedText
+                                    var translationSuccess = false
+                                    try {
+                                        translatedRaw = engine.translate(encodedText)
+                                        translationSuccess = true
+                                    } catch (_: Exception) {
+                                        untranslatedCount++
+                                    }
+                                    var translatedRemainder = translatedRaw
+                                    if (translationSuccess) {
+                                        try {
+                                            translatedRemainder = FormulaPlaceholder.restoreFormulaPlaceholders(textToTranslate, translatedRaw)
+                                        } catch (_: Exception) {
+                                            translatedRemainder = FormulaPlaceholder.removeControlCharacters(translatedRaw)
+                                                .replace(STRAY_FORMULA_TAG, "")
+                                                .replace(STRAY_STYLE_TAG, "")
+                                        }
+                                    }
+
+                                    // Re-attach option label prefix if it was present
+                                    val translatedText = if (optionLabel != null) {
+                                        optionLabel + translatedRemainder
+                                    } else {
+                                        translatedRemainder
+                                    }
+                                    translations.add(ParagraphTranslation(paragraph, translatedText))
+                                }
+
+                                onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: ${textBlocks.size} dòng gộp thành ${paragraphs.size} đoạn. Đã dịch: ${translations.size}, Bỏ qua công thức: $skippedMathCount")
+
+                                if (translations.isNotEmpty()) {
+                                    // Strip original text from page streams so vector drawings & diagrams remain 100% pristine
+                                    val sourceTextRemoved = stripTextFromPage(document, page)
+
+                                    PDPageContentStream(
+                                        document,
+                                        page,
+                                        PDPageContentStream.AppendMode.APPEND,
+                                        true,
+                                        true
+                                    ).use { stream ->
+                                        for (i in translations.indices) {
+                                            val translation = translations[i]
+                                            val paragraph = translation.paragraph
+                                            val cleanedText = stripTagsAndPlaceholders(translation.translated)
+                                            val text = sanitizeForFont(cleanedText, font)
+
+                                            // Only when the source text is still on the page.
+                                            // Painting white over a block that has already been
+                                            // stripped hides nothing and destroys what was behind
+                                            // it: on a page of tinted table panels the app left a
+                                            // white patch under every line it wrote.
+                                            if (!sourceTextRemoved) {
+                                                for (line in paragraph.lines) coverSourceText(stream, line)
+                                            }
+                                            if (text.isBlank()) continue
+
+                                            // The next paragraph down the page bounds how far this
+                                            // one may spill. Rotated runs sit outside that vertical
+                                            // order, so they are not what "next" means here.
+                                            // What bounds a spill is the next thing in
+                                            // this column, not the next thing on the page.
+                                            val lastY = paragraph.lines.last().y
+                                            val nextY = translations
+                                                .asSequence()
+                                                .drop(i + 1)
+                                                .filter { !it.paragraph.isRotated }
+                                                .filter {
+                                                    kotlin.math.abs(it.paragraph.first.x - paragraph.first.x) <=
+                                                        PARAGRAPH_LEFT_TOLERANCE
+                                                }
+                                                .map { it.paragraph.y }
+                                                .filter { it < lastY }
+                                                .maxOrNull() ?: 0f
+                                            val maxAllowedHeight =
+                                                if (nextY > 0f && lastY > nextY) (lastY - nextY) * 0.9f
+                                                else Float.MAX_VALUE
+
+                                            if (paragraph.lines.size == 1) {
+                                                drawTextWithWrapping(
+                                                    stream, font, paragraph.first, text,
+                                                    maxAllowedHeight, paragraph.rightLimit
+                                                )
+                                            } else {
+                                                drawParagraph(stream, font, paragraph, text, maxAllowedHeight)
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: Không tìm thấy văn bản nào.")
+                            }
+                            onProgress(pageIndex + 1, totalPages)
+                        }
+                        document.save(outStream)
+                        onLog?.invoke("Lưu file dịch thành công: $resultPath")
+                    }
+                } ?: throw Exception("Unable to open input PDF stream")
+            }
+        } catch (cancelled: TranslationCancelledException) {
+            deleteOutput(resultPath)
+            onLog?.invoke("Đã huỷ khi đang dịch $originalFileName, đã xoá file dở dang.")
+            throw cancelled
+        }
+
+        return TranslationResult(
+            outputPath = resultPath,
+            untranslatedCount = untranslatedCount
+        )
+    }
+
+    /** Removes a half-written output, whether it landed in SAF or on a path. */
+    private fun deleteOutput(resultPath: String) {
+        try {
+            if (resultPath.startsWith("content://")) {
+                DocumentFile.fromSingleUri(context, Uri.parse(resultPath))?.delete()
+            } else {
+                File(resultPath).delete()
+            }
+        } catch (_: Exception) {
+            // Nothing left to do; the caller is already unwinding.
+        }
+    }
+
+    private fun prepareOutputStream(
+        outputDirUriOrPath: String?,
+        outputFileName: String,
+        overwrite: Boolean
+    ): Pair<OutputStream, String> {
+        if (!outputDirUriOrPath.isNullOrBlank() && outputDirUriOrPath.startsWith("content://")) {
+            try {
+                val treeUri = Uri.parse(outputDirUriOrPath)
+                val docTree = DocumentFile.fromTreeUri(context, treeUri)
+                if (docTree != null) {
+                    val targetFile = getUniqueSafFile(docTree, outputFileName, overwrite)
+                    if (targetFile != null) {
+                        val outStream = context.contentResolver.openOutputStream(targetFile.uri, "w")
+                        if (outStream != null) {
+                            return Pair(outStream, targetFile.uri.toString())
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // Fallback to standard file path below
+            }
+        }
+        val defaultDir = File(context.getExternalFilesDir(null), "translated")
+        val outputDir = try {
+            if (!outputDirUriOrPath.isNullOrBlank() && !outputDirUriOrPath.startsWith("content://")) {
+                val dir = File(outputDirUriOrPath)
+                if (!dir.exists()) dir.mkdirs()
+                if (dir.exists() && dir.canWrite()) dir else defaultDir
+            } else {
+                defaultDir
+            }
+        } catch (_: Exception) {
+            defaultDir
+        }
+        if (!outputDir.exists()) {
+            outputDir.mkdirs()
+        }
+
+        val outputFile = getUniqueFile(outputDir, outputFileName, overwrite)
+        return Pair(FileOutputStream(outputFile, false), outputFile.absolutePath)
+    }
+
+    private fun getUniqueFile(dir: File, baseOutputName: String, overwrite: Boolean): File {
+        val file = File(dir, baseOutputName)
+        if (overwrite || !file.exists()) {
+            if (overwrite && file.exists()) {
+                try { file.delete() } catch (_: Exception) {}
+            }
+            return file
+        }
+
+        val nameWithoutExt = if (baseOutputName.endsWith(".pdf", ignoreCase = true)) {
+            baseOutputName.substring(0, baseOutputName.length - 4)
+        } else {
+            baseOutputName
+        }
+        var counter = 1
+        while (true) {
+            val candidate = File(dir, "$nameWithoutExt ($counter).pdf")
+            if (!candidate.exists()) {
+                return candidate
+            }
+            counter++
+        }
+    }
+
+    private fun getUniqueSafFile(docTree: DocumentFile, baseOutputName: String, overwrite: Boolean): DocumentFile? {
+        val existing = docTree.findFile(baseOutputName)
+        if (existing != null) {
+            if (overwrite) {
+                try { existing.delete() } catch (_: Exception) {}
+                return docTree.createFile("application/pdf", baseOutputName)
+            }
+            val nameWithoutExt = if (baseOutputName.endsWith(".pdf", ignoreCase = true)) {
+                baseOutputName.substring(0, baseOutputName.length - 4)
+            } else {
+                baseOutputName
+            }
+            var counter = 1
+            while (true) {
+                val candidateName = "$nameWithoutExt ($counter).pdf"
+                if (docTree.findFile(candidateName) == null) {
+                    return docTree.createFile("application/pdf", candidateName)
+                }
+                counter++
+            }
+        }
+        return docTree.createFile("application/pdf", baseOutputName)
+    }
+
+    private val OPTION_LABEL_PATTERN = Pattern.compile("^([(]?[A-Da-d1-9][.)])\\s*")
+
+    /**
+     * Extracts multiple-choice option prefixes like "A.", "B)", "C." so they aren't mangled by translation.
+     */
+    private fun splitOptionLabel(text: String): Pair<String?, String> {
+        val matcher = OPTION_LABEL_PATTERN.matcher(text)
+        return if (matcher.find() && matcher.start() == 0) {
+            val label = matcher.group()
+            Pair(label, text.substring(matcher.end()))
+        } else {
+            Pair(null, text)
+        }
+    }
+
+
+    /**
+     * Groups raw text fragments into horizontal lines and runs, retaining superscript
+     * positioning, and collapses vertical fraction stacks (numerator / bar / denominator)
+     * into a single inline "(numerator) / (denominator)" line before run-splitting.
+     */
+    private fun groupIntoLineRuns(raw: List<TextBlock>): List<TextBlock> {
+        if (raw.isEmpty()) return emptyList()
+
+        // Rotated runs pass through whole. Line and run grouping compares x and
+        // y as page coordinates, which mean something different once the text
+        // reads up the page, so a rotated table header must not be folded in
+        // with the body text beside it. The collector already emits each such
+        // header as one run.
+        val (rotated, horizontal) = raw.partition { it.isRotated }
+        if (horizontal.isEmpty()) return rotated
+
+        val lines = mutableListOf<MutableList<TextBlock>>()
+        for (frag in horizontal) {
+            val lastLine = lines.lastOrNull()
+            if (lastLine != null) {
+                val refFrag = lastLine.maxByOrNull { it.fontSize } ?: lastLine.last()
+                val maxFontSize = maxOf(refFrag.fontSize, frag.fontSize)
+                if (abs(frag.y - refFrag.y) <= maxFontSize * 0.55f) {
+                    lastLine.add(frag)
+                    continue
+                }
+            }
+            lines.add(mutableListOf(frag))
+        }
+
+        val result = mutableListOf<TextBlock>()
+        for (line in lines) {
+            val lineSorted = line.sortedBy { it.x }
+            var runFrags = mutableListOf<TextBlock>()
+            var prev: TextBlock? = null
+
+            fun flushRun() {
+                if (runFrags.isNotEmpty()) {
+                    result.add(mergeFragments(runFrags))
+                    runFrags = mutableListOf()
+                }
+            }
+
+            for (frag in lineSorted) {
+                if (prev == null) {
+                    runFrags.add(frag)
+                } else {
+                    val gap = frag.x - (prev.x + prev.width)
+                    val threshold = maxOf(prev.fontSize, frag.fontSize) * 1.5f
+                    if (gap <= threshold) {
+                        runFrags.add(frag)
+                    } else {
+                        flushRun()
+                        runFrags.add(frag)
+                    }
+                }
+                prev = frag
+            }
+            flushRun()
+        }
+        result.addAll(rotated)
+        return result
+    }
+
+    companion object {
+        // \b is defined against ASCII word characters, so in "εmax" there is no
+        // boundary before "max" and the subscript went unrecognised: the block
+        // looked like the prose word "εmax", was sent to the translator, and
+        // came back as the Vietnamese for "maximum". Explicit ASCII-letter
+        // lookarounds put a boundary next to any non-Latin character while
+        // still refusing to fire inside a real word ("maximum" is untouched).
+        private val MATH_FUNCTION_WORDS = Regex(
+            "(?<![A-Za-z])(?:ln|log|lim|sin|cos|tan|cot|sec|csc|exp|max|min|mod|sqrt|rad|deg|fnc|fnt|fn)(?![A-Za-z])",
+            RegexOption.IGNORE_CASE
+        )
+
+        // Must cover everything the extractor itself can emit. It rewrites
+        // digits that sit off the baseline into the sub/superscript blocks, so
+        // leaving those out meant "m'₀" failed the symbol test, went to the
+        // translator, and came back as "tôi'₀" — the Vietnamese for "me".
+        private val MATH_SYMBOL_ONLY_PATTERN = Pattern.compile(
+            "^[0-9+\\-*/=()<>\\[\\]{},._:;^√∫∑∞≤≥≠±∓×÷%'\"\\\\|\\s" +
+                "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻₀₁₂₃₄₅₆₇₈₉₊₋′″‴°·∙–—~]*$"
+        )
+
+        // Characters that only appear in a symbol, never in English or
+        // Vietnamese prose: Greek letters, the sub/superscript blocks, primes.
+        private val MATH_MARKER_PATTERN = Regex(
+            "[\\p{InGreek}⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻₀₁₂₃₄₅₆₇₈₉₊₋′″‴∙√∞µ]"
+        )
+        private const val SYMBOL_TOKEN_MAX_LENGTH = 16
+
+        /** Room left at the page edge when nothing else bounds a block. */
+        private const val PAGE_RIGHT_MARGIN = 40f
+
+        /** Left edges within this many points belong to the same column. */
+        private const val COLUMN_EDGE_TOLERANCE = 3f
+
+        /** Kept clear between a wrapped line and whatever stands to its right. */
+        private const val COLUMN_GUTTER = 3f
+
+        /** Floor for the drawn length of a rotated run, in points. */
+        private const val MIN_ROTATED_LENGTH = 8f
+
+        // Written to match a tag a translation service has handled, not
+        // only the tag as it was sent: a space appears inside one often
+        // enough that a strict pattern leaves markup in the finished PDF.
+        private val STRAY_FORMULA_TAG =
+            Regex("<\\s*/?\\s*b\\s*\\d+\\s*>", RegexOption.IGNORE_CASE)
+        private val STRAY_STYLE_TAG =
+            Regex("<\\s*/?\\s*s\\s*[123]\\s*>", RegexOption.IGNORE_CASE)
+        private val STRAY_CONVERTER_MARKER =
+            Regex("\\{\\s*v\\s*\\d+\\s*\\}", RegexOption.IGNORE_CASE)
+
+        /**
+         * Lines a paragraph may run on past the ones its source used, when the
+         * space below it is free. A cap rather than the whole gap, so a
+         * paragraph at the foot of a column cannot walk down the empty half of
+         * a page it was never meant to fill.
+         */
+        private const val MAX_SPILL_LINES = 4
+
+        /**
+         * How much of its column a line must fill to be a continued line.
+         * Justified prose reaches the right edge on every line but the last,
+         * and even ragged-right prose rarely gives up a quarter of the measure
+         * mid-paragraph. Mirrors PARAGRAPH_END_RATIO in the desktop converter.
+         */
+        private const val PARAGRAPH_END_RATIO = 0.75f
+
+        /** Left edges further apart than this start a different paragraph. */
+        private const val PARAGRAPH_LEFT_TOLERANCE = 12f
+
+        /**
+         * A text measure is many times the size of its type. A column of
+         * symbols or units is one or two ems wide and every entry fills it, so
+         * without this every symbol in a table would look like full-measure
+         * prose and the column would be joined into one sentence.
+         */
+        private const val MIN_PROSE_MEASURE_EMS = 8f
+
+        /**
+         * How much of a column must run the full measure for the column to be
+         * prose. Body text reaches the margin on every line but the last; a
+         * table's labels are whatever length each label happens to be. On the
+         * document this was built against the two sit at 0.93 and 0.22, and
+         * nothing separates them by line spacing -- a table row and a wrapped
+         * line are both one line pitch apart, to a tenth of a point.
+         */
+        private const val PROSE_FULL_LINE_RATIO = 0.5f
+        private val LETTER_RUN_PATTERN = Regex("[\\p{L}]+")
+        private val FRACTION_BAR_PATTERN = Regex("^[-_–—―─═]{1,}$")
+
+        private val SUPERSCRIPT_DIGIT_MAP = mapOf(
+            '0' to '⁰', '1' to '¹', '2' to '²', '3' to '³', '4' to '⁴',
+            '5' to '⁵', '6' to '⁶', '7' to '⁷', '8' to '⁸', '9' to '⁹',
+            '+' to '⁺', '-' to '⁻'
+        )
+
+        private val SUBSCRIPT_DIGIT_MAP = mapOf(
+            '0' to '₀', '1' to '₁', '2' to '₂', '3' to '₃', '4' to '₄',
+            '5' to '₅', '6' to '₆', '7' to '₇', '8' to '₈', '9' to '₉',
+            '+' to '₊', '-' to '₋'
+        )
+
+        fun toSuperscriptToken(raw: String): String {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) return trimmed
+            return trimmed.map { SUPERSCRIPT_DIGIT_MAP[it] ?: it }.joinToString("")
+        }
+
+        fun toSubscriptToken(raw: String): String {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) return trimmed
+            return trimmed.map { SUBSCRIPT_DIGIT_MAP[it] ?: it }.joinToString("")
+        }
+
+        /**
+         * Checks if text consists of mathematical expressions, variables, or functions rather than plain prose sentences.
+         */
+        fun isPureMathOrFormula(text: String): Boolean {
+            val trimmed = text.trim()
+            if (trimmed.isEmpty()) return false
+
+            // A single short token carrying a character that prose never uses is
+            // a symbol, whatever else it contains. This is what keeps "εmax",
+            // "ρS" and "µST" out of the translator: they read as ordinary words
+            // to every test below, because their only unusual character is the
+            // leading Greek letter. Requiring no whitespace keeps the rule off
+            // sentences that merely mention a symbol in passing.
+            if (trimmed.length <= SYMBOL_TOKEN_MAX_LENGTH &&
+                trimmed.none { it.isWhitespace() } &&
+                MATH_MARKER_PATTERN.containsMatchIn(trimmed)
+            ) {
+                return true
+            }
+
+            val withoutFunctionWords = trimmed.replace(MATH_FUNCTION_WORDS, " ")
+            val letterRuns = LETTER_RUN_PATTERN.findAll(withoutFunctionWords).map { it.value }.toList()
+
+            val hasLongProseWord = letterRuns.any { it.length > 2 }
+            if (!hasLongProseWord) {
+                val withoutVariableLetters = withoutFunctionWords.replace(Regex("[\\p{L}]"), "")
+                if (MATH_SYMBOL_ONLY_PATTERN.matcher(withoutVariableLetters).matches()) {
+                    return true
+                }
+            }
+
+            val hasMathOperators = Regex("[=/^√≤≥≠±∈∉⊂⊃∩∪]").containsMatchIn(trimmed)
+            if (hasMathOperators && trimmed.length <= 60 && letterRuns.count { it.length > 2 } <= 2) {
+                return true
+            }
+
+            return false
+        }
+
+        /**
+         * Remove every protective marker before the text is drawn.
+         *
+         * The patterns tolerate whitespace inside a tag because a translator
+         * will put it there. Google returned "<b 9002>" for "<b9002>", the
+         * exact-match pattern did not recognise it, and a formula on page 3 was
+         * published reading "µR.<b 9002" -- markup in a delivered document.
+         */
+        fun stripTagsAndPlaceholders(text: String): String {
+            return text
+                .replace(STRAY_FORMULA_TAG, "")
+                .replace(STRAY_STYLE_TAG, "")
+                .replace(STRAY_CONVERTER_MARKER, "")
+        }
+
+        /** What a column was set to, and whether it is prose at all. */
+        private class ColumnMeasure(val measure: Float, val isProse: Boolean)
+
+        /**
+         * Whether two lines belong to the same block of text: same left edge,
+         * same size of type, both reading across the page.
+         */
+        fun sameColumn(a: TextBlock, b: TextBlock): Boolean {
+            if (a.isRotated || b.isRotated) return false
+            if (abs(a.x - b.x) > PARAGRAPH_LEFT_TOLERANCE) return false
+            val font = maxOf(a.fontSize, b.fontSize)
+            return abs(a.fontSize - b.fontSize) <= font * 0.12f
+        }
+
+        /**
+         * Join the lines of a paragraph back into the sentence they spell.
+         *
+         * A line broken mid-word leaves its hyphen behind, so those two pieces
+         * are joined with nothing between them and the hyphen is kept. Removing
+         * it would be a guess: "take-" followed by "up" is a compound the source
+         * wrote that way, not a word split for the margin. Kept, the engine
+         * reads "equa-tions" as "equations" and "take-up" as itself, which is
+         * both halves right for the price of neither being decided here.
+         */
+        fun joinLines(lines: List<TextBlock>): String {
+            val builder = StringBuilder()
+            for (line in lines) {
+                val piece = line.text.trim()
+                if (piece.isEmpty()) continue
+                if (builder.isEmpty()) {
+                    builder.append(piece)
+                } else if (builder.last() == '-') {
+                    builder.append(piece)
+                } else {
+                    builder.append(' ').append(piece)
+                }
+            }
+            return builder.toString()
+        }
+
+        /**
+         * Gather lines that were one paragraph into one unit of translation.
+         *
+         * The signal that a paragraph continues is that the line before it ran
+         * the full measure of its column. Prose set to a column reaches the
+         * right edge on every line but the last; a line that gives up a quarter
+         * of the measure has stopped because the paragraph stopped. This is the
+         * same rule the desktop engine uses (`line_ends_paragraph`), against
+         * the same reference: the column the line was set to.
+         *
+         * That one test is what keeps a table out of this. Every label in a
+         * terminology table is far shorter than its column, so every row ends
+         * its own paragraph and no two rows are ever joined — while the two
+         * lines of a label that did wrap are joined, because the first of them
+         * did reach the edge.
+         */
+        fun groupIntoParagraphs(
+            lines: List<TextBlock>,
+            rightLimits: Map<TextBlock, Float>,
+            pageRightEdge: Float
+        ): List<Paragraph> {
+            if (lines.isEmpty()) return emptyList()
+            val fallbackLimit = pageRightEdge - PAGE_RIGHT_MARGIN
+
+            fun limitOf(line: TextBlock) = rightLimits[line] ?: fallbackLimit
+
+            // The measure is what the lines were set to, not how far they could
+            // have reached. The gap to the next column is wider than the text,
+            // so measuring against it made ordinary full lines look short and
+            // no paragraph ever formed.
+            val columns = HashMap<TextBlock, ColumnMeasure>(lines.size)
+            for (line in lines) {
+                if (line.isRotated) continue
+                val column = lines.filter { sameColumn(line, it) }
+                val measure = column.maxOf { it.width }
+                val full = column.count { it.width >= measure * PARAGRAPH_END_RATIO }
+                val isProse = measure >= line.fontSize * MIN_PROSE_MEASURE_EMS &&
+                    full >= column.size * PROSE_FULL_LINE_RATIO
+                columns[line] = ColumnMeasure(measure, isProse)
+            }
+
+            fun reachesTheMargin(line: TextBlock): Boolean {
+                val column = columns[line] ?: return false
+                if (!column.isProse) return false
+                return line.width >= column.measure * PARAGRAPH_END_RATIO
+            }
+
+            fun continues(previous: TextBlock, next: TextBlock): Boolean {
+                if (!sameColumn(previous, next)) return false
+                val gap = previous.y - next.y
+                val font = maxOf(previous.fontSize, next.fontSize)
+                if (gap <= font * 0.6f || gap > font * 2.0f) return false
+                return reachesTheMargin(previous)
+            }
+
+            // The next line of a paragraph is not the next line on the page.
+            // Blocks arrive in reading order across the whole page, so on a
+            // three-column layout the line after a left-column line is the
+            // middle column's line at the same height. Walking that order
+            // joined nothing. Each paragraph instead follows its own column
+            // down: the highest unused line below the current one that starts
+            // at the same left edge.
+            val order = lines.sortedWith(
+                compareByDescending<TextBlock> { it.y }.thenBy { it.x }
+            )
+            val used = HashSet<TextBlock>(order.size)
+            val paragraphs = mutableListOf<Paragraph>()
+
+            for (start in order) {
+                if (start in used) continue
+                used.add(start)
+                val current = mutableListOf(start)
+                while (true) {
+                    val previous = current.last()
+                    val candidate = order
+                        .asSequence()
+                        .filter { it !in used && it.y < previous.y }
+                        .filter { abs(it.x - previous.x) <= PARAGRAPH_LEFT_TOLERANCE }
+                        .maxByOrNull { it.y }
+                        ?: break
+                    if (!continues(previous, candidate)) break
+                    used.add(candidate)
+                    current.add(candidate)
+                }
+                // Wrap to the measure the source set, but never past the point
+                // where the next column starts.
+                //
+                // The widest of the per-line limits, not the narrowest. A line's
+                // limit is floored at its own right edge -- that is what stops a
+                // single block being squeezed narrower than the source drew it --
+                // so the short last line of a paragraph reports a limit of only
+                // its own few words. Taking the minimum handed a three-line
+                // paragraph whose last line was "range:" a measure of 24 points,
+                // and it came out as one word per line running down the page
+                // over everything beneath it.
+                val collisionLimit = current.maxOf { limitOf(it) }
+                val measured = current.minOf { it.x } +
+                    (columns[current.first()]?.measure ?: (collisionLimit - current.first().x))
+                paragraphs.add(Paragraph(current, minOf(collisionLimit, measured)))
+            }
+
+            return paragraphs.sortedWith(
+                compareByDescending<Paragraph> { it.y }.thenBy { it.first.x }
+            )
+        }
+
+        /**
+         * The x each block may grow to before it would collide with something else.
+         *
+         * A translated line is usually longer than its source, so it needs room to
+         * the right. The room used to be "the rest of the page", which on a
+         * two-column page let a left-column paragraph run straight across the
+         * gutter and over the right column, and in a table let a name run into the
+         * symbol beside it.
+         *
+         * The page itself says where the room ends: the nearest block that shares
+         * the line and starts further right. Two passes, because a table cell or a
+         * paragraph is several lines and only some of them have a neighbour —
+         * blocks that begin at the same left edge belong to the same column, so
+         * they all inherit the tightest limit any of them found.
+         */
+        fun computeRightLimits(
+            blocks: List<TextBlock>,
+            pageRightEdge: Float
+        ): Map<TextBlock, Float> {
+            val pageRight = pageRightEdge - PAGE_RIGHT_MARGIN
+            if (blocks.isEmpty()) return emptyMap()
+
+            // A rotated run keeps the extent it was drawn at — it is never rewrapped
+            // — but it still blocks the horizontal runs beside it.
+            val subjects = blocks.filter { !it.isRotated }
+            if (subjects.isEmpty()) return emptyMap()
+
+            val perBlock = HashMap<TextBlock, Float>(subjects.size)
+            for (block in subjects) {
+                val ownRight = block.boxRight
+                val top = block.boxTop
+                val bottom = block.boxBottom
+                var limit = pageRight
+                for (other in blocks) {
+                    if (other === block) continue
+                    if (other.boxLeft < ownRight - COLUMN_EDGE_TOLERANCE) continue
+                    val sharesLine = other.boxBottom < top && other.boxTop > bottom
+                    if (!sharesLine) continue
+                    if (other.boxLeft < limit) limit = other.boxLeft
+                }
+                perBlock[block] = limit
+            }
+
+            // Propagate along a column. Clustering by sorted left edge rather than
+            // by a rounded bucket, so two lines a fraction of a point apart cannot
+            // land either side of a bucket boundary and one of them keep the
+            // page-wide limit.
+            val result = HashMap<TextBlock, Float>(subjects.size)
+            val byLeftEdge = subjects.sortedBy { it.x }
+            var index = 0
+            while (index < byLeftEdge.size) {
+                var end = index + 1
+                while (end < byLeftEdge.size &&
+                    byLeftEdge[end].x - byLeftEdge[end - 1].x <= COLUMN_EDGE_TOLERANCE
+                ) {
+                    end++
+                }
+                val column = byLeftEdge.subList(index, end)
+                val columnLimit = column.minOf { perBlock[it] ?: pageRight }
+                for (block in column) {
+                    // Never less room than the source itself used for that block.
+                    result[block] = maxOf(columnLimit - COLUMN_GUTTER, block.x + block.width)
+                }
+                index = end
+            }
+            return result
+        }
+
+        /**
+         * Scans raw extracted text blocks and merges vertical fraction stacks
+         * ONLY when an explicit fraction bar (a run of dashes/underscores) is
+         * found between the numerator and denominator.  Without a bar, blocks
+         * are never merged — this avoids destroying normal consecutive text lines.
+         */
+        fun collapseVerticalFractions(raw: List<TextBlock>): List<TextBlock> {
+            if (raw.size < 2) return raw
+
+            fun overlapRatio(aMin: Float, aMax: Float, bMin: Float, bMax: Float): Float {
+                val overlap = minOf(aMax, bMax) - maxOf(aMin, bMin)
+                if (overlap <= 0f) return 0f
+                val smaller = minOf(aMax - aMin, bMax - bMin)
+                return if (smaller <= 0f) 0f else overlap / smaller
+            }
+
+            fun isBar(text: String) = FRACTION_BAR_PATTERN.matches(text.trim())
+
+            // A stacked fraction is a vertical relationship in page coordinates.
+            // Rotated runs read across that axis, so they are never part of one.
+            val (rotated, horizontal) = raw.partition { it.isRotated }
+            val unused = horizontal.sortedWith(
+                compareByDescending<TextBlock> { it.y }.thenBy { it.x }
+            ).toMutableList()
+            val collapsed = mutableListOf<TextBlock>()
+            collapsed.addAll(rotated)
+            val consumed = mutableSetOf<TextBlock>()
+
+            // Pass 1: explicit  numerator ── bar ── denominator  triples
+            for (bar in unused) {
+                if (!isBar(bar.text)) continue
+                if (consumed.contains(bar)) continue
+
+                val barFont = bar.fontSize
+                val barRight = bar.x + bar.width
+
+                // A fraction bar is drawn at least as wide as what it divides.
+                // Without that test a lone en dash passed for a bar, and the
+                // dash is exactly how a table writes "dimensionless": the unit
+                // column of a terminology table turned "mm", "-", "N" into the
+                // single cell "mm/N" and lost a row.
+                fun barSpans(c: TextBlock) = bar.width >= c.width * 0.9f
+
+                val numCandidate = unused.firstOrNull { c ->
+                    !consumed.contains(c) && !isBar(c.text) &&
+                    c.y > bar.y && (c.y - bar.y) <= barFont * 1.8f &&
+                    overlapRatio(c.x, c.x + c.width, bar.x, barRight) > 0.5f &&
+                    barSpans(c) &&
+                    c.text.trim().length <= 20
+                }
+                if (numCandidate == null) continue
+
+                val denCandidate = unused.firstOrNull { c ->
+                    !consumed.contains(c) && !isBar(c.text) && c != numCandidate &&
+                    bar.y > c.y && (bar.y - c.y) <= barFont * 1.8f &&
+                    overlapRatio(c.x, c.x + c.width, bar.x, barRight) > 0.5f &&
+                    barSpans(c) &&
+                    c.text.trim().length <= 20
+                }
+                if (denCandidate == null) continue
+
+                consumed.add(bar)
+                consumed.add(numCandidate)
+                consumed.add(denCandidate)
+
+                val numText = numCandidate.text.trim()
+                val denText = denCandidate.text.trim()
+                val needsNumP = numText.contains(' ') || Regex("[+\\-]").containsMatchIn(numText)
+                val needsDenP = denText.contains(' ') || Regex("[+\\-]").containsMatchIn(denText)
+                val fN = if (needsNumP && !numText.startsWith("(")) "($numText)" else numText
+                val fD = if (needsDenP && !denText.startsWith("(")) "($denText)" else denText
+                val minX = minOf(numCandidate.x, denCandidate.x, bar.x)
+                val maxR = maxOf(numCandidate.x + numCandidate.width, denCandidate.x + denCandidate.width, barRight)
+                val avgY = (numCandidate.y + denCandidate.y) / 2f
+                val topY = numCandidate.y + numCandidate.ascent
+                val botY = denCandidate.y - denCandidate.descent
+
+                collapsed.add(TextBlock(
+                    text = "$fN/$fD",
+                    x = minX, y = avgY,
+                    fontSize = maxOf(numCandidate.fontSize, denCandidate.fontSize),
+                    width = maxR - minX,
+                    ascent = topY - avgY,
+                    descent = avgY - botY
+                ))
+            }
+
+            // Everything the bar pass did not claim is kept exactly as extracted.
+            //
+            // A second pass used to merge any two vertically stacked short-math
+            // blocks into "top/bottom" on the theory that they were a fraction
+            // written without a bar. On a symbol table it destroyed the page:
+            // consecutive rows of the symbol column sit at the normal line
+            // pitch and are all short math, so "b" over "b0" became "b/b0",
+            // "alpha" over "beta" became "alpha/beta", and thirty rows
+            // collapsed into fifteen blocks drawn at the average of two
+            // baselines -- no label lined up with its symbol any more, and the
+            // units column merged the same way ("mm/mm", "kg/m/kg").
+            //
+            // A bar-less fraction and a pair of table rows are not separable by
+            // geometry alone: both are two short tokens one line apart, roughly
+            // centred on each other. Without a layout model there is no
+            // evidence to tell them apart, so the merge is not attempted.
+            // Leaving a rare bar-less fraction as two stacked lines is a
+            // cosmetic loss; merging table rows is structural damage, and the
+            // preservation rules prefer the cosmetic loss every time.
+            for (block in unused) {
+                if (!consumed.contains(block)) collapsed.add(block)
+            }
+
+            return collapsed.sortedWith(compareByDescending<TextBlock> { it.y }.thenBy { it.x })
+        }
+    }
+
+    /**
+     * Combines line fragments into a single text block, handling superscript and subscript formatting.
+     */
+    private fun mergeFragments(frags: List<TextBlock>): TextBlock {
+        val sorted = frags.sortedBy { it.x }
+        val refFrag = sorted.maxByOrNull { it.fontSize } ?: sorted.first()
+        val refFontSize = refFrag.fontSize
+        val refY = refFrag.y
+
+        val sb = StringBuilder()
+        for ((index, frag) in sorted.withIndex()) {
+            val isSuperscript = frag.fontSize <= refFontSize * 0.8f &&
+                frag.y > refY + refFontSize * 0.12f
+            val isSubscript = frag.fontSize <= refFontSize * 0.8f &&
+                frag.y < refY - refFontSize * 0.12f
+            val piece = when {
+                isSuperscript -> toSuperscriptToken(frag.text)
+                isSubscript -> toSubscriptToken(frag.text)
+                else -> frag.text
+            }
+            when {
+                index == 0 -> sb.append(piece)
+                isSuperscript || isSubscript -> sb.append(piece)
+                sb.endsWith("sqrt") || sb.endsWith("√") -> sb.append(piece)
+                else -> sb.append(' ').append(piece)
+            }
+        }
+        val combinedText = sb.toString().replace(Regex("\\s+"), " ").trim()
+
+        val minX = sorted.minOf { it.x }
+        val maxRight = sorted.maxOf { it.x + it.width }
+        val maxAscent = sorted.maxOf { it.ascent }
+        val maxDescent = sorted.maxOf { it.descent }
+        return TextBlock(
+            text = combinedText,
+            x = minX,
+            y = refY,
+            fontSize = refFontSize,
+            width = maxRight - minX,
+            ascent = maxAscent,
+            descent = maxDescent
+        )
+    }
+
+
+    private fun drawTextWithWrapping(
+        stream: PDPageContentStream,
+        font: PDFont,
+        block: TextBlock,
+        text: String,
+        maxAllowedHeight: Float = Float.MAX_VALUE,
+        rightLimit: Float = Float.MAX_VALUE
+    ) {
+        val baseFontSize = block.fontSize.coerceIn(6f, 72f)
+        if (block.isRotated) {
+            drawRotatedText(stream, font, block, text, baseFontSize)
+            return
+        }
+        val availableWidth = maxOf(block.width, rightLimit - block.x).coerceAtLeast(30f)
+        val minSingleLineFontSize = maxOf(baseFontSize * 0.6f, 5.5f)
+
+        var chosenFontSize = baseFontSize
+        // No overshoot allowance. A 5% one used to be granted here, which on a
+        // 240pt column is twelve points of text sitting on top of whatever is
+        // in the next column. The width already includes whatever the source
+        // itself occupied, so nothing that fitted before is squeezed by this.
+        var fits = measureStringWidth(text, font, chosenFontSize) <= availableWidth
+        if (!fits) {
+            var size = baseFontSize - 0.5f
+            while (size >= minSingleLineFontSize) {
+                if (measureStringWidth(text, font, size) <= availableWidth) {
+                    chosenFontSize = size
+                    fits = true
+                    break
+                }
+                size -= 0.5f
+            }
+        }
+
+        if (fits) {
+            stream.beginText()
+            stream.setFont(font, chosenFontSize)
+            stream.newLineAtOffset(block.x, block.y)
+            try {
+                stream.showText(text)
+            } catch (_: Exception) {}
+            stream.endText()
+            return
+        }
+
+        var wrapFontSize = minSingleLineFontSize
+        var lines = wrapText(text, font, wrapFontSize, availableWidth)
+        var lineHeight = wrapFontSize * 1.25f
+
+        // Shrink font size if wrapped lines would overflow downward into the element below
+        while (lines.size * lineHeight > maxAllowedHeight && wrapFontSize > 4.5f) {
+            wrapFontSize *= 0.9f
+            lineHeight = wrapFontSize * 1.25f
+            lines = wrapText(text, font, wrapFontSize, availableWidth)
+        }
+
+        for ((index, line) in lines.withIndex()) {
+            val lineY = block.y - (index * lineHeight)
+            val sanitizedLine = sanitizeForFont(line, font)
+            if (sanitizedLine.isBlank()) continue
+            stream.beginText()
+            stream.setFont(font, wrapFontSize)
+            stream.newLineAtOffset(block.x, lineY)
+            try {
+                stream.showText(sanitizedLine)
+            } catch (_: Exception) {}
+            stream.endText()
+        }
+    }
+
+    /**
+     * Write a translated paragraph back onto the lines the source used.
+     *
+     * The baselines, the left edges and the measure all come from the source,
+     * so a paragraph that fits lands exactly where it was. Vietnamese runs a
+     * little longer than English, so the size is stepped down until the
+     * translation wraps into no more lines than the source had. Only if that
+     * fails does the paragraph spill below its last baseline, and it spills
+     * rather than losing its tail: text that is not drawn is text the reader
+     * never learns was there.
+     */
+    private fun drawParagraph(
+        stream: PDPageContentStream,
+        font: PDFont,
+        paragraph: Paragraph,
+        text: String,
+        maxAllowedHeight: Float
+    ) {
+        val lines = paragraph.lines
+        val available = (paragraph.rightLimit - lines.minOf { it.x }).coerceAtLeast(30f)
+        val baseFontSize = paragraph.fontSize.coerceIn(6f, 72f)
+        val floor = maxOf(baseFontSize * 0.75f, 5.5f)
+        val pitch = paragraph.pitch
+
+        // Vietnamese runs longer than English, so a paragraph rarely fits the
+        // line count its source had. Two ways to absorb that: shrink the type,
+        // or run on into the space below. Running on is the lesser change --
+        // type two points smaller than the paragraph beside it is visible on
+        // sight, whereas a paragraph a line longer, in the gap its own document
+        // left empty, is not. So the empty space is spent first and the type is
+        // only shrunk once it runs out. The space is whatever stands between
+        // this paragraph and the next thing in its column, so a paragraph can
+        // grow into a gap but never into its neighbour.
+        // One line of the gap is never spent. The blank line between two
+        // paragraphs is what says they are two, and a paragraph that ate it
+        // read as one long block that changed subject halfway through.
+        val room = if (maxAllowedHeight >= Float.MAX_VALUE / 2f) {
+            MAX_SPILL_LINES
+        } else {
+            ((maxAllowedHeight - pitch) / pitch).toInt().coerceIn(0, MAX_SPILL_LINES)
+        }
+        val allowedLines = lines.size + room
+
+        var fontSize = baseFontSize
+        var wrapped = wrapText(text, font, fontSize, available)
+        while (wrapped.size > allowedLines && fontSize - 0.5f >= floor) {
+            fontSize -= 0.5f
+            wrapped = wrapText(text, font, fontSize, available)
+        }
+
+        for ((index, line) in wrapped.withIndex()) {
+            val sanitised = sanitizeForFont(line, font)
+            if (sanitised.isBlank()) continue
+            val source = lines.getOrNull(index)
+            val x = (source ?: lines.last()).x
+            val y = source?.y ?: (lines.last().y - (index - lines.size + 1) * pitch)
+            stream.beginText()
+            stream.setFont(font, fontSize)
+            stream.newLineAtOffset(x, y)
+            try {
+                stream.showText(sanitised)
+            } catch (_: Exception) {}
+            stream.endText()
+        }
+    }
+
+    /**
+     * Redraw a run that reads up or down the page — a rotated column header.
+     *
+     * These used to vanish. The page's whole text layer is stripped before the
+     * translation is written back, and the writer only ever emitted horizontal
+     * lines, so anything rotated was erased and never replaced. A rotated run
+     * is not rewrapped: the space it has is the length it was drawn at, so it
+     * only shrinks to fit that, which keeps it inside its own table cell.
+     */
+    private fun drawRotatedText(
+        stream: PDPageContentStream,
+        font: PDFont,
+        block: TextBlock,
+        text: String,
+        baseFontSize: Float
+    ) {
+        val available = block.width.coerceAtLeast(MIN_ROTATED_LENGTH)
+        var fontSize = baseFontSize
+        val floor = maxOf(baseFontSize * 0.5f, 4.5f)
+        while (fontSize > floor && measureStringWidth(text, font, fontSize) > available) {
+            fontSize -= 0.5f
+        }
+        stream.beginText()
+        stream.setFont(font, fontSize)
+        stream.setTextMatrix(
+            Matrix.getRotateInstance(Math.toRadians(block.rotation.toDouble()), block.x, block.y)
+        )
+        try {
+            stream.showText(text)
+        } catch (_: Exception) {}
+        stream.endText()
+    }
+
+    private fun wrapText(
+        text: String,
+        font: PDFont,
+        fontSize: Float,
+        maxWidth: Float
+    ): List<String> {
+        val words = text.split(" ")
+        val lines = mutableListOf<String>()
+        var currentLine = StringBuilder()
+        for (word in words) {
+            if (currentLine.isEmpty()) {
+                currentLine.append(word)
+            } else {
+                val candidate = "${currentLine} $word"
+                if (measureStringWidth(candidate, font, fontSize) <= maxWidth) {
+                    currentLine.append(" ").append(word)
+                } else {
+                    lines.add(currentLine.toString())
+                    currentLine = StringBuilder(word)
+                }
+            }
+        }
+        if (currentLine.isNotEmpty()) {
+            lines.add(currentLine.toString())
+        }
+        return if (lines.isEmpty()) listOf(text) else lines
+    }
+
+    private fun measureStringWidth(text: String, font: PDFont, fontSize: Float): Float {
+        return try {
+            font.getStringWidth(text) / 1000f * fontSize
+        } catch (_: Exception) {
+            text.length * fontSize * 0.5f
+        }
+    }
+
+    private fun loadBundledFont(document: PDDocument): PDFont {
+        val candidatePaths = listOf(
+            "fonts/NotoSerif-Regular.ttf",
+            "fonts/NotoSans-Regular.ttf"
+        )
+        var lastError: Exception? = null
+        for (path in candidatePaths) {
+            try {
+                context.assets.open(path).use { fontStream ->
+                    return PDType0Font.load(document, fontStream)
+                }
+            } catch (e: Exception) {
+                lastError = e
+            }
+        }
+        throw Exception(
+            "Failed to load bundled font. Ensure fonts/NotoSerif-Regular.ttf " +
+                "or fonts/NotoSans-Regular.ttf exists in assets.",
+            lastError
+        )
+    }
+
+    private fun coverSourceText(
+        stream: PDPageContentStream,
+        block: TextBlock
+    ) {
+        val padX = 1.0f
+        val padTop = 1.0f
+        val padBottom = 1.0f
+        // Box accessors rather than x/width, so a rotated run is covered by the
+        // tall thin rectangle it actually occupies instead of a wide flat one.
+        val rectX = block.boxLeft - padX
+        val rectY = block.boxBottom - padBottom
+        val rectW = (block.boxRight - block.boxLeft) + padX * 2.0f
+        val rectH = (block.boxTop - block.boxBottom) + padTop + padBottom
+        if (rectW <= 0f || rectH <= 0f) return
+        stream.saveGraphicsState()
+        @Suppress("DEPRECATION")
+        stream.setNonStrokingColor(255, 255, 255)
+        stream.addRect(rectX, rectY, rectW, rectH)
+        stream.fill()
+        stream.restoreGraphicsState()
+    }
+
+    /**
+     * Blank every string the page draws, keeping its vector art intact.
+     *
+     * Returns whether it succeeded, because what the caller does next
+     * depends on it: with the text gone there is nothing to hide, and the
+     * white patch that used to be painted over each block was landing on
+     * the coloured panels behind the text and bleaching them.
+     */
+    private fun stripTextFromPage(document: PDDocument, page: PDPage): Boolean {
+        try {
+            val parser = PDFStreamParser(page)
+            parser.parse()
+            val tokens = parser.tokens
+            val newTokens = mutableListOf<Any>()
+            var inTextObject = false
+
+            for (token in tokens) {
+                if (token is Operator) {
+                    val opName = token.name
+                    if (opName == "BT") {
+                        inTextObject = true
+                        newTokens.add(token)
+                    } else if (opName == "ET") {
+                        inTextObject = false
+                        newTokens.add(token)
+                    } else if (inTextObject && (opName == "Tj" || opName == "'")) {
+                        if (newTokens.isNotEmpty() && newTokens.last() is COSString) {
+                            newTokens[newTokens.size - 1] = COSString("")
+                        }
+                        newTokens.add(token)
+                    } else if (inTextObject && opName == "TJ") {
+                        if (newTokens.isNotEmpty() && newTokens.last() is COSArray) {
+                            newTokens[newTokens.size - 1] = COSArray()
+                        }
+                        newTokens.add(token)
+                    } else if (inTextObject && opName == "\"") {
+                        if (newTokens.isNotEmpty() && newTokens.last() is COSString) {
+                            newTokens[newTokens.size - 1] = COSString("")
+                        }
+                        newTokens.add(token)
+                    } else {
+                        newTokens.add(token)
+                    }
+                } else {
+                    newTokens.add(token)
+                }
+            }
+
+            val newStream = com.tom_roush.pdfbox.pdmodel.common.PDStream(document)
+            val out = newStream.createOutputStream()
+            val contentWriter = ContentStreamWriter(out)
+            contentWriter.writeTokens(newTokens)
+            out.close()
+            page.setContents(newStream)
+            return true
+        } catch (_: Exception) {
+            return false
+        }
+    }
+
+    private fun sanitizeForFont(text: String, font: PDFont): String {
+        val sb = StringBuilder(text.length)
+        for (char in text) {
+            if (char == '\n' || char == '\r' || char == '\t') {
+                sb.append(' ')
+                continue
+            }
+            if (char.code < 32 || char == '¯' || char == '‾' || char == '\u02C9') continue
+            try {
+                font.encode(char.toString())
+                sb.append(char)
+            } catch (_: Exception) {
+                when (char) {
+                    '⁰' -> sb.append('0')
+                    '¹' -> sb.append('1')
+                    '²' -> sb.append('2')
+                    '³' -> sb.append('3')
+                    '⁴' -> sb.append('4')
+                    '⁵' -> sb.append('5')
+                    '⁶' -> sb.append('6')
+                    '⁷' -> sb.append('7')
+                    '⁸' -> sb.append('8')
+                    '⁹' -> sb.append('9')
+                    '⁺' -> sb.append('+')
+                    '⁻' -> sb.append('-')
+                    '∞' -> sb.append("inf")
+                    '≤' -> sb.append("<=")
+                    '≥' -> sb.append(">=")
+                    '≠' -> sb.append("!=")
+                    '±' -> sb.append("+/-")
+                    '×' -> sb.append("*")
+                    '÷' -> sb.append("/")
+                    'π' -> sb.append("pi")
+                    'α' -> sb.append("alpha")
+                    'β' -> sb.append("beta")
+                    'γ' -> sb.append("gamma")
+                    'θ' -> sb.append("theta")
+                    // Subscript digits (u₁, Q₁, ...) — degrade to the plain digit rather
+                    // than vanishing if the bundled font lacks the subscript block.
+                    '₀' -> sb.append('0')
+                    '₁' -> sb.append('1')
+                    '₂' -> sb.append('2')
+                    '₃' -> sb.append('3')
+                    '₄' -> sb.append('4')
+                    '₅' -> sb.append('5')
+                    '₆' -> sb.append('6')
+                    '₇' -> sb.append('7')
+                    '₈' -> sb.append('8')
+                    '₉' -> sb.append('9')
+                    '₊' -> sb.append('+')
+                    '₋' -> sb.append('-')
+                    // Blackboard-bold set letters (ℝ, ℕ, ...) — degrade to the plain letter.
+                    'ℂ' -> sb.append('C')
+                    'ℍ' -> sb.append('H')
+                    'ℕ' -> sb.append('N')
+                    'ℙ' -> sb.append('P')
+                    'ℚ' -> sb.append('Q')
+                    'ℝ' -> sb.append('R')
+                    'ℤ' -> sb.append('Z')
+                    // TeX/AMS math symbols resolved by TexMathSymbols — degrade to a short
+                    // ASCII gloss rather than disappearing if the bundled font can't render them.
+                    '∈' -> sb.append(" in ")
+                    '∉' -> sb.append(" not in ")
+                    '∋' -> sb.append(" contains ")
+                    '∅' -> sb.append(" empty set ")
+                    '∃' -> sb.append(" exists ")
+                    '∀' -> sb.append(" for all ")
+                    '∩' -> sb.append(" intersect ")
+                    '∪' -> sb.append(" union ")
+                    '⊂' -> sb.append(" subset ")
+                    '⊃' -> sb.append(" superset ")
+                    '⊆' -> sb.append(" subset-eq ")
+                    '⊇' -> sb.append(" superset-eq ")
+                    '∧' -> sb.append(" and ")
+                    '∨' -> sb.append(" or ")
+                    '¬' -> sb.append(" not ")
+                    '→' -> sb.append(" -> ")
+                    '←' -> sb.append(" <- ")
+                    '↔' -> sb.append(" <-> ")
+                    '⇒' -> sb.append(" => ")
+                    '⇐' -> sb.append(" <= ")
+                    '⇔' -> sb.append(" <=> ")
+                    '∼' -> sb.append(" ~ ")
+                    '≅' -> sb.append(" ~= ")
+                    '≈' -> sb.append(" ~~ ")
+                    '⊗' -> sb.append("(x)")
+                    '⊕' -> sb.append("(+)")
+                    '√' -> {}  // radical glyph — radicand already extracted separately
+                    '∇' -> sb.append("nabla")
+                    '∂' -> sb.append('d')
+                    '∑' -> sb.append("sum")
+                    '∏' -> sb.append("prod")
+                    '∫' -> sb.append("integral")
+                    '⊥' -> sb.append(" perp ")
+                    '∠' -> sb.append(" angle ")
+                    '∴' -> sb.append(" therefore ")
+                    else -> sb.append(' ')
+                }
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun getFileName(uri: Uri): String {
+        var name = "document.pdf"
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (nameIndex != -1 && cursor.moveToFirst()) {
+                name = cursor.getString(nameIndex)
+            }
+        }
+        return name
+    }
+
+    private class ParagraphTranslation(
+        val paragraph: Paragraph,
+        val translated: String
+    )
+
+    /**
+     * The lines that were one paragraph in the source, and the text they say.
+     *
+     * The port translated one line at a time. A translation engine given a
+     * fragment translates the fragment: "advanced" alone, orphaned at the end
+     * of a line from "advanced equations", came back as the Vietnamese for
+     * "advanced equipment". Meaning is made across a whole sentence, so the
+     * whole sentence has to be sent — and to put the answer back where the
+     * source had it, the paragraph has to remember the lines it came from.
+     */
+    class Paragraph(
+        val lines: List<TextBlock>,
+        val rightLimit: Float
+    ) {
+        init {
+            require(lines.isNotEmpty()) { "a paragraph has at least one line" }
+        }
+
+        val first: TextBlock get() = lines.first()
+        val isRotated: Boolean get() = first.isRotated
+        val y: Float get() = first.y
+        val fontSize: Float get() = first.fontSize
+        val text: String = joinLines(lines)
+
+        /** Baseline-to-baseline distance, for lines the translation adds. */
+        val pitch: Float
+            get() {
+                if (lines.size < 2) return fontSize * 1.25f
+                val gaps = lines.zipWithNext { a, b -> a.y - b.y }.filter { it > 0f }
+                return if (gaps.isEmpty()) fontSize * 1.25f else gaps.sorted()[gaps.size / 2]
+            }
+    }
+
+    /**
+     * One run of text with the geometry needed to put it back.
+     *
+     * [x] and [y] are the run's origin in PDF user space and [width] is its
+     * length along the reading direction, so for a rotated run the width runs
+     * up or down the page rather than across it. The box accessors resolve
+     * that, and everything that reasons about collisions uses them.
+     */
+    class TextBlock(
+        val text: String,
+        val x: Float,
+        val y: Float,
+        val fontSize: Float,
+        val width: Float,
+        val ascent: Float,
+        val descent: Float,
+        /** Reading direction in degrees counter-clockwise: 0, 90, 180 or 270. */
+        val rotation: Int = 0
+    ) {
+        val isRotated: Boolean get() = rotation != 0
+
+        val boxLeft: Float
+            get() = when (rotation) {
+                90 -> x - descent
+                180 -> x - width
+                270 -> x - ascent
+                else -> x
+            }
+
+        val boxRight: Float
+            get() = when (rotation) {
+                90 -> x + ascent
+                180 -> x
+                270 -> x + descent
+                else -> x + width
+            }
+
+        val boxBottom: Float
+            get() = when (rotation) {
+                90 -> y
+                180 -> y - ascent
+                270 -> y - width
+                else -> y - descent
+            }
+
+        val boxTop: Float
+            get() = when (rotation) {
+                90 -> y + width
+                180 -> y + descent
+                270 -> y
+                else -> y + ascent
+            }
+    }
+
+    private inner class PageTextCollector : PDFTextStripper() {
+        val blocks = mutableListOf<TextBlock>()
+        var cropBox: PDRectangle = PDRectangle(0f, 0f, 612f, 792f)
+
+        init {
+            sortByPosition = true
+        }
+
+        fun extractPageText(document: PDDocument, page: PDPage, pageIndex: Int) {
+            cropBox = page.cropBox ?: page.mediaBox
+            startPage = pageIndex + 1
+            endPage = pageIndex + 1
+            blocks.clear()
+            writeText(document, NullWriter())
+        }
+
+        /**
+         * Looks up a Unicode fallback for a glyph from a known TeX/AMS math symbol font by
+         * resolving its PostScript glyph name via the font's simple encoding. Safe to call
+         * on any TextPosition; returns null (never throws) if the font isn't a recognized
+         * symbol font, isn't a simple (Type1-style) font, or the glyph name is unmapped.
+         */
+        private fun resolveTexFallback(tp: TextPosition): String? {
+            return try {
+                val font = tp.font ?: return null
+                val baseName = font.name
+                if (!TexMathSymbols.isSymbolFont(baseName)) return null
+                val codes = tp.characterCodes
+                val code = codes?.firstOrNull() ?: return null
+                val glyphName = (font as? PDSimpleFont)?.encoding?.getName(code)
+                TexMathSymbols.resolve(baseName, glyphName)
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        override fun writeString(text: String, textPositions: MutableList<TextPosition>) {
+            if (textPositions.isEmpty()) return
+
+            val clusters = mutableListOf<MutableList<TextPosition>>()
+            var currentCluster = mutableListOf<TextPosition>()
+
+            for (tp in textPositions) {
+                if (currentCluster.isEmpty()) {
+                    currentCluster.add(tp)
+                } else {
+                    val prev = currentCluster.last()
+                    val gap = tp.xDirAdj - (prev.xDirAdj + prev.widthDirAdj)
+                    val maxFont = maxOf(prev.fontSizeInPt, tp.fontSizeInPt)
+
+                    // Separate runs if there's a horizontal gap bigger than 1.5x font size, a Y jump,
+                    // or a change of reading direction (a rotated table header beside body text).
+                    if (tp.dir != prev.dir ||
+                        gap > maxFont * 1.5f ||
+                        abs(tp.yDirAdj - prev.yDirAdj) > maxFont * 0.4f
+                    ) {
+                        clusters.add(currentCluster)
+                        currentCluster = mutableListOf(tp)
+                    } else {
+                        currentCluster.add(tp)
+                    }
+                }
+            }
+            if (currentCluster.isNotEmpty()) {
+                clusters.add(currentCluster)
+            }
+
+            for (cluster in clusters) {
+                if (cluster.isEmpty()) continue
+                val first = cluster.first()
+                val last = cluster.last()
+                val baseFontSize = cluster.maxOf { it.fontSizeInPt }
+                val refDirAdj = first.yDirAdj
+
+                val sb = StringBuilder()
+                for (i in cluster.indices) {
+                    val tp = cluster[i]
+                    var ch = tp.unicode ?: ""
+
+                    // Detect word-spacing gaps between characters. PDFs often
+                    // represent spaces as positional gaps rather than actual
+                    // space characters, so we must insert them ourselves.
+                    if (i > 0) {
+                        val prev = cluster[i - 1]
+                        val gap = tp.xDirAdj - (prev.xDirAdj + prev.widthDirAdj)
+                        val avgFont = (prev.fontSizeInPt + tp.fontSizeInPt) / 2f
+                        if (gap > avgFont * 0.16f) {
+                            sb.append(' ')
+                        }
+                    }
+
+                    // TeX math symbol fonts (CMSY10, MSBM10, MSAM10, etc.) frequently lack a
+                    // usable ToUnicode mapping, so PDFBox returns blank/control characters for
+                    // glyphs like "∈", or renders a blackboard-bold letter (e.g. "R" for the
+                    // reals, ℝ) as a plain, unstyled letter. Resolve those via glyph name.
+                    val texFallback = resolveTexFallback(tp)
+                    if (texFallback != null &&
+                        (ch.isEmpty() || ch.codePointAt(0) < 0x20 || ch != texFallback)
+                    ) {
+                        ch = texFallback
+                    }
+                    if (ch.isEmpty()) continue
+
+                    // yDirAdj increases *downward* on the page (image-space), so a smaller
+                    // yDirAdj than the reference baseline means the glyph sits above the line
+                    // (superscript, e.g. x²) and a larger yDirAdj means it sits below the line
+                    // (subscript, e.g. u₁, Q₁).
+                    val isRaised = tp.yDirAdj < refDirAdj - baseFontSize * 0.08f
+                    val isLowered = tp.yDirAdj > refDirAdj + baseFontSize * 0.08f
+
+                    when {
+                        i > 0 && isRaised -> sb.append(toSuperscriptToken(ch))
+                        i > 0 && isLowered -> sb.append(toSubscriptToken(ch))
+                        else -> sb.append(ch)
+                    }
+                }
+                val clusterText = sb.toString()
+                if (clusterText.isBlank()) continue
+
+                // The direction-adjusted coordinates the stripper reports are in
+                // the frame the text reads in, which is the page's frame only
+                // for unrotated text. For a rotated run the text matrix already
+                // carries the origin in user space, which is what the content
+                // stream wants back, so take it from there instead of trying to
+                // unrotate xDirAdj/yDirAdj.
+                val rotation = ((Math.round(first.dir) % 360) + 360) % 360
+                val x: Float
+                val y: Float
+                if (rotation == 0) {
+                    x = cropBox.lowerLeftX + first.xDirAdj
+                    y = cropBox.upperRightY - first.yDirAdj
+                } else {
+                    val matrix = first.textMatrix
+                    x = matrix.translateX
+                    y = matrix.translateY
+                }
+                // Width runs along the reading direction in both cases, because
+                // widthDirAdj is measured in that same rotated frame.
+                val width = maxOf((last.xDirAdj + last.widthDirAdj) - first.xDirAdj, baseFontSize * 0.5f)
+                val ascent = baseFontSize * 0.8f
+                val descent = baseFontSize * 0.2f
+                blocks.add(TextBlock(clusterText, x, y, baseFontSize, width, ascent, descent, rotation))
+            }
+        }
+    }
+
+    /**
+     * Fallback Unicode resolution for glyphs from TeX/AMS math symbol fonts (cmsy10,
+     * cmmi10, msam10, msbm10, ...) that PDFBox cannot map via the embedded font's
+     * ToUnicode CMap — a common gap for these fonts, which produces blank/dropped
+     * characters (e.g. "∈") or an unstyled plain letter for blackboard-bold set
+     * symbols (e.g. plain "R" instead of ℝ).
+     */
+    private object TexMathSymbols {
+        // Standard Adobe/TeX PostScript glyph names, as they typically appear in the
+        // /Differences array of an embedded TeX symbol font's /Encoding dictionary,
+        // mapped to their Unicode equivalents. If your PDF's font subset uses different
+        // glyph names, inspect the font's /Differences array (e.g. via `pdffonts -v`,
+        // or PDSimpleFont.encoding.differences in PDFBox) and extend this table.
+        private val GLYPH_NAME_MAP: Map<String, String> = mapOf(
+            "element" to "∈",
+            "elementof" to "∈",
+            "notelement" to "∉",
+            "owner" to "∋",
+            "emptyset" to "∅",
+            "existential" to "∃",
+            "universal" to "∀",
+            "infinity" to "∞",
+            "intersection" to "∩",
+            "union" to "∪",
+            "propersubset" to "⊂",
+            "propersuperset" to "⊃",
+            "reflexsubset" to "⊆",
+            "reflexsuperset" to "⊇",
+            "logicaland" to "∧",
+            "logicalor" to "∨",
+            "logicalnot" to "¬",
+            "arrowright" to "→",
+            "arrowleft" to "←",
+            "arrowboth" to "↔",
+            "arrowdblright" to "⇒",
+            "arrowdblleft" to "⇐",
+            "arrowdblboth" to "⇔",
+            "similar" to "∼",
+            "congruent" to "≅",
+            "approxequal" to "≈",
+            "notequal" to "≠",
+            "lessequal" to "≤",
+            "greaterequal" to "≥",
+            "multiply" to "×",
+            "divide" to "÷",
+            "circlemultiply" to "⊗",
+            "circleplus" to "⊕",
+            "radical" to "√",
+            "gradient" to "∇",
+            "partialdiff" to "∂",
+            "summation" to "∑",
+            "product" to "∏",
+            "integral" to "∫",
+            "perpendicular" to "⊥",
+            "angle" to "∠",
+            "therefore" to "∴"
+        )
+
+        // Blackboard-bold capital letters from AMS fonts (msbm10) that have a dedicated
+        // Unicode "double-struck" codepoint. Letters without one (e.g. blackboard "S")
+        // fall back to the plain letter since Unicode has no precomposed glyph for them.
+        private val BLACKBOARD_MAP: Map<Char, String> = mapOf(
+            'C' to "ℂ", 'H' to "ℍ", 'N' to "ℕ", 'P' to "ℙ",
+            'Q' to "ℚ", 'R' to "ℝ", 'Z' to "ℤ"
+        )
+
+        private val SYMBOL_FONT_TOKENS = listOf("CMSY", "MSAM", "MSBM", "CMMI", "CMEX", "STMARY")
+
+        fun isSymbolFont(fontName: String?): Boolean {
+            if (fontName == null) return false
+            val upper = fontName.uppercase()
+            return SYMBOL_FONT_TOKENS.any { upper.contains(it) }
+        }
+
+        fun resolve(fontName: String, glyphName: String?): String? {
+            if (glyphName == null || glyphName == ".notdef") return null
+
+            val upperFont = fontName.uppercase()
+            if (upperFont.contains("MSBM")) {
+                if (glyphName.length == 1) {
+                    val ch = glyphName[0]
+                    if (ch in 'A'..'Z') {
+                        return BLACKBOARD_MAP[ch] ?: glyphName
+                    }
+                }
+            }
+
+            return GLYPH_NAME_MAP[glyphName]
+        }
+    }
+
+    private class NullWriter : java.io.Writer() {
+        override fun write(cbuf: CharArray, off: Int, len: Int) {}
+        override fun flush() {}
+        override fun close() {}
+    }
+}

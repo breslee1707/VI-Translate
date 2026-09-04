@@ -212,6 +212,10 @@ def translate_patch(
     rsrcmgr = PDFResourceManager()
     layout = {}
     layout_bounds = {}
+    # The full extent of each ordinary text region, kept apart from
+    # layout_bounds because that one marks a table cell and changes how a
+    # paragraph is fitted. This is only a measure to compare line ends against.
+    class_bounds = {}
     scanned_pages = set()
     pages_with_images = set()
     device = TranslateConverter(
@@ -232,6 +236,7 @@ def translate_patch(
         style_font_names,
         style_fonts,
         synthetic_styles,
+        class_bounds,
     )
 
     assert device is not None
@@ -276,8 +281,15 @@ def translate_patch(
                 (i, d) for i, d in enumerate(page_layout.boxes)
                 if page_layout.names[int(d.cls)] not in vcls
             ]
+            page_class_bounds = class_bounds.setdefault(page.pageno, {})
             for i, d in reversed(non_vcls_boxes):
                 x0, y0, x1, y1 = d.xyxy.squeeze()
+                page_class_bounds[i + 2] = (
+                    float(x0),
+                    float(page_rect.height) - float(y1),
+                    float(x1),
+                    float(page_rect.height) - float(y0),
+                )
                 x0, y0, x1, y1 = (
                     np.clip(int(x0 - 1), 0, w - 1),
                     np.clip(int(h - y1 - 1), 0, h - 1),

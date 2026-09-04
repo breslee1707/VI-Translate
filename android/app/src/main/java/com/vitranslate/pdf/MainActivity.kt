@@ -1,0 +1,238 @@
+package com.vitranslate.pdf
+
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import com.vitranslate.pdf.ui.components.*
+import com.vitranslate.pdf.ui.theme.PDFTranslateTheme
+import com.vitranslate.pdf.viewmodel.MainViewModel
+
+class MainActivity : ComponentActivity() {
+
+    private val viewModel: MainViewModel by viewModels()
+
+    private val requestNotificationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* Progress notifications are a convenience; a refusal must not block work. */ }
+
+    private val pickFilesLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: Exception) {}
+            }
+            viewModel.addFiles(uris)
+        }
+    }
+
+    private val pickDirectoryLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            try {
+                contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {}
+            viewModel.addDirectory(treeUri)
+        }
+    }
+
+    private val pickSaveDirectoryLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        if (treeUri != null) {
+            try {
+                contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            } catch (_: Exception) {}
+            val path = treeUri.toString()
+            viewModel.setCustomOutputDirectory(path)
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        // Android 15 forces edge-to-edge on targetSdk 35 whether or not we ask,
+        // so opt in explicitly and let the bars stay transparent. HeaderView and
+        // FooterView already pad themselves with the system bar insets.
+        enableEdgeToEdge()
+        super.onCreate(savedInstanceState)
+
+        // Handle incoming PDF shared intent
+        intent?.let { handleIntent(it) }
+
+        setContent {
+            PDFTranslateTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    MainScreen(
+                        viewModel = viewModel,
+                        onPickFiles = { pickFilesLauncher.launch(arrayOf("application/pdf")) },
+                        onPickDirectory = { pickDirectoryLauncher.launch(null) },
+                        onPickSaveDirectory = { pickSaveDirectoryLauncher.launch(null) },
+                        onStartTranslation = { startTranslationAskingToNotify() }
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Asked when a translation starts, not at launch.
+     *
+     * Requesting it in onCreate put a system permission dialog over the app
+     * before the user had done anything, which is what Android's own guidance
+     * tells you not to do. The notification only matters once there is progress
+     * to report, so that is when it is worth interrupting for.
+     *
+     * The foreground service runs either way; without the permission the
+     * progress bar and the Huỷ action simply never appear.
+     */
+    private fun startTranslationAskingToNotify() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        viewModel.startTranslation()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent) {
+        val action = intent.action
+        val type = intent.type
+        if (type == "application/pdf") {
+            if (Intent.ACTION_VIEW == action) {
+                intent.data?.let { uri -> viewModel.addFiles(listOf(uri)) }
+            } else if (Intent.ACTION_SEND == action) {
+                (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { uri ->
+                    viewModel.addFiles(listOf(uri))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MainScreen(
+    viewModel: MainViewModel,
+    onPickFiles: () -> Unit,
+    onPickDirectory: () -> Unit,
+    onPickSaveDirectory: () -> Unit,
+    onStartTranslation: () -> Unit
+) {
+    val queueItems by viewModel.queueItems.collectAsState()
+    val selectedLanguage by viewModel.selectedLanguage.collectAsState()
+    val overwrite by viewModel.overwrite.collectAsState()
+    val customSaveDirectory by viewModel.customOutputDirectory.collectAsState()
+    val isTranslating by viewModel.isTranslating.collectAsState()
+    val progress by viewModel.progress.collectAsState()
+    val isIndeterminate by viewModel.isIndeterminate.collectAsState()
+    val statusText by viewModel.statusText.collectAsState()
+    val lastOutputDirectory by viewModel.lastOutputDirectory.collectAsState()
+    val updateInfo by viewModel.updateInfo.collectAsState()
+
+    var showLogDialog by remember { mutableStateOf(false) }
+    var showAboutDialog by remember { mutableStateOf(false) }
+    var currentLogText by remember { mutableStateOf("") }
+
+    if (showLogDialog) {
+        LogViewerDialog(
+            logText = currentLogText,
+            onDismiss = { showLogDialog = false },
+            onClearLog = {
+                viewModel.clearLog()
+                currentLogText = ""
+            }
+        )
+    }
+
+    if (showAboutDialog) {
+        AboutDialog(
+            appVersion = BuildConfig.VERSION_NAME,
+            onDismiss = { showAboutDialog = false }
+        )
+    }
+
+    Column(
+        modifier = Modifier.fillMaxSize()
+    ) {
+        HeaderView(
+            appVersion = BuildConfig.VERSION_NAME,
+            updateInfo = updateInfo,
+            onShowLog = {
+                currentLogText = viewModel.getLogContent()
+                showLogDialog = true
+            },
+            onShowAbout = {
+                showAboutDialog = true
+            }
+        )
+
+        FilePickerView(
+            hasFiles = queueItems.isNotEmpty(),
+            onPickFiles = onPickFiles,
+            onPickDirectory = onPickDirectory
+        )
+
+        ControlsView(
+            selectedLanguage = selectedLanguage,
+            onLanguageSelected = { viewModel.setSelectedLanguage(it) },
+            overwrite = overwrite,
+            onOverwriteChange = { viewModel.setOverwrite(it) },
+            customSaveDirectory = customSaveDirectory,
+            onPickSaveDirectory = onPickSaveDirectory,
+            isTranslating = isTranslating,
+            onStartTranslation = onStartTranslation,
+            onCancelTranslation = { viewModel.cancelTranslation() }
+        )
+
+        QueueView(
+            items = queueItems,
+            isTranslating = isTranslating,
+            onRemoveItem = { viewModel.removeItem(it) },
+            onClearQueue = { viewModel.clearQueue() },
+            modifier = Modifier.weight(1f)
+        )
+
+        FooterView(
+            isTranslating = isTranslating,
+            progress = progress,
+            isIndeterminate = isIndeterminate,
+            statusText = statusText,
+            lastOutputDirectory = lastOutputDirectory,
+            onShowLog = {
+                currentLogText = viewModel.getLogContent()
+                showLogDialog = true
+            }
+        )
+    }
+}

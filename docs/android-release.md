@@ -1,0 +1,138 @@
+# Building and Releasing the Android APK
+
+The Android app lives in [`android/`](../android). It is a separate product
+from the desktop build and releases under its own tag namespace.
+
+## Toolchain
+
+| Component | Version | Why it is pinned |
+| --- | --- | --- |
+| Gradle | 8.11.1 | AGP 8.7.2 and Kotlin 2.0.21 do not run on Gradle 9. |
+| Android Gradle Plugin | 8.7.2 | Matches the Compose and Kotlin versions in `libs.versions.toml`. |
+| Kotlin | 2.0.21 | Paired with the Compose compiler plugin of the same version. |
+| JDK | 17 | AGP 8.7 targets 17; a newer daemon JVM fails to load it. |
+| compileSdk / targetSdk | 35 | Android 15. |
+| minSdk | 26 | Android 8.0. |
+
+Do not commit `android/local.properties`. `sdk.dir` in that file overrides
+`ANDROID_HOME`, so a committed one breaks every checkout but the author's.
+
+## Building locally
+
+```bash
+cd android
+./gradlew assembleDebug testDebugUnitTest lintDebug
+```
+
+The debug APK lands in `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+On Windows, set `ANDROID_HOME` to the SDK root and use `gradlew.bat`. If the
+Gradle test worker dies with `Could not find or load main class ...`, check the
+system `PATH` for an entry containing a stray double quote: Gradle passes the
+whole `PATH` as `-Djava.library.path`, and an unbalanced quote splits the
+command line.
+
+## Signing
+
+A release APK is signed with a key you generate and keep. The build never falls
+back to the debug keystore: that key is generated per machine, so a CI-signed
+release would carry a different signature every run and no one could update over
+the previous install.
+
+Generate the key once:
+
+```bash
+keytool -genkeypair -v \
+  -keystore vitranslate-release.jks \
+  -keyalg RSA -keysize 4096 -validity 10000 \
+  -alias vitranslate
+```
+
+Keep the `.jks` file and its passwords somewhere durable and private. Losing
+them means every future release has to be installed as a new app.
+
+**Locally**, put an untracked `android/keystore.properties` beside the build
+file:
+
+```properties
+storeFile=/absolute/path/to/vitranslate-release.jks
+storePassword=…
+keyAlias=vitranslate
+keyPassword=…
+```
+
+**On CI**, add four repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | `base64 -w0 vitranslate-release.jks` |
+| `ANDROID_KEYSTORE_PASSWORD` | the keystore password |
+| `ANDROID_KEY_ALIAS` | `vitranslate` |
+| `ANDROID_KEY_PASSWORD` | the key password |
+
+Set them with `gh secret set NAME --body "<value>"`, not by piping. A pipe from
+PowerShell appends CRLF, and a password secret with a trailing carriage return
+fails later with a signing error that names the wrong cause. The workflow now
+strips whitespace from the base64 and opens the keystore with `keytool` before
+building, so a bad secret fails at the step that set it.
+
+From PowerShell:
+
+```powershell
+$d = "C:\path\to\signing"
+$pw = Get-Content "$d\password.txt" -Raw
+$b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$d\vitranslate-release.jks"))
+gh secret set ANDROID_KEYSTORE_BASE64 --body $b64
+gh secret set ANDROID_KEYSTORE_PASSWORD --body $pw
+gh secret set ANDROID_KEY_ALIAS --body "vitranslate"
+gh secret set ANDROID_KEY_PASSWORD --body $pw
+```
+
+Without `ANDROID_KEYSTORE_BASE64` the workflow still builds, but the artifact
+is named `PDFTranslate-android-<version>-unsigned.apk` and the publish job
+refuses to release it. An unsigned APK will not install on a device; use the
+debug APK for testing until the secrets are in place.
+
+## Releasing
+
+Android tags are `android-v<versionName>`. **Never release the Android build
+under a `v*` tag.** That namespace belongs to the desktop product:
+`.github/workflows/release.yml` triggers on it, and `app/update.py` downloads
+`PDFTranslate-windows.zip` from whatever it finds there. A `v*` tag carrying
+only an APK tells every installed Windows copy that an update exists and then
+fails to deliver it.
+
+Releasing is one number and one tag:
+
+1. Change `appVersionName` in
+   [`android/app/build.gradle.kts`](../android/app/build.gradle.kts). That is
+   the only edit. `versionCode` is derived from it as
+   `major * 10000 + minor * 100 + patch`, so 0.1.0 is 100 and 1.2.3 is 10203 —
+   there is no second number to remember to bump, and forgetting one is how you
+   ship a build that phones refuse to install over the last one.
+2. Merge to `main`.
+3. Tag `android-v<appVersionName>` and push it:
+
+   ```bash
+   git tag android-v0.1.1 && git push origin android-v0.1.1
+   ```
+
+4. `.github/workflows/android-build.yml` checks the tag against the version,
+   builds, verifies the signature with `apksigner`, and publishes
+   `PDFTranslate-android-<version>.apk`.
+
+Minor and patch must each stay below 100, or the derived codes stop increasing
+monotonically; the build fails with that message rather than producing a broken
+release. Go to the next minor rather than a 100th patch.
+
+The in-app update check reads the same namespace: `UpdateChecker` walks the
+release list and takes the newest non-draft release whose tag starts with
+`android-v`.
+
+## Known limits of the port
+
+The Android build is not the desktop pipeline recompiled. It reimplements
+layout preservation on PDFBox-Android instead of PyMuPDF and pdfminer.six, and
+it uses spatial heuristics where the desktop build uses BabelDOC/YOLOv8 layout
+models. Text-based PDFs only — there is no OCR. Complex mathematics can still
+show misplaced superscripts, broken fractions and missing TeX/AMS glyphs.

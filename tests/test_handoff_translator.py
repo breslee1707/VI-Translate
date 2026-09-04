@@ -8,9 +8,12 @@ from pathlib import Path
 from pdf2zh.cache import clean_test_db, init_test_db
 from pdf2zh.translator import (
     FormulaPlaceholderError,
+    GoogleTranslator,
     HandoffTranslator,
+    SegmentTooLongError,
     encode_formula_placeholders,
     load_segment_table,
+    normalise_number_abbreviation,
     placeholders,
     restore_formula_placeholders,
     validate_style_tags,
@@ -160,6 +163,62 @@ class HandoffTranslatorTests(unittest.TestCase):
         self.misses.write_text('{"src": "from an older run"}\n', encoding="utf-8")
         self._translator()
         self.assertEqual(self._recorded_misses(), [])
+
+
+class GoogleSegmentLengthTests(unittest.TestCase):
+    def test_a_segment_over_the_limit_is_refused_rather_than_truncated(self):
+        """Upstream sends the first 5000 characters and returns that as the whole
+        translation, so the rest of a long paragraph disappears with nothing said."""
+        translator = GoogleTranslator("en", "vi")
+        with self.assertRaises(SegmentTooLongError):
+            translator.do_translate("a" * 5001)
+
+    def test_a_segment_at_the_limit_is_still_sent(self):
+        translator = GoogleTranslator("en", "vi")
+        sent = {}
+
+        def fake_get(endpoint, params, headers, timeout):
+            sent["q"] = params["q"]
+            raise RuntimeError("stop before the network")
+
+        translator.session.get = fake_get
+        with self.assertRaises(RuntimeError):
+            translator.do_translate("a" * 5000)
+        self.assertEqual(len(sent["q"]), 5000)
+
+
+class NumberAbbreviationTests(unittest.TestCase):
+    """`no.` in front of a number means "number", never "not"."""
+
+    def test_the_abbreviation_is_capitalised_before_a_number(self):
+        self.assertEqual(
+            normalise_number_abbreviation("can be found in our brochure, ref. no. 305"),
+            "can be found in our brochure, ref. No. 305",
+        )
+
+    def test_every_occurrence_in_a_segment_is_capitalised(self):
+        self.assertEqual(
+            normalise_number_abbreviation("Part no. 12 and no. 13"),
+            "Part No. 12 and No. 13",
+        )
+
+    def test_a_space_before_the_number_is_allowed(self):
+        self.assertEqual(normalise_number_abbreviation("no.  7"), "No.  7")
+
+    def test_the_negation_is_left_alone(self):
+        self.assertEqual(
+            normalise_number_abbreviation("There is no. Then we stop."),
+            "There is no. Then we stop.",
+        )
+
+    def test_the_tail_of_a_longer_word_is_not_the_abbreviation(self):
+        self.assertEqual(
+            normalise_number_abbreviation("casino. 5 tables"),
+            "casino. 5 tables",
+        )
+
+    def test_already_capitalised_text_is_unchanged(self):
+        self.assertEqual(normalise_number_abbreviation("ref. No. 305"), "ref. No. 305")
 
 
 if __name__ == "__main__":

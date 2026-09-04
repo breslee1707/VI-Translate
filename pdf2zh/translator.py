@@ -27,9 +27,38 @@ class FormulaPlaceholderError(ValueError):
     """Raised when a translator damages or reorders protected formula tags."""
 
 
+class SegmentTooLongError(ValueError):
+    """Raised when a segment exceeds what the translation service accepts.
+
+    Upstream truncates to the limit and returns the short answer as if it were
+    the whole translation, so the tail of a long paragraph disappears with
+    nothing said. A segment carrying formula or style markers is caught later
+    by the marker check, but plain prose is silently cut in half. Refusing the
+    segment keeps the source text and lets the caller say what happened.
+    """
+
+
 def remove_control_characters(value: str) -> str:
     """Remove control characters that cannot be emitted safely into PDF text."""
     return "".join(character for character in value if unicodedata.category(character)[0] != "C")
+
+
+NUMBER_ABBREVIATION_PATTERN = re.compile(r"(?<![A-Za-z])no\.(?=\s*\d)")
+
+
+def normalise_number_abbreviation(text: str) -> str:
+    """Capitalise the ``no.`` that means "number" so it is not read as "not".
+
+    "ref. no. 305" came back as "ref. KHONG. 305": lowercase "no." mid-sentence
+    reads as the negation, and every engine we can reach makes the same choice.
+    The same string capitalised is unambiguous -- "No. 305" translates to
+    "So 305" -- and capitalising an abbreviation that already stands for a
+    proper noun changes nothing else about the sentence.
+
+    Only ``no.`` directly in front of a number is touched, so ordinary prose
+    ("there is no. Then...") is left alone.
+    """
+    return NUMBER_ABBREVIATION_PATTERN.sub("No.", text)
 
 
 class BaseTranslator:
@@ -62,6 +91,7 @@ class BaseTranslator:
 
     def translate(self, text: str, ignore_cache: bool = False) -> str:
         """Translate text, consulting the persistent cache unless bypassed."""
+        text = normalise_number_abbreviation(text)
         if not (self.ignore_cache or ignore_cache):
             cached = self.cache.get(text)
             if cached is not None:
@@ -116,10 +146,19 @@ class GoogleTranslator(BaseTranslator):
             )
         }
 
+    # The /m endpoint carries the text in the query string and rejects more
+    # than this; it is the service's limit, not a preference.
+    MAXIMUM_SEGMENT_CHARACTERS = 5000
+
     def do_translate(self, text: str) -> str:
+        if len(text) > self.MAXIMUM_SEGMENT_CHARACTERS:
+            raise SegmentTooLongError(
+                f"segment of {len(text)} characters exceeds the "
+                f"{self.MAXIMUM_SEGMENT_CHARACTERS} the service accepts"
+            )
         response = self.session.get(
             self.endpoint,
-            params={"tl": self.lang_out, "sl": self.lang_in, "q": text[:5000]},
+            params={"tl": self.lang_out, "sl": self.lang_in, "q": text},
             headers=self.headers,
             timeout=30,
         )

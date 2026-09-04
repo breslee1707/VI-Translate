@@ -1,5 +1,10 @@
 # Cross-Platform Build and Release
 
+This file covers the desktop product. The Android app releases under the
+separate `android-v*` namespace; see [android.md](android.md). A `v*` tag is
+read by every installed Windows build, so nothing but a full desktop release
+may ever carry one.
+
 Only publish when the user explicitly requests it. The authoritative version is
 `APP_VERSION` in `app/update.py`; a release tag must be exactly `v<APP_VERSION>`.
 The release workflow rejects a mismatch.

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The app used @android:style/Theme.Material.NoActionBar, whose window
+         background is not the colour Compose paints a moment later, so every
+         cold start flashed the wrong shade before the first frame.
+
+         windowBackground is the point of this theme. The system bars are made
+         transparent here only as a pre-first-frame default; enableEdgeToEdge()
+         and the insets controller in Theme.kt own their behaviour afterwards,
+         and they gate on API level themselves, which XML attributes cannot do
+         below minSdk. -->
+    <style name="Theme.PDFTranslate" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

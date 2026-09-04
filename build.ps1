@@ -60,7 +60,12 @@ $required = @(
     "_internal\tkinterdnd2",
     "_internal\cv2",
     "_internal\onnxruntime",
-    "_internal\pymupdf"
+    "_internal\pymupdf",
+    # The OCR mode reads these out of the wheel. Losing them leaves a build whose
+    # OCR checkbox fails on the first scan instead of at build time.
+    "_internal\rapidocr_onnxruntime\config.yaml",
+    "_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_det_infer.onnx",
+    "_internal\rapidocr_onnxruntime\models\ch_PP-OCRv4_rec_infer.onnx"
 )
 if (-not $SkipAssets -or (Test-Path (Join-Path $root "app\assets\doclayout.onnx"))) {
     $required += "_internal\app\assets\doclayout.onnx"

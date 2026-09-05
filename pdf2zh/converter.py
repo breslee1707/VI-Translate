@@ -218,6 +218,63 @@ def output_font_lacks_glyph(text: str, font: Font | None) -> bool:
 PARAGRAPH_END_RATIO = 0.75
 
 
+def glyph_layout_class(
+    layout: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    owned_classes: set[int] | None = None,
+) -> int:
+    """Recover edge glyphs missed by an approximate text-region boundary."""
+    height, width = layout.shape
+    x0, y0, x1, y1 = bbox
+    cx, cy = np.clip(int(x0), 0, width - 1), np.clip(int(y0), 0, height - 1)
+    original = int(layout[cy, cx])
+    if original != 0 and owned_classes:
+        # OCR polygons describe ink. PDF glyph boxes include the descender,
+        # which can land in the following row's padded polygon. The glyph's
+        # centre stays in its own row and avoids shifting postal lines up.
+        middle_x = int(np.clip((x0 + x1) / 2, 0, width - 1))
+        middle_y = int(np.clip((y0 + y1) / 2, 0, height - 1))
+        middle_class = int(layout[middle_y, middle_x])
+        if middle_class in owned_classes:
+            return middle_class
+    if original != 1:
+        return original
+    left, bottom = max(0, int(x0)), max(0, int(y0))
+    right, top = min(width, int(math.ceil(x1))), min(height, int(math.ceil(y1)))
+    area = layout[bottom:top, left:right]
+    if not area.size:
+        return original
+    classes, counts = np.unique(area, return_counts=True)
+    # Never recover ordinary prose through a protected formula/table edge.
+    if any(cls == 0 and count >= area.size * 0.2 for cls, count in zip(classes, counts)):
+        return 0
+    candidates = [(count, int(cls)) for cls, count in zip(classes, counts)
+                  if cls > 1 and count >= area.size * 0.2]
+    if candidates:
+        return max(candidates)[1]
+
+    # A layout caption can stop just before the last letter and its raised
+    # footnote marker. The glyphs then have no direct region overlap and form
+    # a bogus fragment (Ganong's "secretio" + "n.a"). Look only one and a
+    # half glyph-heights to the left and recover a single unambiguous neighbour.
+    # Searching only behind the glyph does not pull a separate gutter marker
+    # into the following column. Never cross protected pixels.
+    padding = max(2.0, (y1 - y0) * 1.5)
+    expanded_left = max(0, int(math.floor(x0 - padding)))
+    expanded_right = min(width, int(math.ceil(x1)))
+    expanded = layout[bottom:top, expanded_left:expanded_right]
+    if not expanded.size:
+        return original
+    expanded_classes, expanded_counts = np.unique(expanded, return_counts=True)
+    glyph_area = max(1.0, (x1 - x0) * (y1 - y0))
+    if any(cls == 0 and count >= glyph_area * 0.2
+           for cls, count in zip(expanded_classes, expanded_counts)):
+        return 0
+    neighbours = [int(cls) for cls, count in zip(expanded_classes, expanded_counts)
+                  if cls > 1 and count >= glyph_area * 0.15]
+    return neighbours[0] if len(neighbours) == 1 else original
+
+
 def line_ends_paragraph(
     line_end: float,
     bounds: tuple[float, float, float, float] | None,
@@ -243,6 +300,78 @@ def line_ends_paragraph(
     if width <= 0:
         return False
     return line_end < x0 + width * ratio
+
+
+def balanced_wrap_positions(
+    text: str,
+    first_x: float,
+    left: float,
+    right: float,
+    size: float,
+    minimum_size: float,
+    measure_char: Callable[[str, TextStyle, float], float],
+    formula_widths: list[float],
+    *,
+    balance_short_orphan: bool = False,
+) -> tuple[float, set[int]]:
+    """Wrap at word boundaries and gently remove a short orphaned title line."""
+
+    def positions(candidate_size: float) -> set[int]:
+        breaks: set[int] = set()
+        cur_x = first_x
+        last_space_ptr = -1
+        last_space_x_after = cur_x
+        pointer = 0
+        style = TextStyle.REGULAR
+        while pointer < len(text):
+            style_tag = STYLE_TAG_PATTERN.match(text, pointer)
+            if style_tag:
+                closing, identifier = style_tag.groups()
+                style = TextStyle.REGULAR if closing else TextStyle(int(identifier))
+                pointer = style_tag.end()
+                continue
+            formula = re.match(r"\{\s*v([\d\s]+)\}", text[pointer:], re.IGNORECASE)
+            if formula:
+                try:
+                    width = formula_widths[int(formula.group(1).replace(" ", ""))]
+                except Exception:
+                    width = 0
+                advance = len(formula.group(0))
+            else:
+                character = text[pointer]
+                width = measure_char(character, style, candidate_size)
+                advance = 1
+                if character == " ":
+                    last_space_ptr = pointer
+                    last_space_x_after = cur_x + width
+            if cur_x + width > right + 0.1 * candidate_size and cur_x > left + 0.1 * candidate_size:
+                if last_space_ptr >= 0:
+                    breaks.add(last_space_ptr + 1)
+                    cur_x = left + (cur_x - last_space_x_after)
+                    last_space_ptr = -1
+                    last_space_x_after = left
+            cur_x += width
+            pointer += advance
+        return breaks
+
+    break_positions = positions(size)
+    if not balance_short_orphan:
+        return size, break_positions
+    for _attempt in range(4):
+        if not break_positions:
+            break
+        tail = text[max(break_positions):]
+        tail = STYLE_TAG_PATTERN.sub("", tail).strip()
+        tail = re.sub(r"\{\s*v[\d\s]+\}", "formula", tail, flags=re.IGNORECASE)
+        words = tail.split()
+        if len(words) != 1 or len(words[0]) > 4:
+            break
+        candidate = max(minimum_size, size * 0.96)
+        if candidate >= size:
+            break
+        size = candidate
+        break_positions = positions(size)
+    return size, break_positions
 
 
 # A subscript or a superscript is a character or two. Anything this long that
@@ -525,6 +654,9 @@ class PDFConverterEx(PDFConverter):
         self.cur_item.add(item)
         item.cid = cid
         item.font = font
+        item.source_fontsize = fontsize
+        item.source_scaling = scaling
+        item.source_rise = rise
         item.graphic_instruction = self.graphic_instruction
         return item.adv
 
@@ -640,6 +772,7 @@ class TranslateConverter(PDFConverterEx):
         style_fonts: Dict | None = None,
         synthetic_styles: set[int] | None = None,
         class_bounds: Dict | None = None,
+        ocr_paragraph_classes: Dict | None = None,
     ) -> None:
         super().__init__(rsrcmgr)
         self.vfont = vfont
@@ -650,6 +783,9 @@ class TranslateConverter(PDFConverterEx):
         # Preserve an empty mapping by identity instead of replacing it.
         self.layout_bounds = layout_bounds if layout_bounds is not None else {}
         self.class_bounds = class_bounds if class_bounds is not None else {}
+        self.ocr_paragraph_classes = (
+            ocr_paragraph_classes if ocr_paragraph_classes is not None else {}
+        )
         self.noto_name = noto_name
         self.noto = noto
         self.style_font_names = style_font_names or {0: noto_name}
@@ -740,6 +876,7 @@ class TranslateConverter(PDFConverterEx):
         xt_cls: int = -1
         vmax: float = ltpage.width / 4
         page_class_bounds = self.class_bounds.get(ltpage.pageid, {})
+        ocr_paragraphs = self.ocr_paragraph_classes.get(ltpage.pageid, set())
         ops: str = ""
         preserved_segments: set[str] = set()
 
@@ -855,8 +992,7 @@ class TranslateConverter(PDFConverterEx):
                 cur_v = False
                 layout = self.layout[ltpage.pageid]
                 h, w = layout.shape
-                cx, cy = np.clip(int(child.x0), 0, w - 1), np.clip(int(child.y0), 0, h - 1)
-                cls = layout[cy, cx]
+                cls = glyph_layout_class(layout, (child.x0, child.y0, child.x1, child.y1), ocr_paragraphs)
                 if is_bullet_character(child.get_text(), child.fontname):
                     cls = 0
                 orientation = text_orientation(child.matrix)
@@ -922,7 +1058,8 @@ class TranslateConverter(PDFConverterEx):
                         # Force paragraph break for list items: when text wraps back
                         # to left AND there's a significant vertical gap (> 1.5x font size),
                         # it's likely a new list item, not a continuation
-                        if (child.x1 < xt.x0
+                        if (cls not in ocr_paragraphs
+                            and child.x1 < xt.x0
                             and abs(child.y0 - xt.y0) > pstk[-1].size * 1.5):
                             close_style(len(sstk) - 1)
                             new_paragraph(child, cls)
@@ -934,7 +1071,7 @@ class TranslateConverter(PDFConverterEx):
                                     text_style_of(child),
                                 )
                         elif child.x1 < xt.x0:
-                            if pstk[-1].text_length > 1 and line_ends_paragraph(
+                            if cls not in ocr_paragraphs and pstk[-1].text_length > 1 and line_ends_paragraph(
                                 xt.x1, page_class_bounds.get(int(cls))
                             ):
                                 close_style(len(sstk) - 1)
@@ -1109,6 +1246,13 @@ class TranslateConverter(PDFConverterEx):
                 return "".join(["%02x" % ord(c) for c in cstk])
 
         def output_font(character: str, style: int, size: float) -> tuple[str, float]:
+            if ocr_paragraphs:
+                # One Unicode family for Latin and Vietnamese glyphs avoids
+                # per-character jumps between Base14 Times and embedded fonts.
+                font_name = self.style_font_names.get(style, self.noto_name)
+                font = self.style_fonts.get(style, self.noto)
+                if font.has_glyph(ord(character)):
+                    return font_name, font.char_lengths(character, size)[0]
             base_name = BASE14_STYLE_FONTS.get(style, "tiro")
             try:
                 base = self.fontmap.get(base_name)
@@ -1356,6 +1500,30 @@ class TranslateConverter(PDFConverterEx):
         minimum_line_height = min_line_height_for_language(self.translator.lang_out)
 
         for id, new in enumerate(news):
+            if pstk[id].cls == 0:
+                # A protected block is not prose to fit. Reflowing its glyphs
+                # shifted form labels and detached rules even with new==src.
+                for identifier in re.findall(r"\{v(\d+)\}", sstk[id]):
+                    vid = int(identifier)
+                    for character in var[vid]:
+                        a, b, c, d, e, f = character.matrix
+                        scale = getattr(character, "source_scaling", 1.0)
+                        rise = getattr(character, "source_rise", 0.0)
+                        ops_list.append(gen_op_txt(
+                            self.fontid[character.font],
+                            getattr(character, "source_fontsize", 1.0),
+                            e + c * rise, f + d * rise,
+                            raw_string(self.fontid[character.font], chr(character.cid)),
+                            TextStyle.REGULAR, (a * scale, b * scale, c, d),
+                            getattr(character, "graphic_instruction", ""),
+                        ))
+                    for rule in varl[vid]:
+                        ops_list.append(gen_op_line(
+                            rule.pts[0][0], rule.pts[0][1],
+                            rule.pts[1][0] - rule.pts[0][0],
+                            rule.pts[1][1] - rule.pts[0][1], rule.linewidth,
+                        ))
+                continue
             x: float = pstk[id].x
             y: float = pstk[id].y
             x0: float = pstk[id].x0
@@ -1451,55 +1619,22 @@ class TranslateConverter(PDFConverterEx):
 
             # Pre-compute word-boundary line breaks to avoid mid-word splits
             if brk:
-                def _measure_char(c, style):
-                    return output_font(c, int(style), size)[1]
+                def _measure_char(
+                    character: str, wrap_style: TextStyle, candidate_size: float
+                ) -> float:
+                    return output_font(character, int(wrap_style), candidate_size)[1]
 
-                break_positions = set()
-                cur_x = x
-                last_space_ptr = -1
-                last_space_x_after = cur_x
-                p2 = 0
-                wrap_style = TextStyle.REGULAR
-                while p2 < len(new):
-                    style_tag = STYLE_TAG_PATTERN.match(new, p2)
-                    if style_tag:
-                        closing, identifier = style_tag.groups()
-                        wrap_style = (
-                            TextStyle.REGULAR
-                            if closing
-                            else TextStyle(int(identifier))
-                        )
-                        p2 = style_tag.end()
-                        continue
-                    vr2 = re.match(r"\{\s*v([\d\s]+)\}", new[p2:], re.IGNORECASE)
-                    if vr2:
-                        try:
-                            vid_t = int(vr2.group(1).replace(" ", ""))
-                            cw = vlen[vid_t]
-                        except Exception:
-                            cw = 0
-                        if cur_x + cw > x1 + 0.1 * size and cur_x > x0 + 0.1 * size:
-                            if last_space_ptr >= 0:
-                                break_positions.add(last_space_ptr + 1)
-                                cur_x = x0 + (cur_x - last_space_x_after)
-                                last_space_ptr = -1
-                                last_space_x_after = x0
-                        cur_x += cw
-                        p2 += len(vr2.group(0))
-                    else:
-                        ch2 = new[p2]
-                        cw = _measure_char(ch2, wrap_style)
-                        if ch2 == ' ':
-                            last_space_ptr = p2
-                            last_space_x_after = cur_x + cw
-                        if cur_x + cw > x1 + 0.1 * size and cur_x > x0 + 0.1 * size:
-                            if last_space_ptr >= 0:
-                                break_positions.add(last_space_ptr + 1)
-                                cur_x = x0 + (cur_x - last_space_x_after)
-                                last_space_ptr = -1
-                                last_space_x_after = x0
-                        cur_x += cw
-                        p2 += 1
+                size, break_positions = balanced_wrap_positions(
+                    new,
+                    x,
+                    x0,
+                    x1,
+                    size,
+                    pstk[id].size * 0.5,
+                    _measure_char,
+                    vlen,
+                    balance_short_orphan=pstk[id].size >= 12,
+                )
                 # Replace spaces at break positions with newlines (process in reverse)
                 for bp in sorted(break_positions, reverse=True):
                     new = new[:bp - 1] + '\n' + new[bp:]

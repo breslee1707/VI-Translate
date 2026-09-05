@@ -14,10 +14,12 @@ try:
     from app.gui import (
         App,
         LANGUAGE_NAMES,
+        OCR_NAMES,
         collect_pdfs,
         ensure_writable_streams,
         main,
         verify_engine,
+        translation_outcome,
     )
 except ImportError:  # customtkinter and tkinterdnd2 are app-only dependencies
     App = None
@@ -78,6 +80,57 @@ class LanguageMenuTests(unittest.TestCase):
 
     def test_menu_labels_are_unique_so_the_reverse_lookup_is_total(self):
         self.assertEqual(len(set(LANGUAGE_NAMES.values())), len(LANGUAGE_NAMES))
+
+    def test_every_ocr_mode_has_a_unique_menu_label(self):
+        from scripts.translate_pdf import OCR_MODES
+
+        self.assertEqual(set(OCR_NAMES), set(OCR_MODES))
+        self.assertEqual(len(set(OCR_NAMES.values())), len(OCR_NAMES))
+
+
+@unittest.skipIf(App is None, "desktop app dependencies are not installed")
+class TranslationOutcomeTests(unittest.TestCase):
+    @staticmethod
+    def result(**overrides):
+        values = {
+            "untranslated": 0,
+            "image_only_pages": (),
+            "ocr_warnings": (),
+        }
+        values.update(overrides)
+        return types.SimpleNamespace(**values)
+
+    def test_clean_ocr_result_is_done(self):
+        self.assertEqual(translation_outcome(self.result()), ("done", ""))
+
+    def test_preserved_scan_is_never_reported_as_done(self):
+        state, detail = translation_outcome(self.result(image_only_pages=(0, 4)))
+        self.assertEqual(state, "partial")
+        self.assertIn("1, 5", detail)
+
+    def test_ocr_safety_warning_is_visible_as_partial(self):
+        state, detail = translation_outcome(
+            self.result(ocr_warnings=("page 2: preserved (form grid)",))
+        )
+        self.assertEqual(state, "partial")
+        self.assertIn("OCR", detail)
+
+    def test_worker_passes_selected_ocr_mode_and_reports_safety_partial(self):
+        source = Path("scan.pdf")
+        result = types.SimpleNamespace(
+            path=Path("translated/scan-vi.pdf"), untranslated=0,
+            image_only_pages=(), ocr_warnings=("page 1: preserved (form grid)",),
+        )
+        app = types.SimpleNamespace(events=queue.Queue(), failures={})
+        with mock.patch("app.gui.translate_pdf", return_value=result) as translate:
+            App._run(app, [source], "vi", False, "standard")
+        self.assertEqual(translate.call_args.kwargs["ocr"], "standard")
+        events = []
+        while not app.events.empty():
+            events.append(app.events.get_nowait())
+        status = next(event for event in events if event[0] == "status" and event[2] != "running")
+        self.assertEqual(status[2], "partial")
+        self.assertIn("OCR", status[3])
 
 
 @unittest.skipIf(collect_pdfs is None, "desktop app dependencies are not installed")

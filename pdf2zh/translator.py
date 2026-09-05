@@ -21,6 +21,15 @@ PLACEHOLDER_PATTERN = re.compile(r"</?b\d+>")
 INTERNAL_PLACEHOLDER_PATTERN = re.compile(r"\{\s*v([\d\s]+)\}", re.IGNORECASE)
 PAIRED_PLACEHOLDER_PATTERN = re.compile(r"<b(\d+)></b\1>")
 STYLE_TAG_PATTERN = re.compile(r"<(/?)s([123])>", re.IGNORECASE)
+COMMON_PUNCTUATION_MOJIBAKE = (
+    ("\u00e2\u20ac\u201c", "\u2013"),  # UTF-8 en dash decoded as Windows-1252
+    ("\u00e2\u20ac\u201d", "\u2014"),  # UTF-8 em dash decoded as Windows-1252
+    ("\u00c2\u00a9", "\u00a9"),
+    ("\u00c2\u00ae", "\u00ae"),
+    ("\u00c2\u00b0", "\u00b0"),
+    ("\u00c2\u00b1", "\u00b1"),
+    ("\u00c2\u00b5", "\u00b5"),
+)
 
 
 class FormulaPlaceholderError(ValueError):
@@ -41,6 +50,58 @@ class SegmentTooLongError(ValueError):
 def remove_control_characters(value: str) -> str:
     """Remove control characters that cannot be emitted safely into PDF text."""
     return "".join(character for character in value if unicodedata.category(character)[0] != "C")
+
+
+def repair_common_punctuation_mojibake(value: str) -> str:
+    """Repair only unambiguous punctuation damaged while moving JSONL text."""
+    for damaged, repaired in COMMON_PUNCTUATION_MOJIBAKE:
+        value = value.replace(damaged, repaired)
+    return value
+
+
+def _decoded_as_windows_1252(value: str) -> str | None:
+    """Return the UTF-8 text this string would be, if it is mojibake at all."""
+    raw = bytearray()
+    for character in value:
+        try:
+            raw += character.encode("cp1252")
+        except UnicodeEncodeError:
+            # cp1252 leaves 0x81, 0x8d, 0x8f, 0x90 and 0x9d undefined. A lenient
+            # decoder passes those bytes through, so they arrive as C1 controls.
+            if ord(character) >= 0x100:
+                return None
+            raw.append(ord(character))
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def looks_like_mojibake(value: str) -> bool:
+    """Report text that is UTF-8 read as Windows-1252, without repairing it.
+
+    Searching for marker characters is wrong here: Â and Ã are ordinary
+    Vietnamese letters, so PHÂN would be condemned. Re-encoding the whole
+    string succeeds only when every character came from that one mistake, which
+    real Vietnamese does not survive because its tone marks live outside
+    Latin-1. Repairing is still refused: guessing a letter sequence is how a
+    wrong word reaches the page looking correct.
+    """
+    decoded = _decoded_as_windows_1252(value)
+    return decoded is not None and decoded != value
+
+
+def has_unrepairable_mojibake(value: str) -> bool:
+    """Damage that survives the punctuation repair, so whole letters are wrong.
+
+    Testing the repaired text is not enough. Turning one damaged dash back into
+    an en dash restores a byte that cannot begin a UTF-8 sequence, which hides
+    the damaged letters standing around it; ten of the records that first
+    exposed this defect were masked exactly that way. Compare what the record
+    really said against what the safe repair managed to recover instead.
+    """
+    decoded = _decoded_as_windows_1252(value)
+    return decoded is not None and decoded != repair_common_punctuation_mojibake(value)
 
 
 NUMBER_ABBREVIATION_PATTERN = re.compile(r"(?<![A-Za-z])no\.(?=\s*\d)")
@@ -250,10 +311,20 @@ def load_segment_table(path: str | None) -> dict[str, str]:
                 raise ValueError(f"{path} line {number}: 'src' and 'dst' must be strings")
             if not translation:
                 continue
+            if has_unrepairable_mojibake(translation):
+                logger.warning(
+                    "%s line %d: 'dst' is UTF-8 text decoded as Windows-1252; "
+                    "segment left untranslated",
+                    path,
+                    number,
+                )
+                continue
             # Old converter versions emitted {vN}; normalise those records so
             # existing handoff files remain usable with the documented tags.
-            source = encode_formula_placeholders(source)
-            translation = encode_formula_placeholders(translation)
+            source = encode_formula_placeholders(repair_common_punctuation_mojibake(source))
+            translation = encode_formula_placeholders(
+                repair_common_punctuation_mojibake(translation)
+            )
             if placeholders(source) != placeholders(translation):
                 logger.warning(
                     "%s line %d: formula placeholders differ between src and dst; "

@@ -6,3 +6,5 @@ customtkinter==5.2.2
 tkinterdnd2==0.6.2; sys_platform == "darwin"
 tkinterdnd2==0.4.3; sys_platform != "darwin"
 pyinstaller==6.11.1
+# Local OCR for image-only pages. Models are fetched and bundled at build time.
+rapidocr==3.9.2

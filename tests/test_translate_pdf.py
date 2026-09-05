@@ -100,6 +100,16 @@ class TranslatePdfTests(unittest.TestCase):
         with self.assertRaises(argparse.ArgumentTypeError):
             translate_pdf._page_selection("5-3")
 
+    def test_ocr_profile_is_opt_in_at_the_cli_boundary(self):
+        args = translate_pdf._parser().parse_args(
+            ["guide.pdf", "--output-dir", "out", "--ocr", "standard"]
+        )
+        self.assertEqual(args.ocr, "standard")
+        self.assertEqual(
+            translate_pdf._parser().parse_args(["guide.pdf", "--output-dir", "out"]).ocr,
+            "off",
+        )
+
     def test_requires_the_bundled_core_instead_of_the_pypi_wheel(self):
         translate_pdf._require_core()
 

@@ -40,6 +40,7 @@ TARGET_LANGUAGES = frozenset(
 )
 
 ENGINES = ("google", "handoff")
+OCR_MODES = ("off", "standard", "enhanced")
 
 # Measured on an eight-page sample: 2 threads 48s, 4 threads 30s, 8 threads 27s,
 # 12 threads 29s. Past four, the layout pass rather than the network is the floor,
@@ -59,6 +60,9 @@ class Translation(NamedTuple):
     untranslated: int = 0
     reasons: Mapping[str, int] = MappingProxyType({})
     image_only_pages: tuple[int, ...] = ()
+    ocr_pages: tuple[int, ...] = ()
+    ocr_profile: str = "off"
+    ocr_warnings: tuple[str, ...] = ()
 
 
 # record_translation_failure passes up either an exception class name or one of
@@ -161,6 +165,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--pages", type=_page_selection)
     parser.add_argument("--threads", default=DEFAULT_THREADS, type=_positive_threads)
     parser.add_argument("--engine", default="google", choices=ENGINES)
+    parser.add_argument(
+        "--ocr",
+        default="off",
+        choices=OCR_MODES,
+        help="experimental local OCR for image-only pages",
+    )
     parser.add_argument(
         "--segments",
         type=Path,
@@ -329,6 +339,8 @@ def _run_engine(
     engine: str,
     envs: dict[str, str],
     on_progress: Callable[[int, int], None] | None = None,
+    skip_backing_pages: set[int] | None = None,
+    ocr_regions_by_page: dict | None = None,
 ) -> "TranslationReport":
     """Run the core and return what it could not translate, and why."""
     from pdf2zh.high_level import translate
@@ -342,7 +354,7 @@ def _run_engine(
         def callback(progress: object) -> None:
             on_progress(getattr(progress, "n", 0), getattr(progress, "total", 0) or 0)
 
-    result = translate(
+    arguments = dict(
         files=[str(source)],
         output=str(temp_output),
         pages=_pages_to_indices(pages),
@@ -355,6 +367,11 @@ def _run_engine(
         callback=callback,
         ignore_cache=ignore_cache,
     )
+    if skip_backing_pages:
+        arguments["skip_backing_pages"] = skip_backing_pages
+    if ocr_regions_by_page:
+        arguments["ocr_regions_by_page"] = ocr_regions_by_page
+    result = translate(**arguments)
     if len(result) != 1:
         raise TranslationError("PDF core did not report one translated result")
     return result[0][1]
@@ -373,10 +390,13 @@ def translate_pdf(
     engine: str = "google",
     segments: Path | None = None,
     emit_segments: Path | None = None,
+    ocr: str = "off",
     on_progress: Callable[[int, int], None] | None = None,
 ) -> Translation:
     """Translate one PDF, reporting any segments the engine could not translate."""
     _require_core()
+    if ocr not in OCR_MODES:
+        raise TranslationError(f"Unsupported OCR mode: {ocr}")
     source = _validate_input(input_pdf)
     envs = _segment_envs(segments, emit_segments)
 
@@ -394,9 +414,35 @@ def translate_pdf(
 
     with tempfile.TemporaryDirectory(prefix="pdf-translate-", dir=destination_dir) as temp:
         temp_output = Path(temp)
+        processing_source = source
+        ocr_preparation = None
+        if ocr != "off":
+            try:
+                from pdf2zh.ocr import OcrUnavailableError, prepare_ocr_pdf
+
+                ocr_preparation = prepare_ocr_pdf(
+                    source,
+                    temp_output / f"{source.stem}-ocr-sidecar.pdf",
+                    mode=ocr,
+                    pages=_pages_to_indices(pages),
+                    layout_model=_layout_model(os.environ.get("PDF_TRANSLATE_MODEL")),
+                )
+                processing_source = ocr_preparation.sidecar
+            except OcrUnavailableError as error:
+                requirements = SKILL_ROOT / "requirements-ocr.txt"
+                install = f'"{sys.executable}" -m pip install -r "{requirements}"'
+                raise TranslationError(f"OCR is unavailable: {error} Run: {install}") from error
+            except Exception as error:
+                raise TranslationError(f"OCR preparation failed: {_describe(error)}") from error
         try:
+            engine_arguments = {}
+            if ocr_preparation and ocr_preparation.pages:
+                engine_arguments["skip_backing_pages"] = set(ocr_preparation.pages)
+                engine_arguments["ocr_regions_by_page"] = (
+                    ocr_preparation.reflow_regions_by_page
+                )
             report = _run_engine(
-                source,
+                processing_source,
                 temp_output,
                 target_language,
                 source_language,
@@ -406,6 +452,7 @@ def translate_pdf(
                 engine,
                 envs,
                 on_progress,
+                **engine_arguments,
             )
         except TranslationError:
             raise
@@ -418,6 +465,12 @@ def translate_pdf(
         # say what the document actually needs instead. The message carries the
         # words app/errors.py matches for E-PDF-03.
         if report.translatable_segments == 0:
+            if ocr != "off":
+                details = "; ".join(ocr_preparation.warnings) if ocr_preparation else ""
+                suffix = f" ({details})" if details else ""
+                raise TranslationError(
+                    f"OCR found no text that could be translated safely in {source.name}{suffix}"
+                )
             raise TranslationError(
                 f"No text could be extracted from {source.name}: the selected pages are "
                 "image-only scans. This tool does not perform OCR, so run OCR on the "
@@ -426,8 +479,18 @@ def translate_pdf(
 
         untranslated = len(report.failures)
         image_only = tuple(sorted(report.image_only_pages))
+        ocr_pages = ocr_preparation.pages if ocr_preparation else ()
+        ocr_warnings = ocr_preparation.warnings if ocr_preparation else ()
         if destination is None:
-            return Translation(None, untranslated, report.reasons, image_only)
+            return Translation(
+                None,
+                untranslated,
+                report.reasons,
+                image_only,
+                ocr_pages,
+                ocr,
+                ocr_warnings,
+            )
 
         generated = temp_output / f"{source.stem}-mono.pdf"
         if not generated.is_file():
@@ -437,6 +500,22 @@ def translate_pdf(
                 raise TranslationError(f"Engine did not produce one translated PDF; found: {names}")
             generated = candidates[0]
 
+        if ocr_preparation and ocr_preparation.cleaned_images:
+            from pdf2zh.ocr import replace_ocr_page_images
+
+            cleaned_output = temp_output / f"{source.stem}-ocr-cleaned.pdf"
+            try:
+                replace_ocr_page_images(
+                    generated,
+                    cleaned_output,
+                    ocr_preparation.cleaned_images,
+                )
+            except Exception as error:
+                raise TranslationError(
+                    f"Could not install the cleaned OCR background: {_describe(error)}"
+                ) from error
+            generated = cleaned_output
+
         staged = destination_dir / f".{destination.name}.tmp"
         try:
             shutil.copyfile(generated, staged)
@@ -444,7 +523,15 @@ def translate_pdf(
         finally:
             staged.unlink(missing_ok=True)
 
-    return Translation(destination, untranslated, report.reasons, image_only)
+    return Translation(
+        destination,
+        untranslated,
+        report.reasons,
+        image_only,
+        ocr_pages,
+        ocr,
+        ocr_warnings,
+    )
 
 
 def _use_utf8_output() -> None:
@@ -475,12 +562,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             engine=args.engine,
             segments=args.segments,
             emit_segments=args.emit_segments,
+            ocr=args.ocr,
         )
     except TranslationError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     if result.path is not None:
         print(f"Translated PDF: {result.path}")
+    if result.ocr_pages:
+        numbers = ", ".join(str(page + 1) for page in result.ocr_pages)
+        print(f"OCR ({result.ocr_profile}): pages {numbers}")
+    for warning in result.ocr_warnings:
+        print(f"warning: OCR {warning}", file=sys.stderr)
     if result.image_only_pages:
         numbers = ", ".join(str(page + 1) for page in result.image_only_pages)
         print(

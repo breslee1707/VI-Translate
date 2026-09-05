@@ -37,7 +37,7 @@ class PreservationRuleTests(unittest.TestCase):
         self.assertFalse(is_formula_font("TimesNewRomanPSMT"))
 
     def test_operator_only_ordinary_font_block_is_protected_as_formula(self):
-        blocks = [(10, 20, 90, 40, "F1 / b0 â‰¤ C2 [N/mm]")]
+        blocks = [(10, 20, 90, 40, "F1 / b0 ≤ C2 [N/mm]")]
         self.assertEqual(formula_regions(blocks, []), [(10.0, 20.0, 90.0, 40.0)])
 
     def test_trigonometric_functions_do_not_make_an_equation_look_like_prose(self):
@@ -91,11 +91,11 @@ class PreservationRuleTests(unittest.TestCase):
         )
 
     def test_table_codes_and_numbers_stay_as_original_glyphs(self):
-        for value in ("E 2/1, E 3/1, NOVO", "180Â° 210Â° 240Â°", "2.0"):
+        for value in ("E 2/1, E 3/1, NOVO", "180° 210° 240°", "2.0"):
             with self.subTest(value=value):
                 self.assertFalse(should_translate_table_cell(value))
         self.assertTrue(should_translate_table_cell("Tension member"))
-        self.assertTrue(should_translate_table_cell("Lá»›p phá»§ máº·t dÆ°á»›i"))
+        self.assertTrue(should_translate_table_cell("Lớp phủ mặt dưới"))
 
     def test_merged_description_and_code_cell_splits_into_x_clusters(self):
         words = [

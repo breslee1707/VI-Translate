@@ -33,6 +33,7 @@ for optional in ("app/fonts", "app/assets"):
 datas += collect_data_files("customtkinter")
 datas += collect_data_files("tkinterdnd2")
 datas += collect_data_files("babeldoc")
+datas += collect_data_files("rapidocr")
 
 hiddenimports = [
     "peewee",
@@ -40,6 +41,9 @@ hiddenimports = [
     "pdf2zh.high_level",
     "pdf2zh.converter",
     "pdf2zh.translator",
+    "pdf2zh.ocr",
+    "rapidocr.main",
+    "rapidocr.inference_engine.onnxruntime",
     # Reached only through pdf2zh.high_level; naming them keeps the compiled
     # extension and its vendored qpdf in the bundle even if that trail changes.
     "pikepdf",

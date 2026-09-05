@@ -132,6 +132,15 @@ def extgstate_is_safe(state: Dict[Any, Any]) -> bool:
     return True
 
 
+def graphic_operand(value: object) -> str:
+    """Serialize array operands without Python commas (not valid PDF syntax)."""
+    if isinstance(value, (list, tuple)):
+        return "[" + " ".join(graphic_operand(item) for item in value) + "]"
+    if isinstance(value, float):
+        return f"{value:f}"
+    return str(value).replace("'", "")
+
+
 class PDFPageInterpreterEx(PDFPageInterpreter):
     """Processor for the content of a PDF page
 
@@ -271,6 +280,22 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
             == apply_matrix_pt(self.ctm, self.curpath[1][-2:])[1]
             and is_black(self.graphicstate.scolor)
         ):
+            page_id = getattr(getattr(self.device, "cur_item", None), "pageid", None)
+            layout = getattr(self.device, "layout", {}).get(page_id)
+            if layout is not None:
+                first = apply_matrix_pt(self.ctm, self.curpath[0][-2:])
+                last = apply_matrix_pt(self.ctm, self.curpath[1][-2:])
+                height, width = layout.shape
+                protected = sum(
+                    layout[int(np.clip(first[1], 0, height-1)),
+                           int(np.clip(first[0] + t * (last[0]-first[0]), 0, width-1))] == 0
+                    for t in (0.1, 0.3, 0.5, 0.7, 0.9)
+                )
+                if protected >= 3:
+                    # A protected table/grid rule stays in the source stream;
+                    # only inline formula rules should travel with reflow.
+                    self.curpath = []
+                    return
             # pdfminer records the raw `w` operand, but the path is drawn
             # under this CTM (TeX scales by 0.1), and the redrawn rule gets no
             # CTM. Bake the scale in or the bar comes out ten times too fat.
@@ -469,16 +494,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                                 name[0] == "T"
                                 or name in ['"', "'", "EI", "MP", "DP", "BMC", "BDC"]
                             ):
-                                p = " ".join(
-                                    [
-                                        (
-                                            f"{x:f}"
-                                            if isinstance(x, float)
-                                            else str(x).replace("'", "")
-                                        )
-                                        for x in args
-                                    ]
-                                )
+                                p = " ".join(graphic_operand(x) for x in args)
                                 ops += f"{p} {name} "
                     else:
                         # log.debug("exec: %s", name)
@@ -489,16 +505,7 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
                         # here rather than in the branch above.
                         self.record_graphic(name, targs)
                         if not (name[0] == "T" or name in ["BI", "ID", "EMC"]):
-                            p = " ".join(
-                                [
-                                    (
-                                        f"{x:f}"
-                                        if isinstance(x, float)
-                                        else str(x).replace("'", "")
-                                    )
-                                    for x in targs
-                                ]
-                            )
+                            p = " ".join(graphic_operand(x) for x in targs)
                             ops += f"{p} {name} "
                 elif settings.STRICT:
                     error_msg = "Unknown operator: %r" % name

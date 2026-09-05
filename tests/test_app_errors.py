@@ -111,6 +111,17 @@ class ScannedDocumentTests(unittest.TestCase):
         )
         self.assertEqual(failure.code, "E-PDF-03")
         self.assertIn("scan", failure.summary.lower())
+        self.assertIn("Bật OCR", failure.advice)
+
+    def test_unsafe_ocr_page_has_specific_fail_closed_advice(self):
+        failure = describe_failure(
+            RuntimeError(
+                "OCR found no text that could be translated safely in form.pdf "
+                "(page 1: preserved (dense rules or form grid))"
+            )
+        )
+        self.assertEqual(failure.code, "E-OCR-07")
+        self.assertIn("giữ nguyên", failure.advice)
 
 
 if __name__ == "__main__":

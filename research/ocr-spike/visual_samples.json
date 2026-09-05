@@ -1,0 +1,24 @@
+{
+  "description": "Real Vietnamese handoff QA; original_page and subset_page are one-based PDF positions, not printed page labels.",
+  "corpus_lock": "tmp/ocr-benchmark/manifest.lock.json",
+  "artifact_root": "tmp/ocr-benchmark/luna-qa-20260905",
+  "samples": [
+    {"id": "nasa-20150014000", "split": "dev", "original_page": 2, "subset_page": 2, "variant": "clean-200", "features": ["two-columns", "bullets", "postal-address"]},
+    {"id": "nasa-19990035925", "split": "dev", "original_page": 2, "subset_page": 2, "variant": "clean-200", "features": ["two-columns", "bullets", "OCR-fragments"]},
+    {"id": "nasa-20060053240", "split": "dev", "original_page": 45, "subset_page": 3, "variant": "clean-200", "control": "selected text-layer PDF", "features": ["formulas", "footnotes", "region-edge-glyphs"]},
+    {"id": "irs-f1040", "split": "dev", "original_page": 1, "subset_page": 1, "variant": "clean-200", "control": "selected text-layer PDF", "features": ["form", "table-grid", "small-font"]},
+    {"id": "loc-whowouldhavethou00burt", "split": "dev", "original_page": 152, "subset_page": 2, "variant": "real-scan", "features": ["aged-paper", "dense-prose", "indents"]},
+    {"id": "loc-layoflastminstre00cot", "split": "dev", "original_page": 89, "subset_page": 2, "variant": "real-scan", "features": ["verse", "stanzas", "handwritten-mark", "aged-paper"]},
+    {"id": "nasa-20190033462", "split": "validation", "original_page": 2, "subset_page": 2, "variant": "clean-200", "features": ["two-columns", "bullets", "postal-address"]},
+    {"id": "nasa-20200002018", "split": "validation", "original_page": 2, "subset_page": 2, "variant": "clean-200", "features": ["two-columns", "bullets"]}
+  ],
+  "acceptance": {
+    "source_immutable": true,
+    "same_page_count_and_canvas": true,
+    "unselected_pages_render_identical": true,
+    "forbidden_markers_or_out_of_canvas_spans": 0,
+    "visual_review_required": true,
+    "coverage_policy": "Report translated, preserved and failed regions separately; zero handoff misses does not imply full-page translation.",
+    "translation_policy": "Agent-authored genuine Vietnamese, fixed exact-src JSONL, immutable formula/style markers; never synthetic English expansions."
+  }
+}

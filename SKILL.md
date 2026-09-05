@@ -1,6 +1,6 @@
 ---
 name: pdf-translate
-description: Translate local, text-based PDFs into Vietnamese or another supported Latin-script language while preserving the original layout, formulas, tables, and figures. Use for PDF translation, batch translation, terminology-sensitive handoff translation, or diagnosing incomplete translated output. Do not use for image-only scans that need OCR or targets requiring CJK, right-to-left, or complex-script shaping.
+description: Translate local PDFs, including safe prose on image-only scans, into Vietnamese or another supported Latin-script language while preserving layout, formulas, tables, and figures. Use for PDF translation, OCR-assisted scan translation, batch translation, terminology-sensitive handoff translation, or diagnosing incomplete output. Do not use for targets requiring CJK, right-to-left, or complex-script shaping.
 license: AGPL-3.0-only
 ---
 
@@ -37,7 +37,9 @@ Default to Google. Offer handoff when the user asks for higher quality, rejects 
 - Use the bundled `pdf2zh/` core. Never substitute the PyPI `pdf2zh` package; the runner checks version `1.9.11` and preservation ruleset `code4life-preservation-v1` and refuses an external core.
 - Google mode sends extracted document text to Google. Tell the user before processing sensitive material and obtain explicit confirmation unless their request already authorizes that disclosure. Handoff mode does not contact Google.
 - Supported targets are the Latin-script codes enforced by `scripts/translate_pdf.py`. CJK, right-to-left, Thai, Devanagari, and other complex-shaping targets are rejected because the bundled font and layout engine cannot render them reliably.
-- There is no OCR. If a source page is image-only, report that OCR is required instead of claiming it was translated.
+- OCR is opt-in with `--ocr standard|enhanced`. It fails closed on unsafe tables,
+  formulas, figures, code and ambiguous reading order; report every preserved
+  region as partial instead of claiming the whole scan was translated.
 - Text inside detected tables, figures, contents pages, indexes, symbol lists, or references may intentionally remain in the source language. Report material untranslated regions as partial translation.
 - Preserve the source. Write results to a separate output directory. Do not pass `--overwrite` without explicit replacement authorization.
 

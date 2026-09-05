@@ -21,6 +21,15 @@ PLACEHOLDER_PATTERN = re.compile(r"</?b\d+>")
 INTERNAL_PLACEHOLDER_PATTERN = re.compile(r"\{\s*v([\d\s]+)\}", re.IGNORECASE)
 PAIRED_PLACEHOLDER_PATTERN = re.compile(r"<b(\d+)></b\1>")
 STYLE_TAG_PATTERN = re.compile(r"<(/?)s([123])>", re.IGNORECASE)
+COMMON_PUNCTUATION_MOJIBAKE = (
+    ("\u00e2\u20ac\u201c", "\u2013"),  # UTF-8 en dash decoded as Windows-1252
+    ("\u00e2\u20ac\u201d", "\u2014"),  # UTF-8 em dash decoded as Windows-1252
+    ("\u00c2\u00a9", "\u00a9"),
+    ("\u00c2\u00ae", "\u00ae"),
+    ("\u00c2\u00b0", "\u00b0"),
+    ("\u00c2\u00b1", "\u00b1"),
+    ("\u00c2\u00b5", "\u00b5"),
+)
 
 
 class FormulaPlaceholderError(ValueError):
@@ -41,6 +50,13 @@ class SegmentTooLongError(ValueError):
 def remove_control_characters(value: str) -> str:
     """Remove control characters that cannot be emitted safely into PDF text."""
     return "".join(character for character in value if unicodedata.category(character)[0] != "C")
+
+
+def repair_common_punctuation_mojibake(value: str) -> str:
+    """Repair only unambiguous punctuation damaged while moving JSONL text."""
+    for damaged, repaired in COMMON_PUNCTUATION_MOJIBAKE:
+        value = value.replace(damaged, repaired)
+    return value
 
 
 NUMBER_ABBREVIATION_PATTERN = re.compile(r"(?<![A-Za-z])no\.(?=\s*\d)")
@@ -252,8 +268,10 @@ def load_segment_table(path: str | None) -> dict[str, str]:
                 continue
             # Old converter versions emitted {vN}; normalise those records so
             # existing handoff files remain usable with the documented tags.
-            source = encode_formula_placeholders(source)
-            translation = encode_formula_placeholders(translation)
+            source = encode_formula_placeholders(repair_common_punctuation_mojibake(source))
+            translation = encode_formula_placeholders(
+                repair_common_punctuation_mojibake(translation)
+            )
             if placeholders(source) != placeholders(translation):
                 logger.warning(
                     "%s line %d: formula placeholders differ between src and dst; "

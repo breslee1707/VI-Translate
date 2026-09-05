@@ -2,6 +2,7 @@ import abc
 import ast
 import logging
 import os
+import sys
 
 import cv2
 import numpy as np
@@ -26,6 +27,16 @@ _BACKEND_PROVIDERS = {
 }
 
 _preferred_backend: str | None = None
+
+
+def can_cache_optimized_graph(
+    providers: list[str], *, frozen: bool | None = None
+) -> bool:
+    """Cache only in a mutable source environment, never inside a release."""
+    if frozen is None:
+        frozen = bool(getattr(sys, "frozen", False))
+    compiled_providers = {"CoreMLExecutionProvider", "TensorrtExecutionProvider"}
+    return not frozen and not compiled_providers.intersection(providers)
 
 
 def set_backend(name: str) -> None:
@@ -102,8 +113,7 @@ class OnnxModel(DocLayoutModel):
 
         # Providers like CoreML generate compiled nodes that cannot be
         # serialized, so only cache the optimized graph for CPU-only.
-        compiled_providers = {"CoreMLExecutionProvider", "TensorrtExecutionProvider"}
-        can_cache = not compiled_providers.intersection(providers)
+        can_cache = can_cache_optimized_graph(providers)
         if can_cache:
             optimized_path = model_path + ".optimized"
             if os.path.exists(optimized_path):

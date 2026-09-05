@@ -45,6 +45,7 @@ from app.update import (  # noqa: E402
 )
 from scripts.translate_pdf import (  # noqa: E402
     DEFAULT_TARGET_LANGUAGE,
+    OCR_MODES,
     TARGET_LANGUAGES,
     load_layout_model,
     preload_layout_model,
@@ -77,6 +78,12 @@ LANGUAGE_NAMES = {
     "ro": "Română", "sk": "Slovenčina", "sl": "Slovenščina", "sq": "Shqip",
     "sv": "Svenska", "sw": "Kiswahili", "tl": "Tagalog", "tr": "Türkçe",
     "vi": "Tiếng Việt",
+}
+
+OCR_NAMES = {
+    "off": "Tắt OCR",
+    "standard": "Tự động (khuyên dùng)",
+    "enhanced": "Nâng cao (chậm)",
 }
 
 STATUS_MARKS = {"queued": "•", "running": "▶", "done": "✓", "partial": "!", "failed": "✕", "skipped": "–"}
@@ -170,6 +177,20 @@ def collect_pdfs(paths: list[Path]) -> list[Path]:
     for path in found:
         unique.setdefault(path.resolve(), None)
     return list(unique)
+
+
+def translation_outcome(result) -> tuple[str, str]:
+    """Return the queue state and an honest, compact coverage summary."""
+    details = []
+    if result.untranslated:
+        details.append(f"{result.untranslated} đoạn chưa dịch được")
+    if result.image_only_pages:
+        pages = ", ".join(str(page + 1) for page in result.image_only_pages)
+        details.append(f"trang scan giữ nguyên: {pages}")
+    if result.ocr_warnings:
+        details.append(f"OCR giữ lại {len(result.ocr_warnings)} vùng/trang không an toàn")
+    partial = bool(details)
+    return ("partial" if partial else "done", "; ".join(details))
 
 
 class QueueRow:
@@ -426,18 +447,36 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.language.set(LANGUAGE_NAMES[DEFAULT_TARGET_LANGUAGE])
         self.language.grid(row=0, column=1, pady=(GAP, PAD), sticky="w")
 
+        ctk.CTkLabel(
+            controls, text="Trang ảnh scan", font=ctk.CTkFont(self.ui_font, size=13)
+        ).grid(row=1, column=0, padx=(GAP, PAD + 2), pady=(0, PAD), sticky="w")
+
+        self.ocr = ctk.CTkOptionMenu(
+            controls, values=[OCR_NAMES[mode] for mode in OCR_MODES],
+            width=200, height=34, font=ctk.CTkFont(self.ui_font, size=13),
+        )
+        self.ocr.set(OCR_NAMES["standard"])
+        self.ocr.grid(row=1, column=1, pady=(0, PAD), sticky="w")
+
         self.translate_button = ctk.CTkButton(
             controls, text="Dịch", width=124, height=40, corner_radius=8,
             command=self._start, font=ctk.CTkFont(self.ui_font, size=14, weight="bold"),
         )
-        self.translate_button.grid(row=0, column=2, rowspan=2, padx=GAP, pady=GAP)
+        self.translate_button.grid(row=0, column=2, rowspan=4, padx=GAP, pady=GAP)
+
+        ctk.CTkLabel(
+            controls,
+            text="OCR thử nghiệm: bảng, công thức và hình không an toàn sẽ được giữ nguyên.",
+            anchor="w", justify="left", font=ctk.CTkFont(self.ui_font, size=11),
+            text_color=MUTED,
+        ).grid(row=2, column=0, columnspan=2, padx=GAP, pady=(0, PAD), sticky="w")
 
         self.overwrite = ctk.CTkCheckBox(
             controls, text="Ghi đè file đã dịch trước đó",
             checkbox_width=18, checkbox_height=18,
             font=ctk.CTkFont(self.ui_font, size=12),
         )
-        self.overwrite.grid(row=1, column=0, columnspan=2, padx=GAP, pady=(0, GAP), sticky="w")
+        self.overwrite.grid(row=3, column=0, columnspan=2, padx=GAP, pady=(0, GAP), sticky="w")
 
     def _build_queue(self) -> None:
         # A separate header, because CTkScrollableFrame's label_text cannot hold
@@ -728,6 +767,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
         names = {name: code for code, name in LANGUAGE_NAMES.items()}
         language = names[self.language.get()]
+        ocr_names = {name: mode for mode, name in OCR_NAMES.items()}
+        ocr = ocr_names[self.ocr.get()]
         overwrite = bool(self.overwrite.get())
 
         self.translate_button.configure(state="disabled", text="Đang dịch…")
@@ -744,11 +785,13 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.batch_done, self.batch_total = 0, len(pending)
         self.worker = threading.Thread(
-            target=self._run, args=(pending, language, overwrite), daemon=True
+            target=self._run, args=(pending, language, overwrite, ocr), daemon=True
         )
         self.worker.start()
 
-    def _run(self, files: list[Path], language: str, overwrite: bool) -> None:
+    def _run(
+        self, files: list[Path], language: str, overwrite: bool, ocr: str
+    ) -> None:
         for index, path in enumerate(files, 1):
             self.events.put(("status", path, "running", "", None))
             destination = path.parent / "translated"
@@ -763,13 +806,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     target_language=language,
                     overwrite=overwrite,
                     on_progress=report,
+                    ocr=ocr,
                 )
-                detail = (
-                    f"{result.untranslated} đoạn chưa dịch được"
-                    if result.untranslated
-                    else str(result.path)
-                )
-                state = "partial" if result.untranslated else "done"
+                state, detail = translation_outcome(result)
                 self.events.put(("status", path, state, detail, result.path))
             except Exception as error:  # noqa: BLE001 - keep the queue moving
                 # One unreadable or already-translated file must not stop the batch.
@@ -980,8 +1019,10 @@ def verify_engine() -> None:
     import pdf2zh.high_level  # noqa: F401 - pulls pikepdf, pymupdf and qpdf
     import pikepdf._core  # noqa: F401 - the extension that failed on its own
     import pymupdf  # noqa: F401
+    from pdf2zh.ocr import verify_ocr_runtime
 
     load_layout_model()
+    verify_ocr_runtime()
 
 
 def main() -> None:

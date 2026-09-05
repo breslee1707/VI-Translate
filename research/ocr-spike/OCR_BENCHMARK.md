@@ -49,11 +49,95 @@ or partial in the CLI.
 
 Visual QA found that partial inpainting is unsafe on pages containing formulas,
 nomenclature, forms, dense rules or protected layout regions. The experimental
-CLI now keeps those pages byte-for-byte unchanged and reports a partial result;
+CLI keeps those pages visually unchanged and reports a partial result;
 it only cleans a page when OCR and layout safety checks both pass. This is a
 fail-safe research mode, not a claim that arbitrary scans are production-ready.
-Multi-column pages, code-heavy pages, mojibake, standalone markers and pages
-with more than 24 OCR lines are also preserved until region-aware reflow has a
-separate regression suite. A real Vietnamese smoke render is kept under
+Code-heavy pages and mojibake remain protected. Multi-column and dense prose
+now require explicit owned paragraph bounds; numbered verse and postal rows
+keep physical line breaks. A previous real Vietnamese smoke render is kept under
 `tmp/ocr-benchmark/qa-real-vietnamese-v2/`; it has no residual source ink,
 replacement glyphs or out-of-canvas spans.
+
+## Real Vietnamese visual regression batch
+
+`visual_samples.json` pins eight development/validation pages and their
+one-based original/subset page mapping. Artifacts and genuine Luna handoff
+tables are under `tmp/ocr-benchmark/luna-qa-20260905/`. Never substitute the old
+`qa-sol*/table.jsonl` synthetic English expansions for these translations.
+
+The batch found and reproduced false OCR paragraph breaks, clipped initial
+glyphs in a text-PDF control, postal rows assigned to the following row, and
+layout detection failure on high-resolution historical scans. The corresponding
+regressions are in `test_ocr.py` and `test_inline_formula_layout.py`. Intermediate
+folders are evidence, not approved deliverables; consult the latest visual
+review before selecting a PDF.
+
+Run the reusable structural audit after rebuilding a sample:
+
+```powershell
+.\.venv\Scripts\python.exe research\ocr-spike\audit_translation.py SOURCE.pdf OUTPUT.pdf --pages 2 --report NEW_RUN\audit.json --translations TABLE.jsonl --render-dir NEW_RUN\renders
+```
+
+It hashes source/output/table, checks every page/canvas, verifies unselected
+pages remain raster-identical, searches for invalid glyphs/markers and reports
+overlapping span candidates. It renders every page with Poppler when requested.
+The structural gate is not a visual or translation-coverage certificate:
+formula footnotes, protected headings and dense form grids may remain English.
+Report translated content and protected content separately, even with zero
+missing handoff mappings.
+
+The latest preservation review also caught shifted protected form labels,
+missing rules and changed dash lengths. Source glyph replay and valid PDF
+array serialization are covered by an exact-raster form regression. IRS OCR
+still refuses the dense form; an unchanged preservation control is **not** a
+translated sample. Aged-paper cleanup now uses bounded blank-paper estimation;
+the LOC samples retain faint cleanup-band boundaries and are not a claim of
+flawless photographic restoration.
+
+### Review checkpoint (2026-09-05)
+
+`output/pdf/ocr-review-20260905/` collects the immutable-source pointers,
+fixed translation tables, per-run audits and source/output page images.
+NASA 2015/1999 use `final-r4`, validation NASA 2019/2020 use
+`validation-final-r3`, LOC uses `final-r7`, and the text-formula control uses
+`after-protection-fix/rerun`. The IRS `dash-fix` preservation control is kept
+separately and contributes zero translated pages. Seven selected pages have
+real Vietnamese output; this does not mean seven entire source documents
+were translated. Only the selected page in each retained subset was processed.
+
+Manual image review accepts the NASA column/address geometry and the text-PDF
+formula geometry. LOC has legible Vietnamese, preserved stanza/line structure
+and retained handwritten marks, but its paper-band boundaries remain a visual
+limitation. IRS retains all 449 drawings and 298 line segments on page 1,
+including exactly matching dash patterns. This validates preservation only,
+not OCR table-cell translation. The two validation pages are NASA prose;
+unseen historical scans and OCR formula/table translation are not certified.
+
+## Ganong physiology stress set (2026-09-05)
+
+The local 727-page Ganong source is locked by SHA-256 under
+`tmp/ganong-qa-20260905/`. A 12-page derived set maps original pages
+1, 2, 9, 13, 67, 107, 171, 279, 464, 613, 701 and 727 to a compact sample.
+It covers an image-only cover, 51x3 and 36x4 tables, TOC, chapter opener and
+bullets, dense figures, a clinical box, math/subscripts, an alveolar-gas
+equation, three-column index and a `/Rotate 90` 21x25 landscape table.
+
+The text-layer run uses 184 fixed Vietnamese handoff records. The structural
+audit passes with equal page count/canvases, no forbidden markers and no spans
+outside text-coordinate bounds. TOC, index, image-only and the landscape
+appendix are preserved, not counted as translated. A separate raster of
+original page 346 verifies safe two-column OCR; 13/13 segments translate after
+the heading-rule false positive is removed. Raster versions of the 12 hardest
+pages all fail closed because they contain grids, protected figures, formulas,
+fragmented OCR, TOC/index structure or residual cover ink. This is the expected
+safety result, not OCR coverage success.
+
+A separate validation set uses original pages 50, 56, 78, 234, 332 and 451,
+which were not used to choose or tune the Ganong fixes. Its Google translation
+is layout-stress evidence only, not the fixed translation oracle. All six
+rendered pages passed manual review for table/figure/clinical-box/two-column
+geometry, and the structural audit found no markers or out-of-canvas spans.
+On raster page 346, enhanced OCR took about 123 seconds versus 11.5 seconds for
+standard (10.7x slower), while normalized text was only 99.96% similar and the
+enhanced run introduced a whitespace split and a dash difference. Standard
+remains the practical profile; enhanced is not presented as a quality upgrade.

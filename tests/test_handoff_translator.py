@@ -14,6 +14,7 @@ from pdf2zh.translator import (
     encode_formula_placeholders,
     load_segment_table,
     normalise_number_abbreviation,
+    repair_common_punctuation_mojibake,
     placeholders,
     restore_formula_placeholders,
     validate_style_tags,
@@ -29,6 +30,21 @@ def _jsonl(path: Path, records: list[dict]) -> Path:
 
 
 class SegmentTableTests(unittest.TestCase):
+    def test_repairs_unambiguous_punctuation_mojibake_in_handoff_jsonl(self):
+        damaged = "13\u00e2\u20ac\u201c39 units; \u00c2\u00a9 source"
+        self.assertEqual(
+            repair_common_punctuation_mojibake(damaged),
+            "13–39 units; © source",
+        )
+        path = _jsonl(
+            self.root / "punctuation.jsonl",
+            [{"src": damaged, "dst": "13\u00e2\u20ac\u201c39 đơn vị; \u00c2\u00a9 nguồn"}],
+        )
+        self.assertEqual(
+            load_segment_table(str(path)),
+            {"13–39 units; © source": "13–39 đơn vị; © nguồn"},
+        )
+
     def setUp(self) -> None:
         self.temp_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_directory.name)

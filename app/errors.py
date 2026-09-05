@@ -39,6 +39,14 @@ class Failure:
 # when any marker appears in the chain's type names or messages.
 _RULES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     (
+        "E-OCR-07",
+        ("OCR dependencies are missing", "OCR found no text that could be translated safely",
+         "OCR failed", "could not encode cleaned raster"),
+        "OCR không thể xử lý trang scan an toàn",
+        "Ứng dụng đã giữ nguyên trang để tránh làm hỏng bảng, công thức hoặc hình. "
+        "Thử chế độ OCR Chuẩn; nếu vẫn lỗi, dùng PDF có lớp chữ hoặc gửi báo cáo này.",
+    ),
+    (
         "E-CORE-01",
         ("pikepdf", "_core", "extension library", "DLL load failed",
          "ImportError", "ModuleNotFoundError"),
@@ -72,8 +80,8 @@ _RULES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
         "E-PDF-03",
         ("scanned", "image-only", "OCR", "no extractable text"),
         "PDF chỉ chứa ảnh scan",
-        "Ứng dụng không có OCR nên không đọc được chữ trong ảnh. Cần bản PDF "
-        "có chữ thật (text-based).",
+        "Bật OCR Tự động trong ứng dụng. Vùng bảng, công thức hoặc hình không an "
+        "toàn sẽ được giữ nguyên và kết quả được báo là dịch một phần.",
     ),
     (
         "E-NET-04",

@@ -35,9 +35,11 @@ Write-Host "==> Installing app and packaging dependencies" -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { throw "pip install failed with exit code $LASTEXITCODE" }
 
 if (-not $SkipAssets) {
-    Write-Host "==> Fetching the layout model and font to bundle" -ForegroundColor Cyan
+    Write-Host "==> Fetching layout, font and OCR assets to bundle" -ForegroundColor Cyan
     & $python (Join-Path $root "scripts\fetch_assets.py")
     if ($LASTEXITCODE -ne 0) { throw "fetch_assets.py failed with exit code $LASTEXITCODE" }
+    & $python (Join-Path $root "scripts\fetch_ocr_assets.py")
+    if ($LASTEXITCODE -ne 0) { throw "fetch_ocr_assets.py failed with exit code $LASTEXITCODE" }
 }
 
 Write-Host "==> Running PyInstaller" -ForegroundColor Cyan
@@ -66,9 +68,26 @@ if (-not $SkipAssets -or (Test-Path (Join-Path $root "app\assets\doclayout.onnx"
     $required += "_internal\app\assets\doclayout.onnx"
     $required += "_internal\app\assets\GoNotoKurrent-Regular.ttf"
 }
+if (-not $SkipAssets) {
+    $required += "_internal\rapidocr\models\PP-OCRv6_det_small.onnx"
+    $required += "_internal\rapidocr\models\PP-OCRv6_rec_small.onnx"
+    $required += "_internal\rapidocr\models\PP-OCRv6_det_medium.onnx"
+    $required += "_internal\rapidocr\models\PP-OCRv6_rec_medium.onnx"
+    $required += "_internal\rapidocr\models\ch_ppocr_mobile_v2.0_cls_mobile.onnx"
+}
 $missing = $required | Where-Object { -not (Test-Path (Join-Path $output $_)) }
 if ($missing) {
     throw "Incomplete build, refusing to package. Missing:`n  " + ($missing -join "`n  ")
+}
+
+Write-Host "==> Smoke-testing the packaged executable" -ForegroundColor Cyan
+$smoke = Start-Process -FilePath (Join-Path $output "PDFTranslate.exe") `
+    -ArgumentList "--smoke-test" -WindowStyle Hidden -Wait -PassThru
+if ($smoke.ExitCode -ne 0) { throw "Packaged smoke test failed with exit code $($smoke.ExitCode)" }
+$optimized = Get-ChildItem $output -Recurse -Filter "*.optimized"
+if ($optimized) {
+    throw "Packaged app wrote hardware-specific optimized models:`n  " + `
+        (($optimized | ForEach-Object FullName) -join "`n  ")
 }
 
 $archive = Join-Path $root "dist\PDFTranslate-windows.zip"

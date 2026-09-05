@@ -3,12 +3,14 @@
 import asyncio
 import io
 import logging
+import math
 import os
 import re
 import sys
 import tempfile
 from asyncio import CancelledError
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
@@ -175,6 +177,42 @@ def pymupdf_can_round_trip(path: Path) -> bool:
     return True
 
 
+def apply_ocr_region_ownership(
+    layout: np.ndarray,
+    class_bounds: dict[int, tuple[float, float, float, float]],
+    regions: Iterable[object],
+    next_class: int,
+    line_bounds: dict | None = None,
+) -> int:
+    """Pin OCR line boxes to the exact layout region that approved them."""
+    height, width = layout.shape
+    for region in regions:
+        bounds = tuple(float(value) for value in region.bbox)
+        if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+            continue
+        painted = False
+        for line_box in region.line_boxes:
+            x0, y0, x1, y1 = (float(value) for value in line_box)
+            bx0 = int(np.clip(math.floor(x0 - 1), 0, width - 1))
+            by0 = int(np.clip(math.floor(y0 - 1), 0, height - 1))
+            bx1 = int(np.clip(math.ceil(x1 + 1), 0, width))
+            by1 = int(np.clip(math.ceil(y1 + 1), 0, height))
+            if bx1 <= bx0 or by1 <= by0:
+                continue
+            target = layout[by0:by1, bx0:bx1]
+            # A second layout pass may find a protected structure that the
+            # OCR-resolution pass missed. Ownership never overrides it.
+            writable = target != 0
+            target[writable] = next_class
+            painted = painted or bool(writable.any())
+        if painted:
+            class_bounds[next_class] = bounds
+            if line_bounds is not None:
+                line_bounds[next_class] = bounds
+            next_class += 1
+    return next_class
+
+
 def check_files(files: List[str]) -> List[str]:
     files = [
         f for f in files if not f.startswith("http://")
@@ -208,6 +246,7 @@ def translate_patch(
     style_fonts: Dict | None = None,
     synthetic_styles: set[int] | None = None,
     skip_backing_pages: set[int] | None = None,
+    ocr_regions_by_page: Dict | None = None,
     **kwarg: Any,
 ) -> None:
     rsrcmgr = PDFResourceManager()
@@ -217,8 +256,10 @@ def translate_patch(
     # layout_bounds because that one marks a table cell and changes how a
     # paragraph is fitted. This is only a measure to compare line ends against.
     class_bounds = {}
+    ocr_paragraph_classes = {}
     scanned_pages = set()
     skip_backing_pages = skip_backing_pages or set()
+    ocr_regions_by_page = ocr_regions_by_page or {}
     pages_with_images = set()
     device = TranslateConverter(
         rsrcmgr,
@@ -239,6 +280,7 @@ def translate_patch(
         style_fonts,
         synthetic_styles,
         class_bounds,
+        ocr_paragraph_classes,
     )
 
     assert device is not None
@@ -513,7 +555,28 @@ def translate_patch(
                 )
                 box[:, :] = 0
 
+            if box.any() and pageno in ocr_regions_by_page:
+                first_ocr_class = next_class
+                next_class = apply_ocr_region_ownership(
+                    box,
+                    page_class_bounds,
+                    ocr_regions_by_page[pageno],
+                    next_class,
+                    layout_bounds.setdefault(pageno, {}),
+                )
+                ocr_paragraph_classes[pageno] = set(range(first_ocr_class, next_class))
+
             layout[page.pageno] = box
+            # A page classified as wholly protected has nothing to translate.
+            # Leave its original content stream intact instead of decomposing
+            # every glyph into new operators. That replay is unnecessary and
+            # changes the effective orientation on pages with /Rotate 90.
+            if not box.any():
+                if pageno in scanned_pages:
+                    device.scanned_pages.add(pageno)
+                if pageno in pages_with_images:
+                    device.pages_with_images.add(pageno)
+                continue
             if pageno in scanned_pages:
                 device.scanned_pages.add(pageno)
             if pageno in pages_with_images:
@@ -552,6 +615,7 @@ def translate_stream(
     create_dual: bool = True,
     ignore_cache: bool = False,
     skip_backing_pages: set[int] | None = None,
+    ocr_regions_by_page: Dict | None = None,
     **kwarg: Any,
 ):
     source_size = len(stream)
@@ -715,6 +779,7 @@ def translate(
     skip_subset_fonts: bool = False,
     ignore_cache: bool = False,
     skip_backing_pages: set[int] | None = None,
+    ocr_regions_by_page: Dict | None = None,
     **kwarg: Any,
 ):
     if not files:

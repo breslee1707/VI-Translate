@@ -10,6 +10,7 @@ copy. Protected structures never enter the cleanup mask.
 from __future__ import annotations
 
 import math
+import re
 import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -70,11 +71,32 @@ class OcrLine:
         return min(xs), min(ys), max(xs), max(ys)
 
 
+@dataclass(frozen=True)
+class OcrLayoutRegion:
+    """One layout-model region in the OCR raster coordinate system."""
+
+    name: str
+    bbox: tuple[float, float, float, float]
+    confidence: float
+
+
+@dataclass(frozen=True)
+class OcrReflowRegion:
+    """A PDF-space region and the OCR line boxes it exclusively owns."""
+
+    bbox: tuple[float, float, float, float]
+    line_boxes: tuple[tuple[float, float, float, float], ...]
+    preserve_line_breaks: bool = False
+
+
 @dataclass
 class OcrPreparation:
     sidecar: Path
     cleaned_images: dict[int, bytes] = field(default_factory=dict)
     lines_by_page: dict[int, tuple[OcrLine, ...]] = field(default_factory=dict)
+    reflow_regions_by_page: dict[int, tuple[OcrReflowRegion, ...]] = field(
+        default_factory=dict
+    )
     pages: tuple[int, ...] = ()
     recognised_lines: int = 0
     inserted_lines: int = 0
@@ -135,6 +157,17 @@ def load_ocr_engine(mode: str) -> Callable[[np.ndarray], Any]:
         return engine
 
 
+def verify_ocr_runtime() -> None:
+    """Load both packaged profiles so missing modules or models fail smoke tests."""
+    sample = np.full((64, 192, 3), 255, dtype=np.uint8)
+    cv2.putText(
+        sample, "OCR", (8, 46), cv2.FONT_HERSHEY_SIMPLEX, 1.2,
+        (0, 0, 0), 2, cv2.LINE_AA,
+    )
+    for mode in ("standard", "enhanced"):
+        load_ocr_engine(mode)(sample)
+
+
 def _normalise_result(result: Any) -> list[OcrLine]:
     boxes = getattr(result, "boxes", None)
     texts = getattr(result, "txts", None)
@@ -167,17 +200,33 @@ def _reading_order(lines: Iterable[OcrLine], page_width: float) -> list[OcrLine]
     if len(items) < 4:
         return sorted(items, key=lambda line: (line.bbox[1], line.bbox[0]))
     midpoint = page_width / 2.0
-    left = [line for line in items if (line.bbox[0] + line.bbox[2]) / 2 < midpoint]
-    right = [line for line in items if line not in left]
-    straddling = sum(
-        1
+    left = [
+        line
         for line in items
-        if line.bbox[0] < midpoint * 0.8 and line.bbox[2] > midpoint * 1.2
-    )
-    if len(left) >= 3 and len(right) >= 3 and straddling <= max(1, len(items) // 10):
-        return sorted(left, key=lambda line: (line.bbox[1], line.bbox[0])) + sorted(
-            right, key=lambda line: (line.bbox[1], line.bbox[0])
-        )
+        if line.bbox[2] < midpoint
+    ]
+    right = [
+        line
+        for line in items
+        if line.bbox[0] > midpoint
+    ]
+    if len(left) >= 3 and len(right) >= 3:
+        remaining = [line for line in items if line not in left and line not in right]
+        column_top = min(line.bbox[1] for line in left + right)
+        column_bottom = max(line.bbox[3] for line in left + right)
+        top = [line for line in remaining if line.bbox[3] <= column_top]
+        bottom = [line for line in remaining if line.bbox[1] >= column_bottom]
+        middle = [line for line in remaining if line not in top and line not in bottom]
+        if not middle:
+            def key(line: OcrLine) -> tuple[float, float]:
+                return line.bbox[1], line.bbox[0]
+
+            return (
+                sorted(top, key=key)
+                + sorted(left, key=key)
+                + sorted(right, key=key)
+                + sorted(bottom, key=key)
+            )
     return sorted(items, key=lambda line: (line.bbox[1], line.bbox[0]))
 
 
@@ -186,23 +235,51 @@ def _line_rotation(line: OcrLine) -> float:
     return abs(math.degrees(math.atan2(second[1] - first[1], second[0] - first[0])))
 
 
+def _merge_ocr_line_fragments(lines: Sequence[OcrLine]) -> list[OcrLine]:
+    """Join adjacent pieces of one baseline before choosing a region owner."""
+    result: list[OcrLine] = []
+    for row in _physical_ocr_rows(lines):
+        for line in sorted(row, key=lambda item: item.bbox[0]):
+            if result:
+                previous = result[-1]
+                a, b = previous.bbox, line.bbox
+                overlap = min(a[3], b[3]) - max(a[1], b[1])
+                height = min(a[3] - a[1], b[3] - b[1])
+                gap = b[0] - a[2]
+                if (overlap > height * 0.6 and 0 <= gap <= height * 0.6
+                        and not _is_standalone_marker(previous.text)
+                        and not _is_standalone_marker(line.text)):
+                    x0, y0, x1, y1 = min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])
+                    result[-1] = OcrLine(previous.text.rstrip() + " " + line.text.lstrip(),
+                                         ((x0, y0), (x1, y0), (x1, y1), (x0, y1)),
+                                         min(previous.confidence, line.confidence))
+                    continue
+            result.append(line)
+    return result
+
+
 def _is_standalone_marker(text: str) -> bool:
     clean = text.strip()
     return bool(clean) and all(character in OCR_MARKER_CHARACTERS for character in clean)
 
 
-def _protected_boxes(model: object, image: np.ndarray) -> list[tuple[float, float, float, float]]:
+def _layout_regions(model: object, image: np.ndarray) -> list[OcrLayoutRegion]:
     prediction = model.predict(
-        image[:, :, ::-1], imgsz=max(32, int(image.shape[0] / 32) * 32)
+        image[:, :, ::-1], imgsz=min(1024, max(32, int(image.shape[0] / 32) * 32))
     )[0]
-    protected = []
+    regions = []
     for detection in prediction.boxes:
         name = prediction.names[int(detection.cls)]
-        if name not in PROTECTED_LAYOUT_CLASSES:
-            continue
         x0, y0, x1, y1 = (float(value) for value in detection.xyxy.squeeze())
-        protected.append((x0, y0, x1, y1))
-    return protected
+        confidence = float(getattr(detection, "conf", 1.0))
+        regions.append(OcrLayoutRegion(name, (x0, y0, x1, y1), confidence))
+    return regions
+
+
+def _protected_boxes(
+    regions: Sequence[OcrLayoutRegion],
+) -> list[tuple[float, float, float, float]]:
+    return [region.bbox for region in regions if region.name in PROTECTED_LAYOUT_CLASSES]
 
 
 def _overlap_fraction(
@@ -222,6 +299,24 @@ def _overlap_fraction(
 
 
 def _ink_mask(image: np.ndarray, line: OcrLine) -> np.ndarray | None:
+    """Inspect a padded line crop instead of reprocessing a whole scan."""
+    x0, y0, x1, y1 = line.bbox
+    margin = max(8, int((y1 - y0) * 0.1) + 4)
+    left, top = max(0, int(x0) - margin), max(0, int(y0) - margin)
+    right = min(image.shape[1], int(math.ceil(x1)) + margin)
+    bottom = min(image.shape[0], int(math.ceil(y1)) + margin)
+    if right <= left or bottom <= top:
+        return None
+    local = OcrLine(line.text, tuple((x-left, y-top) for x, y in line.polygon), line.confidence)
+    mask = _local_ink_mask(image[top:bottom, left:right], local)
+    if mask is None:
+        return None
+    result = np.zeros(image.shape[:2], dtype=np.uint8)
+    result[top:bottom, left:right] = mask
+    return result
+
+
+def _local_ink_mask(image: np.ndarray, line: OcrLine) -> np.ndarray | None:
     """Return a glyph-shaped mask, refusing boxes that cannot be isolated safely."""
     height, width = image.shape[:2]
     polygon = np.rint(np.asarray(line.polygon)).astype(np.int32)
@@ -278,6 +373,8 @@ def _page_safety_reasons(
     lines: Sequence[OcrLine],
     protected: Sequence[tuple[float, float, float, float]],
     page_decision: Any,
+    *,
+    region_ownership_proven: bool = False,
 ) -> list[str]:
     """Identify page-level structures that must never be partially erased."""
     reasons: list[str] = []
@@ -294,7 +391,7 @@ def _page_safety_reasons(
 
     if any(any(marker in line.text for marker in MOJIBAKE_MARKERS) for line in lines):
         reasons.append("damaged OCR characters")
-    if _has_multiple_columns(lines, image.shape[1]):
+    if _has_multiple_columns(lines, image.shape[1]) and not region_ownership_proven:
         reasons.append("multi-column OCR ownership")
 
     short_lines = sum(len(line.text) <= 3 for line in lines)
@@ -303,7 +400,7 @@ def _page_safety_reasons(
         reasons.append("fragmented OCR lines")
     if lines and one_character_lines / len(lines) > 0.08:
         reasons.append("single-character OCR fragments")
-    if len(lines) > MAX_SAFE_OCR_LINES:
+    if len(lines) > MAX_SAFE_OCR_LINES and not region_ownership_proven:
         reasons.append("too many OCR lines for safe reflow")
 
     formula_chars = sum(
@@ -333,7 +430,8 @@ def _page_safety_reasons(
         polygon[:, 0] = np.clip(polygon[:, 0], 0, image.shape[1] - 1)
         polygon[:, 1] = np.clip(polygon[:, 1], 0, image.shape[0] - 1)
         cv2.fillConvexPoly(text_boxes, polygon, 255)
-    if np.count_nonzero(text_boxes) / max(1, text_boxes.size) > MAX_TEXT_BOX_COVERAGE:
+    if (np.count_nonzero(text_boxes) / max(1, text_boxes.size) > MAX_TEXT_BOX_COVERAGE
+            and not region_ownership_proven):
         reasons.append("dense text without reflow headroom")
 
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
@@ -357,8 +455,14 @@ def _page_safety_reasons(
                 count += component_height >= image.shape[0] * 0.20 and component_width <= image.shape[1] * 0.02
         return count
 
-    rule_count = long_components(horizontal, True) + long_components(vertical, False)
-    if rule_count >= 2:
+    horizontal_rules = long_components(horizontal, True)
+    vertical_rules = long_components(vertical, False)
+    # Two independent heading underlines are common on an ordinary two-column
+    # textbook page. Treat them as typography, not as a form grid. Three
+    # horizontal rules, two vertical rules, or a crossing pair still closes
+    # the page before any source pixels can be erased.
+    if (horizontal_rules >= 3 or vertical_rules >= 2
+            or (horizontal_rules >= 1 and vertical_rules >= 1)):
         reasons.append("dense rules or form grid")
     return list(dict.fromkeys(reasons))
 
@@ -397,6 +501,206 @@ def _has_multiple_columns(lines: Sequence[OcrLine], page_width: int) -> bool:
     return smaller_span > 0 and overlap / smaller_span >= 0.25
 
 
+def _owned_reflow_regions(
+    lines: Sequence[OcrLine],
+    layout_regions: Sequence[OcrLayoutRegion],
+    page_width: float,
+    page_height: float,
+    scale: float,
+    paragraph_starts: set[tuple[float, float, float, float]] | None = None,
+    preserve_lines: bool = False,
+) -> tuple[OcrReflowRegion, ...] | None:
+    """Assign every OCR line to one model region and return reading-order hints.
+
+    A multi-column sidecar is safe only when the exact regions used to approve
+    it also reach the converter. Choosing the highest-confidence box mirrors
+    ``high_level.translate_patch`` where stronger detections overwrite weaker
+    overlapping boxes. Lines without an owner make the proof fail closed.
+    """
+    candidates = [
+        region
+        for region in layout_regions
+        if region.name not in PROTECTED_LAYOUT_CLASSES
+        and region.bbox[2] > region.bbox[0]
+        and region.bbox[3] > region.bbox[1]
+    ]
+    if not lines or not candidates or page_width <= 0 or page_height <= 0:
+        return None
+
+    owned: dict[OcrLayoutRegion, list[OcrLine]] = {}
+    for line in lines:
+        x0, y0, x1, y1 = line.bbox
+        center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+        # Model boxes approximate ink, not exact PDF glyph extents. A quarter
+        # line-height tolerates a clipped ascender or short edge word without
+        # admitting a line that runs across the column gutter.
+        padding = max(2.0, (y1 - y0) * 0.25)
+        matches = [
+            region
+            for region in candidates
+            if _overlap_fraction(line.bbox, [(
+                region.bbox[0] - padding, region.bbox[1] - padding,
+                region.bbox[2] + padding, region.bbox[3] + padding,
+            )]) >= 0.95
+            and region.bbox[0] <= center[0] <= region.bbox[2]
+            and region.bbox[1] <= center[1] <= region.bbox[3]
+        ]
+        if not matches:
+            return None
+        owner = max(matches, key=lambda region: region.confidence)
+        owned.setdefault(owner, []).append(line)
+
+    regions = list(owned)
+    if _has_multiple_columns(lines, int(page_width)):
+        midpoint = page_width / 2.0
+        column_regions = [
+            region
+            for region in regions
+            if not (region.bbox[0] < midpoint < region.bbox[2])
+        ]
+        if not column_regions:
+            return None
+        column_top = min(region.bbox[1] for region in column_regions)
+        column_bottom = max(region.bbox[3] for region in column_regions)
+        ambiguous = [
+            region
+            for region in regions
+            if region.bbox[0] < midpoint < region.bbox[2]
+            and not (region.bbox[3] <= column_top or region.bbox[1] >= column_bottom)
+        ]
+        if ambiguous:
+            return None
+
+        def region_key(region: OcrLayoutRegion) -> tuple[int, float, float]:
+            x0, y0, x1, y1 = region.bbox
+            if x0 < midpoint < x1:
+                band = 0 if y1 <= column_top else 3
+            else:
+                band = 1 if (x0 + x1) / 2.0 < midpoint else 2
+            return band, y0, x0
+
+        regions.sort(key=region_key)
+    else:
+        regions.sort(key=lambda region: (region.bbox[1], region.bbox[0]))
+
+    def pdf_box(
+        bbox: tuple[float, float, float, float],
+    ) -> tuple[float, float, float, float]:
+        x0, y0, x1, y1 = bbox
+        return (
+            x0 * scale,
+            page_height - y1 * scale,
+            x1 * scale,
+            page_height - y0 * scale,
+        )
+
+    result = []
+    for region in regions:
+        groups = _split_ocr_paragraphs(owned[region], region.bbox, paragraph_starts)
+        rows = []
+        for group in groups:
+            keep_lines = preserve_lines or _is_postal_address(group)
+            rows.extend(((row, True) for row in _physical_ocr_rows(group)) if keep_lines else [(group, False)])
+        for group, keep_lines in rows:
+            x0, y0, x1, y1 = region.bbox
+            # Model list boxes include the bullet gutter. Continuation lines
+            # own the prose edge, not the marker's x coordinate.
+            x0 = min(line.bbox[0] for line in group)
+            x1 = max(x1, max(line.bbox[2] for line in group))
+            if len(rows) > 1:
+                y0 = min(line.bbox[1] for line in group)
+                y1 = max(line.bbox[3] for line in group)
+            if keep_lines:
+                x0 = group[0].bbox[0]
+            result.append(OcrReflowRegion(
+                pdf_box((x0, y0, x1, y1)),
+                tuple(pdf_box(line.bbox) for line in group),
+                preserve_line_breaks=keep_lines,
+            ))
+    return tuple(result)
+
+
+def _is_postal_address(lines: Sequence[OcrLine]) -> bool:
+    """A postal block's physical lines are semantic, unlike wrapped prose."""
+    text = "\n".join(line.text for line in lines)
+    return bool(
+        2 <= len(lines) <= 8
+        and re.search(r"\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b", text)
+        and re.search(r"\b(?:mail\s*stop|P\.?\s*O\.?\s*box|street|avenue|road|drive|write\s+to)\b", text, re.IGNORECASE)
+    )
+
+
+def _physical_ocr_rows(lines: Sequence[OcrLine]) -> list[list[OcrLine]]:
+    """Keep horizontally split OCR fragments together on their source row."""
+    rows: list[list[OcrLine]] = []
+    for line in sorted(lines, key=lambda item: (item.bbox[1], item.bbox[0])):
+        if rows:
+            previous = rows[-1][0].bbox
+            overlap = min(previous[3], line.bbox[3]) - max(previous[1], line.bbox[1])
+            if overlap > 0.5 * min(previous[3] - previous[1], line.bbox[3] - line.bbox[1]):
+                rows[-1].append(line)
+                rows[-1].sort(key=lambda item: item.bbox[0])
+                continue
+        rows.append([line])
+    return rows
+
+
+def _split_ocr_paragraphs(
+    lines: Sequence[OcrLine],
+    bounds: tuple[float, float, float, float],
+    paragraph_starts: set[tuple[float, float, float, float]] | None = None,
+) -> list[list[OcrLine]]:
+    """Find real paragraph gaps before sidecar font metrics can distort them."""
+    ordered = sorted(lines, key=lambda line: (line.bbox[1], line.bbox[0]))
+    if not ordered:
+        return []
+    ink_height = float(np.median([line.bbox[3] - line.bbox[1] for line in ordered]))
+    groups = [[ordered[0]]]
+    for previous, current in zip(ordered, ordered[1:]):
+        gap = current.bbox[1] - previous.bbox[3]
+        indented = current.bbox[0] - bounds[0] > ink_height
+        short_end = previous.bbox[2] < bounds[0] + 0.75 * (bounds[2] - bounds[0])
+        sentence_end = previous.text.rstrip().endswith(('.', '!', '?', ':'))
+        if (current.bbox in (paragraph_starts or set())
+                or gap > ink_height or (indented and short_end and sentence_end)):
+            groups.append([])
+        groups[-1].append(current)
+    return groups
+
+
+def _is_verse_layout(lines: Sequence[OcrLine]) -> bool:
+    """Conservative evidence for numbered stanzas, not arbitrary short prose."""
+    stanzas = sum(bool(re.fullmatch(r"[IVXLCDM]+\.", line.text.strip())) for line in lines)
+    body = [line.text.strip() for line in lines if len(line.text.split()) >= 3]
+    return bool(stanzas >= 2 and len(body) >= 12
+                and sum(text[0].isupper() for text in body) / len(body) >= 0.85
+                and np.median([len(text.split()) for text in body]) <= 12
+                and sum(text[-1] in ",;:.!?—" for text in body) / len(body) >= 0.65)
+
+
+def _raster_bullet_starts(image: np.ndarray, lines: Sequence[OcrLine]) -> set:
+    """Find compact round markers immediately left of a recognized text line."""
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    starts = set()
+    for line in lines:
+        x0, y0, _x1, y1 = line.bbox
+        height = y1 - y0
+        left, right = max(0, int(x0 - height * 2.5)), max(0, int(x0 - height * 0.15))
+        top, bottom = max(0, int(y0)), min(gray.shape[0], int(y1))
+        crop = gray[top:bottom, left:right]
+        if not crop.size:
+            continue
+        mask = np.where(crop < float(np.median(crop)) - 45, 255, 0).astype(np.uint8)
+        count, _labels, stats, _centers = cv2.connectedComponentsWithStats(mask, 8)
+        for _x, _y, width, ink_height, area in stats[1:count]:
+            if (height * 0.18 <= ink_height <= height * 0.8
+                    and 0.7 <= width / max(1, ink_height) <= 1.3
+                    and area / max(1, width * ink_height) >= 0.65):
+                starts.add(line.bbox)
+                break
+    return starts
+
+
 def _residual_ink_fraction(image: np.ndarray, line: OcrLine) -> float:
     """Measure dark contrast left inside a supposedly cleaned text polygon."""
     height, width = image.shape[:2]
@@ -414,6 +718,52 @@ def _residual_ink_fraction(image: np.ndarray, line: OcrLine) -> float:
     background = float(np.median(samples))
     residual = (region > 0) & (np.abs(gray.astype(np.float32) - background) >= 24)
     return float(np.count_nonzero(residual)) / max(1, int(np.count_nonzero(region)))
+
+
+def _restore_paper_background(
+    image: np.ndarray,
+    lines: Sequence[OcrLine],
+    protected: Sequence[tuple[float, float, float, float]],
+) -> np.ndarray | None:
+    """Estimate plain paper behind approved text, excluding ink from samples.
+
+    Glyph-only inpainting retains JPEG ringing between the old letters, which
+    appears as a checkerboard after reflow. Sample neighbouring blank paper on
+    a coarse grid and replace only the approved line bands. Protected pixels
+    and all other source content remain exact.
+    """
+    mask = np.zeros(image.shape[:2], np.uint8)
+    for line in lines:
+        cv2.fillConvexPoly(mask, np.rint(line.polygon).astype(np.int32), 255)
+    mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    protected_mask = np.zeros_like(mask)
+    for x0, y0, x1, y1 in protected:
+        cv2.rectangle(protected_mask, (max(0, int(x0)-2), max(0, int(y0)-2)),
+                      (int(math.ceil(x1))+2, int(math.ceil(y1))+2), 255, -1)
+    mask[protected_mask > 0] = 0
+    valid = ((mask == 0) & (protected_mask == 0)).astype(np.float32)
+    small = (max(1, image.shape[1] // 8), max(1, image.shape[0] // 8))
+    weights = cv2.resize(valid, small, interpolation=cv2.INTER_AREA)
+    weighted = cv2.resize(image.astype(np.float32) * valid[:, :, None], small,
+                          interpolation=cv2.INTER_AREA)
+    # Dense historical lines can leave almost no blank sample within the
+    # first kernel. Grow the sampling radius until every approved band has
+    # support. Use one scale throughout: switching scales per pixel leaves
+    # visible contour seams on an otherwise smoothly shaded paper surface.
+    for sigma in (8, 16, 32):
+        blurred_weights = cv2.GaussianBlur(weights, (0, 0), sigma)
+        support = cv2.resize(blurred_weights, (image.shape[1], image.shape[0]))
+        if not np.any((mask > 0) & (support < 0.03)):
+            break
+    else:
+        return None
+    background = cv2.GaussianBlur(weighted, (0, 0), sigma) / np.maximum(
+        blurred_weights[:, :, None], 0.001
+    )
+    background = cv2.resize(background, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR)
+    result = image.copy()
+    result[mask > 0] = np.clip(np.rint(background[mask > 0]), 0, 255).astype(np.uint8)
+    return result
 
 
 def _font_size(line: OcrLine, scale: float, font: pymupdf.Font) -> float:
@@ -468,6 +818,7 @@ def prepare_ocr_pdf(
     selected = set(pages) if pages is not None else None
     cleaned_images: dict[int, bytes] = {}
     lines_by_page: dict[int, tuple[OcrLine, ...]] = {}
+    reflow_regions_by_page: dict[int, tuple[OcrReflowRegion, ...]] = {}
     warnings: list[str] = []
     processed_pages: list[int] = []
     recognised = inserted = protected_count = skipped = 0
@@ -489,7 +840,7 @@ def prepare_ocr_pdf(
                 warnings.append(f"page {index + 1}: OCR failed ({error})")
                 output.insert_pdf(document, from_page=index, to_page=index)
                 continue
-            lines = _normalise_result(result)
+            lines = _merge_ocr_line_fragments(_normalise_result(result))
             lines_by_page[index] = tuple(lines)
             recognised += len(lines)
             if not lines:
@@ -497,10 +848,32 @@ def prepare_ocr_pdf(
                 output.insert_pdf(document, from_page=index, to_page=index)
                 continue
 
-            protected = _protected_boxes(layout_model, image)
+            layout_regions = _layout_regions(layout_model, image)
+            protected = _protected_boxes(layout_regions)
+            # A running header/footer stays in the raster. Its presence does
+            # not make the non-overlapping body paragraphs unsafe to reflow.
+            structural_protected = [
+                region.bbox for region in layout_regions
+                if region.name in PROTECTED_LAYOUT_CLASSES
+                and not (region.name == "abandon" and (
+                    region.bbox[3] < image.shape[0] * 0.15
+                    or region.bbox[1] > image.shape[0] * 0.90
+                ))
+            ]
             ordered = _reading_order(lines, float(image.shape[1]))
             page_decision = classify_preserved_page("\n".join(line.text for line in ordered))
-            safety_reasons = _page_safety_reasons(image, ordered, protected, page_decision)
+            safety_reasons = _page_safety_reasons(
+                image,
+                ordered,
+                structural_protected,
+                page_decision,
+            )
+            reflow_reasons = {
+                "multi-column OCR ownership", "too many OCR lines for safe reflow",
+                "dense text without reflow headroom",
+            }
+            requires_proof = bool(reflow_reasons.intersection(safety_reasons))
+            safety_reasons = [reason for reason in safety_reasons if reason not in reflow_reasons]
             if safety_reasons:
                 warnings.append(
                     f"page {index + 1}: preserved ({', '.join(safety_reasons)})"
@@ -511,7 +884,7 @@ def prepare_ocr_pdf(
             accepted: list[OcrLine] = []
             combined_mask = np.zeros(image.shape[:2], dtype=np.uint8)
             for line in ordered:
-                if _overlap_fraction(line.bbox, protected) >= 0.5:
+                if _overlap_fraction(line.bbox, protected) > 0.01:
                     protected_count += 1
                     continue
                 # Keep bullets and list rules in the scan. Redrawing a
@@ -536,6 +909,25 @@ def prepare_ocr_pdf(
                 output.insert_pdf(document, from_page=index, to_page=index)
                 continue
 
+            scale = 72.0 / profile.dpi
+            owned_regions = _owned_reflow_regions(
+                accepted,
+                layout_regions,
+                float(image.shape[1]),
+                float(page.rect.height),
+                scale,
+                paragraph_starts=_raster_bullet_starts(image, accepted),
+                preserve_lines=_is_verse_layout(ordered),
+            )
+            needs_region_ownership = requires_proof
+            if needs_region_ownership and owned_regions is None:
+                warnings.append(
+                    f"page {index + 1}: preserved (ambiguous OCR region ownership)"
+                )
+                protected_count += len(accepted)
+                output.insert_pdf(document, from_page=index, to_page=index)
+                continue
+
             # One final pixel catches anti-aliased glyph rims that survive the
             # per-line mask. This runs only after page-level structure guards,
             # so it cannot eat a protected table rule or formula.
@@ -544,7 +936,13 @@ def prepare_ocr_pdf(
                 cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
                 iterations=1,
             )
-            cleaned = cv2.inpaint(image, combined_mask, profile.inpaint_radius, cv2.INPAINT_TELEA)
+            # Navier-Stokes interpolation avoids the bright stippling Telea
+            # introduced into aged, non-white paper around erased glyphs.
+            cleaned = cv2.inpaint(image, combined_mask, profile.inpaint_radius, cv2.INPAINT_NS)
+            if owned_regions is not None and float(np.median(image)) < 245:
+                paper = _restore_paper_background(image, accepted, protected)
+                if paper is not None:
+                    cleaned = paper
             residual = max(_residual_ink_fraction(cleaned, line) for line in accepted)
             if residual > MAX_RESIDUAL_INK:
                 warnings.append(
@@ -561,9 +959,10 @@ def prepare_ocr_pdf(
 
             target = output.new_page(width=page.rect.width, height=page.rect.height)
             target.insert_image(target.rect, pixmap=pixmap)
-            scale = 72.0 / profile.dpi
             inserted += _insert_sidecar_lines(target, accepted, scale)
             cleaned_images[index] = encoded.tobytes()
+            if owned_regions is not None:
+                reflow_regions_by_page[index] = owned_regions
             processed_pages.append(index)
 
     sidecar.parent.mkdir(parents=True, exist_ok=True)
@@ -573,6 +972,7 @@ def prepare_ocr_pdf(
         sidecar=sidecar,
         cleaned_images=cleaned_images,
         lines_by_page=lines_by_page,
+        reflow_regions_by_page=reflow_regions_by_page,
         pages=tuple(processed_pages),
         recognised_lines=recognised,
         inserted_lines=inserted,

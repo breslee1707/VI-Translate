@@ -13,12 +13,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pymupdf
+import numpy as np
 
 from pdf2zh.converter import (
     IDENTITY_ORIENTATION,
     OpType,
     TextStyle,
     available_height_below,
+    balanced_wrap_positions,
     line_offsets,
     matrix_font_size,
     normalised_text_matrix,
@@ -26,6 +28,7 @@ from pdf2zh.converter import (
     paragraph_width_budget,
     is_outside_page,
     line_ends_paragraph,
+    glyph_layout_class,
     output_font_lacks_glyph,
     run_is_prose,
     stroke_colour_from_fill,
@@ -77,6 +80,55 @@ def _stroke(scolor, ctm=(1, 0, 0, 1, 0, 0), linewidth=1.0, path=None):
 
 
 class FractionRuleTests(unittest.TestCase):
+    def test_short_numeric_title_orphan_triggers_gentle_rebalance(self):
+        text = "BEO PHI, HOI CHUNG CHUYEN HOA VA DAI THAO DUONG TYPE 2"
+        size, breaks = balanced_wrap_positions(
+            text, 0, 0, 220, 14, 7,
+            lambda _character, _style, candidate_size: candidate_size * 0.6,
+            [], balance_short_orphan=True,
+        )
+        self.assertLess(size, 14)
+        self.assertGreater(len(text[max(breaks):].split()), 1)
+
+    def test_protected_grid_rule_is_retained_in_original_content_stream(self):
+        device = RecordingDevice()
+        device.cur_item = SimpleNamespace(pageid=1)
+        device.layout = {1: np.zeros((100, 200))}
+        interpreter = PDFPageInterpreterEx(PDFResourceManager(), device, {})
+        interpreter.ctm = (1, 0, 0, 1, 0, 0)
+        interpreter.graphicstate = PDFGraphicState()
+        interpreter.curpath = [("m", 20, 40), ("l", 180, 40)]
+        self.assertIsNone(interpreter.do_S())
+        self.assertFalse(device.painted)
+
+    def test_model_edge_does_not_detach_initial_n_or_f_from_a_word(self):
+        # NASA source x=63.36; approximate prose region begins at x=66.
+        layout = np.ones((100, 200))
+        layout[30:60, 66:180] = 14
+        for right in (72.0, 67.36):
+            self.assertEqual(glyph_layout_class(layout, (63.36, 40, right, 52)), 14)
+
+    def test_model_edge_does_not_detach_caption_suffix_or_footnote(self):
+        # Ganong page 464: table-caption region x1=531.1, while the final
+        # "n.a" in "secretion.a" occupies x=533.1..545.7.
+        layout = np.ones((100, 600))
+        layout[20:90, 36:532] = 14
+        self.assertEqual(glyph_layout_class(layout, (533.12, 40, 538.98, 50)), 14)
+        self.assertEqual(glyph_layout_class(layout, (541.48, 38, 545.70, 46)), 14)
+
+    def test_edge_recovery_never_overrides_protected_formula(self):
+        layout = np.ones((100, 200))
+        layout[30:60, 66:180] = 0
+        self.assertEqual(glyph_layout_class(layout, (63.36, 40, 72, 52)), 0)
+        layout[40, 63] = 0
+        layout[30:60, 66:180] = 14
+        self.assertEqual(glyph_layout_class(layout, (63.36, 40, 72, 52)), 0)
+
+    def test_edge_recovery_does_not_attach_a_separate_gutter_glyph(self):
+        layout = np.ones((100, 200))
+        layout[30:60, 80:180] = 14
+        self.assertEqual(glyph_layout_class(layout, (63.36, 40, 72, 52)), 1)
+
     def test_a_rule_drawn_in_the_default_colour_is_moved_with_its_formula(self):
         # TeX emits no stroking-colour operator, so scolor stays None. Treating
         # that as "not black" left every inline fraction bar behind.

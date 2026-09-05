@@ -28,8 +28,9 @@ echo "==> Installing app and packaging dependencies"
 "$PYTHON_BIN" -m pip install -r "$ROOT/requirements-app.txt"
 
 if [[ $SKIP_ASSETS -eq 0 ]]; then
-  echo "==> Fetching the layout model and font"
+  echo "==> Fetching layout, font and OCR assets"
   "$PYTHON_BIN" "$ROOT/scripts/fetch_assets.py"
+  "$PYTHON_BIN" "$ROOT/scripts/fetch_ocr_assets.py"
 fi
 
 echo "==> Creating the macOS icon"

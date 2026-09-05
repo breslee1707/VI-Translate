@@ -51,6 +51,8 @@ PDF Translate là ứng dụng mã nguồn mở dành cho Windows, macOS và And
 - **Giữ nguyên bố cục:** bảo toàn vị trí của đoạn văn, công thức, bảng, hình, mục lục và tài liệu tham khảo.
 - **Sẵn sàng để dùng:** tải về, giải nén và chạy; không cần cài Python hay model riêng.
 - **Xử lý hàng loạt:** kéo thả nhiều file PDF hoặc cả thư mục vào ứng dụng.
+- **OCR cục bộ cho trang scan:** chế độ Tự động đọc và dịch vùng văn bản an
+  toàn; bảng, công thức và hình phức tạp được giữ nguyên thay vì bị phá bố cục.
 - **36 ngôn ngữ đích:** mặc định là tiếng Việt, cùng nhiều ngôn ngữ sử dụng chữ Latin.
 - **Không dừng cả hàng đợi:** một file lỗi không làm gián đoạn các file còn lại.
 - **Tự cập nhật (Windows):** có bản mới thì ứng dụng tự tải ngầm, bạn chỉ cần bấm một lần để khởi động lại. Trên macOS vẫn là dòng nhắc mở trang tải.
@@ -60,7 +62,7 @@ PDF Translate là ứng dụng mã nguồn mở dành cho Windows, macOS và And
 
 ### Windows
 
-1. **[Tải PDF Translate cho Windows](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-windows.zip)** (`.zip`, khoảng 199 MB).
+1. **[Tải PDF Translate cho Windows](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-windows.zip)** (`.zip`, khoảng 385 MB; đã gồm model OCR chạy cục bộ).
 2. Giải nén toàn bộ file vừa tải.
 3. Mở `PDFTranslate.exe`.
 
@@ -120,6 +122,11 @@ Chọn một trong ba cách:
 
 Chọn ngôn ngữ đích trong mục **Dịch sang**. Ứng dụng mặc định dịch sang **Tiếng Việt**.
 
+Với PDF scan, giữ **Trang ảnh scan → Tự động (khuyên dùng)**. Chế độ **Nâng
+cao** chậm hơn đáng kể và chủ yếu dùng để thử nghiệm; **Tắt OCR** nếu bạn chỉ
+muốn xử lý lớp chữ có sẵn. Một trang có bảng, công thức, hình hoặc nhận dạng
+không chắc chắn sẽ được giữ nguyên và hàng đợi báo **dịch một phần**.
+
 ### 3. Bắt đầu dịch
 
 Bấm **Dịch**. Các file được xử lý lần lượt và hiển thị trạng thái ngay trong hàng đợi.
@@ -168,7 +175,7 @@ và sửa tại đây:
 
 Bảng nguyên nhân đầy đủ: [agent-knowledge/regressions.md](agent-knowledge/regressions.md).
 
-**162 test hồi quy — 1.825 dòng trong [`tests/`](tests/)**
+**Bộ test hồi quy trong [`tests/`](tests/)**
 Mỗi lỗi đã sửa đều bị khoá lại bằng một test dựng đúng hình học nhỏ nhất gây ra nó,
 nên bản sửa không âm thầm mất đi ở lần thay đổi sau.
 
@@ -271,7 +278,9 @@ Gói phát hành được tạo tại `dist/PDFTranslate-macos-apple-silicon.dmg
 
 ## Giới hạn hiện tại
 
-- **Chưa có OCR:** PDF scan chỉ chứa hình ảnh cần được OCR trước khi dịch.
+- **OCR ưu tiên an toàn:** văn bản scan thông thường có thể được dịch, nhưng
+  trang có bảng/lưới, công thức, hình phức tạp, code hoặc thứ tự đọc không chắc
+  chắn sẽ được giữ nguyên và báo là dịch một phần.
 - Chữ nằm trong vùng được nhận diện là bảng hoặc hình đôi khi được giữ nguyên theo bản gốc.
 - Mục lục, index, danh mục ký hiệu và tài liệu tham khảo được ưu tiên giữ bố cục nên không được dàn lại dòng. Xem [quy tắc bảo toàn](references/preservation-rules.md).
 - Mỗi đoạn gửi tới Google được giới hạn ở 5.000 ký tự; phần vượt quá giới hạn không được dịch.

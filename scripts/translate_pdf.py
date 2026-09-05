@@ -340,6 +340,7 @@ def _run_engine(
     envs: dict[str, str],
     on_progress: Callable[[int, int], None] | None = None,
     skip_backing_pages: set[int] | None = None,
+    ocr_regions_by_page: dict | None = None,
 ) -> "TranslationReport":
     """Run the core and return what it could not translate, and why."""
     from pdf2zh.high_level import translate
@@ -368,6 +369,8 @@ def _run_engine(
     )
     if skip_backing_pages:
         arguments["skip_backing_pages"] = skip_backing_pages
+    if ocr_regions_by_page:
+        arguments["ocr_regions_by_page"] = ocr_regions_by_page
     result = translate(**arguments)
     if len(result) != 1:
         raise TranslationError("PDF core did not report one translated result")
@@ -435,6 +438,9 @@ def translate_pdf(
             engine_arguments = {}
             if ocr_preparation and ocr_preparation.pages:
                 engine_arguments["skip_backing_pages"] = set(ocr_preparation.pages)
+                engine_arguments["ocr_regions_by_page"] = (
+                    ocr_preparation.reflow_regions_by_page
+                )
             report = _run_engine(
                 processing_source,
                 temp_output,

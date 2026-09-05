@@ -175,7 +175,7 @@ và sửa tại đây:
 
 Bảng nguyên nhân đầy đủ: [agent-knowledge/regressions.md](agent-knowledge/regressions.md).
 
-**Bộ test hồi quy trong [`tests/`](tests/)**
+**278 test hồi quy — 3.422 dòng trong [`tests/`](tests/)**
 Mỗi lỗi đã sửa đều bị khoá lại bằng một test dựng đúng hình học nhỏ nhất gây ra nó,
 nên bản sửa không âm thầm mất đi ở lần thay đổi sau.
 

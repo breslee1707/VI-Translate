@@ -19,6 +19,6 @@
     "forbidden_markers_or_out_of_canvas_spans": 0,
     "visual_review_required": true,
     "coverage_policy": "Report translated, preserved and failed regions separately; zero handoff misses does not imply full-page translation.",
-    "translation_policy": "Luna-authored genuine Vietnamese, fixed exact-src JSONL, immutable formula/style markers; never synthetic English expansions."
+    "translation_policy": "Agent-authored genuine Vietnamese, fixed exact-src JSONL, immutable formula/style markers; never synthetic English expansions."
   }
 }

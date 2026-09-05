@@ -98,7 +98,13 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   paper still require visual review and must not be described as flawless.
 - Handoff JSONL repairs only unambiguous punctuation mojibake (range/em dashes,
   copyright/registered/degree/plus-minus/micro signs) in both keys and values.
-  Vietnamese letter sequences are never guessed. Short title lines ending in
+  Vietnamese letter sequences are never guessed. A record whose damage survives
+  that repair is dropped with a warning instead, because rendering it would put
+  unreadable text on the page while every gate reported success. Detection
+  re-encodes the whole value through Windows-1252 and back; searching for marker
+  characters is wrong, since A-circumflex and A-tilde are Vietnamese letters.
+  Test the raw record, not the repaired one: restoring a dash also restores a
+  byte that cannot begin UTF-8, which hides the damaged letters around it. Short title lines ending in
   a lone token such as `2` receive a bounded, gentle font reduction to balance
   the wrap without affecting ordinary body paragraphs.
 

@@ -61,7 +61,7 @@ replacement glyphs or out-of-canvas spans.
 ## Real Vietnamese visual regression batch
 
 `visual_samples.json` pins eight development/validation pages and their
-one-based original/subset page mapping. Artifacts and genuine Luna handoff
+one-based original/subset page mapping. Artifacts and genuine authored handoff
 tables are under `tmp/ocr-benchmark/luna-qa-20260905/`. Never substitute the old
 `qa-sol*/table.jsonl` synthetic English expansions for these translations.
 
@@ -133,10 +133,30 @@ fragmented OCR, TOC/index structure or residual cover ink. This is the expected
 safety result, not OCR coverage success.
 
 A separate validation set uses original pages 50, 56, 78, 234, 332 and 451,
-which were not used to choose or tune the Ganong fixes. Its Google translation
-is layout-stress evidence only, not the fixed translation oracle. All six
-rendered pages passed manual review for table/figure/clinical-box/two-column
-geometry, and the structural audit found no markers or out-of-canvas spans.
+which were not used to choose or tune the Ganong fixes. It now carries a fixed
+104-record Vietnamese handoff table under `validation/final-r2/`; the earlier
+Google output stays layout-stress evidence only, not the translation oracle.
+All 104 segments translate, none are dropped, and the structural audit passes
+with equal page count and canvases, no forbidden markers, no residual mojibake
+and no spans outside text coordinates. The three overlap candidates on original
+page 451 are figure labels that intersect identically in the source, so they are
+pre-existing geometry rather than translation damage. All six rendered pages
+passed manual review for table, figure, clinical-box and two-column geometry.
+
+Two limits are disclosed rather than hidden. Figure labels, the `Fat` row of
+Table 26-4 and the sub-table under Figure 26-15 stay English because they are
+protected regions, so this is partial page translation and not full coverage.
+Seven captions carry a single source glyph that the layout model split off the
+front of an English word; placed where the English word began it lands inside a
+Vietnamese word and breaks it. Each was moved into a word that needs that
+letter, except the `f` of "formula", which Vietnamese orthography has no home
+for and which stays a visible trailing letter in the Figure 26-15 caption.
+
+The first attempt at this set was worse than it looked. Its one finished chunk
+was 33/35 mojibake and its `src` keys were damaged too, yet the handoff
+validator reported no errors. Both the loader and the audit now detect that
+class of damage; see [regressions.md](../../agent-knowledge/regressions.md).
+
 On raster page 346, enhanced OCR took about 123 seconds versus 11.5 seconds for
 standard (10.7x slower), while normalized text was only 99.96% similar and the
 enhanced run introduced a whitespace split and a dash difference. Standard

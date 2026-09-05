@@ -1,7 +1,10 @@
 # OCR experiment and benchmark
 
-This directory is research-only. It does not enable OCR in the desktop GUI and
-does not change the default `--ocr off` behavior.
+This directory holds the corpus, measurements and QA evidence behind the OCR
+feature. The feature itself now ships: the CLI takes
+`--ocr off|standard|enhanced` and the desktop GUI defaults to standard, with
+off and enhanced as explicit choices. What is recorded here is what was
+measured on this corpus, not a promise about arbitrary scans.
 
 ## Reproduce locally
 

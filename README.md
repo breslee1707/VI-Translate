@@ -62,7 +62,7 @@ PDF Translate là ứng dụng mã nguồn mở dành cho Windows, macOS và And
 
 ### Windows
 
-1. **[Tải PDF Translate cho Windows](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-windows.zip)** (`.zip`, khoảng 385 MB; đã gồm model OCR chạy cục bộ).
+1. **[Tải PDF Translate cho Windows](https://github.com/breslee1707/VI-Translate/releases/latest/download/PDFTranslate-windows.zip)** (`.zip`, khoảng 336 MB; đã gồm model OCR chạy cục bộ, không cần mạng).
 2. Giải nén toàn bộ file vừa tải.
 3. Mở `PDFTranslate.exe`.
 

@@ -12,9 +12,16 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pymupdf
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from pdf2zh.translator import looks_like_mojibake  # noqa: E402
 
 MOJIBAKE_SEQUENCES = (
     "\u00e2\u20ac\u201c", "\u00e2\u20ac\u201d", "\u00c2\u00a9",
@@ -24,6 +31,19 @@ FORBIDDEN = re.compile(
     r"\{v\d+\}|</?[bs]\d+>|[\x00\ufffd]|"
     + "|".join(re.escape(value) for value in MOJIBAKE_SEQUENCES)
 )
+
+
+def mojibake_lines(text: str) -> list[str]:
+    """Whole lines of UTF-8 text that were decoded as Windows-1252.
+
+    `FORBIDDEN` only knows the handful of punctuation sequences the engine
+    repairs. A handoff table whose Vietnamese letters were damaged carries none
+    of them, so it passed every gate and reached the page as unreadable text.
+    Testing a whole line matters: one damaged record damages all of it, while a
+    correct line holds tone marks that cannot be re-encoded at all.
+    """
+    return [line for line in text.splitlines()
+            if line.strip() and looks_like_mojibake(line)]
 
 
 def sha256(path: Path) -> str:
@@ -94,6 +114,7 @@ def audit(source: Path, output: Path, pages: set[int]) -> dict:
                 "raster_identical": (before.width, before.height, before.samples)
                 == (after.width, after.height, after.samples),
                 "forbidden_markers": sorted(set(FORBIDDEN.findall(dst.get_text()))),
+                "mojibake_lines": mojibake_lines(dst.get_text()),
                 "out_of_canvas": [span["text"] for span in spans
                                   if not span_bounds.contains(pymupdf.Rect(span["bbox"]))],
                 "fonts": sorted({span["font"] for span in spans}),
@@ -104,6 +125,7 @@ def audit(source: Path, output: Path, pages: set[int]) -> dict:
     report["structural_gate"] = bool(report["page_count_match"] and all(
         row["canvas_match"] and (
             not row["forbidden_markers"] and not row["out_of_canvas"]
+            and not row["mojibake_lines"]
             if row["selected"] else row["raster_identical"]
         ) for row in report["pages"]
     ))

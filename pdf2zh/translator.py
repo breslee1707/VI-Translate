@@ -59,6 +59,51 @@ def repair_common_punctuation_mojibake(value: str) -> str:
     return value
 
 
+def _decoded_as_windows_1252(value: str) -> str | None:
+    """Return the UTF-8 text this string would be, if it is mojibake at all."""
+    raw = bytearray()
+    for character in value:
+        try:
+            raw += character.encode("cp1252")
+        except UnicodeEncodeError:
+            # cp1252 leaves 0x81, 0x8d, 0x8f, 0x90 and 0x9d undefined. A lenient
+            # decoder passes those bytes through, so they arrive as C1 controls.
+            if ord(character) >= 0x100:
+                return None
+            raw.append(ord(character))
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def looks_like_mojibake(value: str) -> bool:
+    """Report text that is UTF-8 read as Windows-1252, without repairing it.
+
+    Searching for marker characters is wrong here: Â and Ã are ordinary
+    Vietnamese letters, so PHÂN would be condemned. Re-encoding the whole
+    string succeeds only when every character came from that one mistake, which
+    real Vietnamese does not survive because its tone marks live outside
+    Latin-1. Repairing is still refused: guessing a letter sequence is how a
+    wrong word reaches the page looking correct.
+    """
+    decoded = _decoded_as_windows_1252(value)
+    return decoded is not None and decoded != value
+
+
+def has_unrepairable_mojibake(value: str) -> bool:
+    """Damage that survives the punctuation repair, so whole letters are wrong.
+
+    Testing the repaired text is not enough. Turning one damaged dash back into
+    an en dash restores a byte that cannot begin a UTF-8 sequence, which hides
+    the damaged letters standing around it; ten of the records that first
+    exposed this defect were masked exactly that way. Compare what the record
+    really said against what the safe repair managed to recover instead.
+    """
+    decoded = _decoded_as_windows_1252(value)
+    return decoded is not None and decoded != repair_common_punctuation_mojibake(value)
+
+
 NUMBER_ABBREVIATION_PATTERN = re.compile(r"(?<![A-Za-z])no\.(?=\s*\d)")
 
 
@@ -265,6 +310,14 @@ def load_segment_table(path: str | None) -> dict[str, str]:
             if not isinstance(source, str) or not isinstance(translation, str):
                 raise ValueError(f"{path} line {number}: 'src' and 'dst' must be strings")
             if not translation:
+                continue
+            if has_unrepairable_mojibake(translation):
+                logger.warning(
+                    "%s line %d: 'dst' is UTF-8 text decoded as Windows-1252; "
+                    "segment left untranslated",
+                    path,
+                    number,
+                )
                 continue
             # Old converter versions emitted {vN}; normalise those records so
             # existing handoff files remain usable with the documented tags.

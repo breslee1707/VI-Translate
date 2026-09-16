@@ -126,6 +126,20 @@ the translator the way a style marker can.
 Emphasis comes from the font descriptor's own flags before the font name, since
 the Adobe Pro families abbreviate the slanted face as `-It`.
 
+## Translation Service
+
+Google's free `/m` endpoint blocks a network that sends too much: a 302 to
+`www.google.com/sorry/`, HTTP 429, a CAPTCHA page, no `Retry-After`. The verdict
+is on the address, so it is handled once per document, never per segment.
+`OutageBackoff` pauses every worker together (5 s, doubling to 60 s). After
+120 s without an answer it refuses the remaining segments at once, and still
+lets one request per pause check whether the block has lifted. A dead
+connection or a 5xx gets the same treatment. The converter's own retry covers
+only a glitch in a single answer (3 quick attempts). It never resends a
+segment the service refused (too long, HTTP 400) or an outage already waited
+out. Never try to get past the CAPTCHA. Finished segments are cached, so a
+later run of the same file sends only what is still missing.
+
 ## Large Documents
 
 The app requests mono output only; do not construct the unused interleaved

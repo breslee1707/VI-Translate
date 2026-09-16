@@ -71,6 +71,8 @@ class Translation(NamedTuple):
 _FIT_MARKERS = ("font size", "cannot fit")
 _FORMULA_REASON = "FormulaPlaceholderError"
 _TOO_LONG_REASON = "SegmentTooLongError"
+_RATE_LIMITED_REASON = "RateLimitedError"
+_UNAVAILABLE_REASON = "ServiceUnavailableError"
 
 
 def _count_of_segments(count: int) -> str:
@@ -85,10 +87,13 @@ def _describe_failures(reasons: Mapping[str, int]) -> list[str]:
     fit = sum(count for reason, count in reasons.items() if is_fit(reason))
     formula = reasons.get(_FORMULA_REASON, 0)
     too_long = reasons.get(_TOO_LONG_REASON, 0)
+    rate_limited = reasons.get(_RATE_LIMITED_REASON, 0)
+    unavailable = reasons.get(_UNAVAILABLE_REASON, 0)
+    named = (_FORMULA_REASON, _TOO_LONG_REASON, _RATE_LIMITED_REASON, _UNAVAILABLE_REASON)
     engine = {
         reason: count
         for reason, count in reasons.items()
-        if reason not in (_FORMULA_REASON, _TOO_LONG_REASON) and not is_fit(reason)
+        if reason not in named and not is_fit(reason)
     }
 
     lines: list[str] = []
@@ -106,6 +111,19 @@ def _describe_failures(reasons: Mapping[str, int]) -> list[str]:
         lines.append(
             f"{_count_of_segments(too_long)} stayed in the source language because the "
             "paragraph was longer than the translation service accepts in one request"
+        )
+    if rate_limited:
+        lines.append(
+            f"{_count_of_segments(rate_limited)} stayed in the source language because "
+            "Google Translate is refusing requests from this network (HTTP 429). Translate "
+            "the file again later or from another network; unless --ignore-cache was "
+            "given, the segments that did translate are reused"
+        )
+    if unavailable:
+        lines.append(
+            f"{_count_of_segments(unavailable)} stayed in the source language because "
+            "Google Translate did not answer (no connection, a timeout, or a server "
+            "error). Check the connection and translate the file again"
         )
     if engine:
         names = ", ".join(f"{name} x{count}" for name, count in sorted(engine.items()))

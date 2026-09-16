@@ -16,7 +16,12 @@ from pdfminer.pdffont import PDFCIDFont, PDFUnicodeNotDefined
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
 from pdfminer.utils import apply_matrix_pt, mult_matrix
 from pymupdf import Font
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_not_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from pdf2zh.rules import (
     is_bullet_character,
@@ -26,6 +31,7 @@ from pdf2zh.rules import (
 )
 from pdf2zh.translator import (
     ENGINES,
+    UNRETRYABLE_ERRORS,
     BaseTranslator,
     encode_formula_placeholders,
     restore_formula_placeholders,
@@ -530,6 +536,21 @@ def preferred_translation(text: str, language: str) -> str | None:
     if style:
         return f"{leading}{style.group(1)}{replacement}{style.group(2)}{trailing}"
     return f"{leading}{replacement}{trailing}"
+
+
+# A blocked or unreachable service is waited out once for the whole document
+# inside the translator, and a verdict on one segment will not change, so
+# neither is retried here. That leaves a glitch in a single answer, which a
+# couple of quick attempts cover. Eight attempts up to a minute apart used to
+# make every failing segment cost two minutes, four threads at a time.
+@retry(
+    retry=retry_if_not_exception_type(UNRETRYABLE_ERRORS),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def request_translation(translator: BaseTranslator, text: str) -> str:
+    return translator.translate(text)
 
 
 def should_translate_rotated_text(text: str) -> bool:
@@ -1188,23 +1209,12 @@ class TranslateConverter(PDFConverterEx):
         ############################################################
         log.debug("\n==========[SSTACK]==========\n")
 
-        # Google throttles a long document, so back off instead of hammering it.
-        # Roughly two minutes of patience per segment, then give up rather than
-        # hang the run forever the way an unbounded retry used to.
-        @retry(
-            wait=wait_exponential(multiplier=1, min=1, max=60),
-            stop=stop_after_attempt(8),
-            reraise=True,
-        )
-        def request_translation(s: str) -> str:
-            return self.translator.translate(s)
-
         def translate_segment(s: str) -> str:
             preferred = preferred_translation(s, self.translator.lang_out)
             if preferred is not None:
                 return preferred
             encoded = encode_formula_placeholders(s)
-            translated = request_translation(encoded)
+            translated = request_translation(self.translator, encoded)
             return restore_formula_placeholders(s, translated)
 
         def worker(s: str) -> str:

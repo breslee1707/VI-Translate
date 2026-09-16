@@ -39,6 +39,19 @@ class FailureReportingTests(unittest.TestCase):
             sum("translation engine failed" in line for line in lines), 1
         )
 
+    def test_a_blocked_network_is_named_apart_from_a_dead_connection(self):
+        """A block asks the user to wait or move network; retrying at once does
+        nothing. A dead connection asks them to reconnect."""
+        lines = translate_pdf._describe_failures(
+            Counter({"RateLimitedError": 30, "ServiceUnavailableError": 2})
+        )
+        self.assertEqual(len(lines), 2)
+        self.assertIn("30 segments", lines[0])
+        self.assertIn("HTTP 429", lines[0])
+        self.assertIn("2 segments", lines[1])
+        self.assertIn("did not answer", lines[1])
+        self.assertFalse(any("translation engine failed" in line for line in lines))
+
 
 class TranslatePdfTests(unittest.TestCase):
     def setUp(self) -> None:

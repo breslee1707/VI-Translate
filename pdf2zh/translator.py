@@ -7,9 +7,12 @@ import json
 import logging
 import re
 import threading
+import time
 import unicodedata
 from collections import Counter
+from collections.abc import Callable
 from typing import Any, ClassVar
+from urllib.parse import urlparse
 
 import requests
 
@@ -45,6 +48,123 @@ class SegmentTooLongError(ValueError):
     by the marker check, but plain prose is silently cut in half. Refusing the
     segment keeps the source text and lets the caller say what happened.
     """
+
+
+class SegmentRejectedError(ValueError):
+    """Raised when the service refuses one segment outright (HTTP 400).
+
+    The same text gets the same answer however often it is sent, so waiting
+    to send it again only holds up the page.
+    """
+
+
+class RateLimitedError(RuntimeError):
+    """Raised when Google refuses this network rather than this segment.
+
+    A heavy run is redirected to Google's CAPTCHA page and answered HTTP 429.
+    That verdict is on the address, so every later segment meets it too.
+    """
+
+
+class ServiceUnavailableError(RuntimeError):
+    """Raised when the service gives no usable answer: no connection, a timeout, a 5xx."""
+
+
+# Sending these again repeats a verdict, or a wait the whole document already paid.
+UNRETRYABLE_ERRORS = (
+    SegmentTooLongError,
+    SegmentRejectedError,
+    RateLimitedError,
+    ServiceUnavailableError,
+)
+
+
+class OutageBackoff:
+    """Wait out a blocked or unreachable service once per document, not per segment.
+
+    Each segment used to retry on its own: eight attempts and about two minutes
+    of backoff, on four threads at once. Once Google blocks a network every
+    segment meets the same block, so a 1944-segment book would have spent some
+    sixteen hours retrying, sent eight requests per segment into the block, and
+    still come back untranslated. Here the workers hold back together for a
+    doubling pause. After PATIENCE seconds without an answer each remaining
+    segment is refused at once, and one request per pause still checks whether
+    the service is back.
+    """
+
+    FIRST_PAUSE = 5.0
+    LONGEST_PAUSE = 60.0
+    PATIENCE = 120.0
+
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._pause = self.FIRST_PAUSE
+        self._resume_at = float("-inf")
+        self._outage_began: float | None = None
+        # Counts recorded failures. A request carries the count it started
+        # under, so an answer to something sent before the latest failure says
+        # nothing new: four workers hitting one block pause once, not four
+        # times, and a reply that was already on its way does not end it.
+        self._failures = 0
+        self._failure: RateLimitedError | ServiceUnavailableError | None = None
+
+    def before_request(self) -> int:
+        """Hold a request while a pause is in force, then return the count it starts under.
+
+        Once patience has run out the outage is raised instead, except for the
+        single request per pause that checks whether it is over.
+        """
+        while True:
+            with self._lock:
+                now = self._clock()
+                exhausted = (
+                    self._outage_began is not None
+                    and now - self._outage_began >= self.PATIENCE
+                )
+                if now >= self._resume_at:
+                    if exhausted:
+                        self._resume_at = now + self._pause
+                    return self._failures
+                if exhausted:
+                    raise type(self._failure)(str(self._failure))
+                delay = self._resume_at - now
+            self._sleep(delay)
+
+    def failed(self, started: int, error: RateLimitedError | ServiceUnavailableError) -> None:
+        """Record a request that met the outage, and pause every worker."""
+        with self._lock:
+            self._failure = error
+            if started < self._failures:
+                return
+            now = self._clock()
+            if self._outage_began is None:
+                self._outage_began = now
+            self._failures += 1
+            self._resume_at = now + self._pause
+            self._pause = min(self._pause * 2, self.LONGEST_PAUSE)
+
+    def succeeded(self, started: int) -> None:
+        """Record an answer to a request sent since the latest failure."""
+        with self._lock:
+            if started < self._failures:
+                return
+            self._outage_began = None
+            self._failure = None
+            self._pause = self.FIRST_PAUSE
+            self._resume_at = float("-inf")
+
+
+def is_google_block(response: requests.Response) -> bool:
+    """Whether Google answered with its verdict on the network, not a translation."""
+    if response.status_code == 429:
+        return True
+    return urlparse(response.url or "").path.startswith("/sorry/")
 
 
 def remove_control_characters(value: str) -> str:
@@ -206,6 +326,9 @@ class GoogleTranslator(BaseTranslator):
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
             )
         }
+        # One translator serves every worker thread of a document, so an
+        # outage seen by one of them holds back all of them.
+        self.outage = OutageBackoff()
 
     # The /m endpoint carries the text in the query string and rejects more
     # than this; it is the service's limit, not a preference.
@@ -217,14 +340,46 @@ class GoogleTranslator(BaseTranslator):
                 f"segment of {len(text)} characters exceeds the "
                 f"{self.MAXIMUM_SEGMENT_CHARACTERS} the service accepts"
             )
-        response = self.session.get(
-            self.endpoint,
-            params={"tl": self.lang_out, "sl": self.lang_in, "q": text},
-            headers=self.headers,
-            timeout=30,
-        )
+        while True:
+            started = self.outage.before_request()
+            try:
+                response = self.session.get(
+                    self.endpoint,
+                    params={"tl": self.lang_out, "sl": self.lang_in, "q": text},
+                    headers=self.headers,
+                    timeout=30,
+                )
+            except (requests.ConnectionError, requests.Timeout) as error:
+                # The exception text carries the request URL, which holds the
+                # document's own words; only its kind is kept.
+                self.outage.failed(
+                    started,
+                    ServiceUnavailableError(
+                        f"Google Translate could not be reached ({type(error).__name__})"
+                    ),
+                )
+                continue
+            if is_google_block(response):
+                self.outage.failed(
+                    started,
+                    RateLimitedError(
+                        "Google Translate is refusing requests from this network "
+                        "(HTTP 429, CAPTCHA page)"
+                    ),
+                )
+                continue
+            if response.status_code >= 500:
+                self.outage.failed(
+                    started,
+                    ServiceUnavailableError(
+                        f"Google Translate answered HTTP {response.status_code}"
+                    ),
+                )
+                continue
+            self.outage.succeeded(started)
+            break
         if response.status_code == 400:
-            raise RuntimeError("Google Translate rejected the text segment")
+            raise SegmentRejectedError("Google Translate rejected the text segment")
         response.raise_for_status()
         match = re.search(
             r'(?s)class="(?:t0|result-container)">(.*?)<',

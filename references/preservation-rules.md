@@ -65,7 +65,7 @@ These classifications preserve the complete page layout instead of reflowing num
 
 - A rendered image covering more than half the page marks the page as scanned. With OCR off, ordinary text-layer translation still uses backing rectangles where required. With OCR enabled, the scan raster is replaced only after safe source-text cleanup succeeds.
 - Standard and enhanced OCR process only image-only pages. They require explicit layout ownership and reject pages or regions containing unsafe grids, formulas, figures, code, damaged recognition, ambiguous reading order, or residual source ink. Preserved scan content is reported as partial; a document with no safe translatable segment is refused rather than delivered as a translation of nothing.
-- A segment left in the source language is reported with the reason it was left: it did not fit at the smallest allowed size, the translation came back with damaged formula markers, or the engine failed.
+- A segment left in the source language is reported with the reason it was left: it did not fit at the smallest allowed size, the translation came back with damaged formula markers, Google refused the network (HTTP 429), the service did not answer, or the engine failed.
 - Structural PDF repair uses a temporary copy. The source file is never
   overwritten. Repair is triggered by the engine failing to rewrite the
   document, not by a second library's willingness to open it, and a document

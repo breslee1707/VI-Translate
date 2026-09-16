@@ -85,6 +85,8 @@ macOS/Linux:
 
 For a batch, process files individually and report progress. A failure on one file must not stop the remaining files; collect and report all failures at the end.
 
+If a run reports segments refused with HTTP 429, Google has blocked the network for now. Do not rerun it in a loop or try to get past the CAPTCHA. Report it, then offer a later rerun or another network (finished segments are cached), or handoff mode.
+
 ## Handoff mode
 
 Handoff extracts translatable segments to JSONL, lets the active agent translate them, then rebuilds the PDF. Warn about token and time cost before starting a large document. For long documents, suggest a representative sample such as `--pages 1-5` first.

@@ -179,11 +179,28 @@ def collect_pdfs(paths: list[Path]) -> list[Path]:
     return list(unique)
 
 
+# Named beside the count, because a block and a dead connection each ask the
+# user for something different, and neither is a fault in their document.
+SERVICE_FAILURE_ADVICE = {
+    "RateLimitedError": "Google tạm chặn mạng này vì gửi quá nhiều yêu cầu, "
+    "hãy dịch lại sau hoặc đổi mạng khác",
+    "ServiceUnavailableError": "Google Dịch không phản hồi, hãy kiểm tra mạng rồi dịch lại",
+}
+
+
 def translation_outcome(result) -> tuple[str, str]:
     """Return the queue state and an honest, compact coverage summary."""
     details = []
     if result.untranslated:
-        details.append(f"{result.untranslated} đoạn chưa dịch được")
+        summary = f"{result.untranslated} đoạn chưa dịch được"
+        causes = [
+            advice
+            for reason, advice in SERVICE_FAILURE_ADVICE.items()
+            if result.reasons.get(reason)
+        ]
+        if causes:
+            summary += f" ({'; '.join(causes)}; phần đã dịch được giữ lại cho lần sau)"
+        details.append(summary)
     if result.image_only_pages:
         pages = ", ".join(str(page + 1) for page in result.image_only_pages)
         details.append(f"trang scan giữ nguyên: {pages}")

@@ -141,7 +141,10 @@ colour most of its own ink uses, because a colour change cannot travel through
 the translator the way a style marker can.
 
 Emphasis comes from the font descriptor's own flags before the font name, since
-the Adobe Pro families abbreviate the slanted face as `-It`.
+the Adobe Pro families abbreviate the slanted face as `-It`. Boldness also comes from the
+name: descriptors seldom mark it, and Google Docs exports carry `Flags 6` on
+`TimesNewRomanPS-BoldMT`. Regions of CJK text keep the 1.5 em gap rule for
+wrapped lines.
 
 ## Translation Service
 

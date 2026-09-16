@@ -45,6 +45,7 @@ from pdf2zh.converter import (
     text_orientation,
     text_style_from_descriptor,
     text_style_from_font,
+    text_style_of,
     typical_line_pitch,
     uses_synthetic_bold,
     vertical_ink_extent,
@@ -658,6 +659,21 @@ class OrientationAndStyleTests(unittest.TestCase):
         self.assertEqual(text_style_from_descriptor({"Flags": 4}), TextStyle.REGULAR)
         self.assertIsNone(text_style_from_descriptor({}))
         self.assertIsNone(text_style_from_descriptor(None))
+
+    def test_a_bold_face_the_descriptor_does_not_mark_bold_stays_bold(self):
+        """Google Docs: Flags 6 for TimesNewRomanPS-BoldMT, 70 for BoldItalicMT."""
+        def glyph(name, flags):
+            return SimpleNamespace(fontname=name, font=SimpleNamespace(descriptor={"Flags": flags}))
+
+        self.assertEqual(text_style_of(glyph("AAAAAA+TimesNewRomanPS-BoldMT", 6)), TextStyle.BOLD)
+        self.assertEqual(
+            text_style_of(glyph("CAAAAA+TimesNewRomanPS-BoldItalicMT", 70)), TextStyle.BOLD_ITALIC
+        )
+        self.assertEqual(text_style_of(glyph("DAAAAA+TimesNewRomanPS-ItalicMT", 68)), TextStyle.ITALIC)
+        self.assertEqual(text_style_of(glyph("BAAAAA+TimesNewRomanPSMT", 6)), TextStyle.REGULAR)
+        # Slant still belongs to the descriptor: an abbreviated italic name stays upright
+        # when the embedded font says it is upright.
+        self.assertEqual(text_style_of(glyph("MinionPro-It", 4)), TextStyle.REGULAR)
 
     def test_only_the_newest_colour_of_each_kind_is_replayed(self):
         """`rg` and `g` write the same slot, so replaying both lets the older win."""

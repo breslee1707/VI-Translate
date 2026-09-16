@@ -117,12 +117,25 @@ def text_style_from_descriptor(descriptor: Dict | None) -> TextStyle | None:
 
 
 def text_style_of(character: LTChar) -> TextStyle:
-    """Emphasis for one glyph: what the font declares, else what it is called."""
+    """Emphasis for one glyph: what the font declares, else what it is called.
+
+    A descriptor can say a face is italic, but it seldom says a face is bold:
+    ForceBold and FontWeight are both optional. Google Docs writes Flags 6 for
+    TimesNewRomanPS-BoldMT and nothing else, so reading the descriptor alone
+    set every bold heading of the RISKS report in regular type. Boldness
+    therefore also comes from the name; slant still comes from the descriptor.
+    """
     descriptor = getattr(getattr(character, "font", None), "descriptor", None)
     style = text_style_from_descriptor(descriptor)
-    if style is not None:
-        return style
-    return text_style_from_font(character.fontname)
+    if style is None:
+        return text_style_from_font(character.fontname)
+    named = text_style_from_font(character.fontname)
+    if named in (TextStyle.BOLD, TextStyle.BOLD_ITALIC):
+        if style == TextStyle.REGULAR:
+            return TextStyle.BOLD
+        if style == TextStyle.ITALIC:
+            return TextStyle.BOLD_ITALIC
+    return style
 
 
 def text_orientation(matrix) -> tuple[float, float, float, float] | None:

@@ -30,6 +30,12 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
 - Tables translate per reliable cell only when the model region and
   `PyMuPDF.find_tables()` overlap by at least 50%. Grid, fill, and border
   operators remain source content. Unreliable tables stay protected.
+  A model table with no grid is divided by its text alignment instead
+  (`text_aligned_table_cells`): columns are white-space gutters wider than
+  twice the table's own word spacing that hold text on at least two rows, and a
+  cell ends at a wider line gap, a rule, a bullet, or a change of left edge. A
+  table that does not divide that way stays protected, and a gridless cell that
+  mixes text sizes (a subscripted variable) keeps its source glyphs.
 - Fully protected blocks replay source glyph matrices, font size, horizontal
   scaling and rise without prose fitting. Their horizontal grid rules stay in
   the source stream. Array operands use PDF whitespace syntax, not Python list

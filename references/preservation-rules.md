@@ -17,7 +17,8 @@ The bundled core translates ordinary text while retaining document structures wh
 - Each reliable cell is reflowed within its own bounds while the source grid, fills, and borders remain unchanged.
 - When a dense cell is shrunk vertically, its line spacing is recomputed from the final font size so the last line cannot spill into the next row.
 - Cell translations may shrink to half the source font size. If text still cannot fit, that cell remains in the source language and the result is reported as partial.
-- Tables without a reliable cell grid remain fully protected.
+- A detected table drawn without a grid is divided by its text alignment: full-height white-space columns, and cells that end at a wider line gap, a rule, a bullet, or a change of left edge. A cell that mixes text sizes, such as a subscripted variable, keeps its source glyphs.
+- Tables that divide neither by a cell grid nor by text alignment remain fully protected.
 
 ## Numbered-page structures
 

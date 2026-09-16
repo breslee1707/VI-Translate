@@ -19,7 +19,95 @@ from pdf2zh.rules import (
     matching_table_cells,
     min_line_height_for_language,
     should_translate_table_cell,
+    text_aligned_table_cells,
 )
+
+
+def _words(line: int, y: float, *runs: tuple[float, str], space: float = 2.0) -> list[tuple]:
+    """Words of one 8 pt table line: 4.5 pt a character, `space` between words."""
+    words = []
+    for x, text in runs:
+        for word in text.split():
+            words.append((x, y, x + len(word) * 4.5, y + 8.0, word, 0, line, len(words)))
+            x += len(word) * 4.5 + space
+    return words
+
+
+class TextAlignedTableTests(unittest.TestCase):
+    """Tables drawn with no grid: PyMuPDF finds no cells, so the whole table stayed English."""
+
+    def _cells_text(self, cells, words):
+        return [
+            " ".join(word[4] for word in words
+                     if cell[0] <= (word[0] + word[2]) / 2 <= cell[2]
+                     and cell[1] <= (word[1] + word[3]) / 2 <= cell[3])
+            for cell in cells
+        ]
+
+    def test_columns_from_white_space_and_items_from_bullets_rows_and_rules(self):
+        """Combatting Table 2: a header rule, bullet items, rows set a little apart."""
+        words = (
+            _words(0, 663, (53, "Infectious Diarrhoea"), (289, "Treatment approaches"), (525, "Refs"))
+            + _words(1, 675, (53, "Acute diarrhea"), (155, "●Rehydration therapy"), (525, "[15]"))
+            + _words(2, 684, (155, "●Antibiotic regime of ciprofloxacin"))
+            + _words(3, 707, (53, "Chronic diarrhea"), (155, "●Rehydration therapy"), (525, "[51]"))
+        )
+        rules = [(49, 672, 156, 672.5), (156, 672, 525, 672.5), (525, 672, 562, 672.5)]
+        cells = text_aligned_table_cells((49, 658, 564, 763), words, rules)
+        self.assertEqual(
+            self._cells_text(cells, words),
+            ["Infectious Diarrhoea", "Acute diarrhea", "Chronic diarrhea",
+             "Treatment approaches", "●Rehydration therapy",
+             "●Antibiotic regime of ciprofloxacin", "●Rehydration therapy",
+             "Refs", "[15]", "[51]"],
+        )
+        header, acute = cells[0], cells[1]
+        self.assertLess(header[3], 672)  # the header cell stops at its rule
+        self.assertGreater(acute[3], 692)  # a label may grow into the space beside its bullets
+        self.assertLess(acute[3], 707)  # but never into the next row
+
+    def test_a_record_name_set_out_is_its_own_cell_above_its_details(self):
+        """Combatting Table 4: rows touch, and only the left edge marks a new record."""
+        words = (
+            _words(0, 77, (52, "RotaTeq"), (171, "Merck Sharp"))
+            + _words(1, 86, (60, "Live attenuated oral"), (179, "Prequalified and licensed"))
+            + _words(2, 95, (60, "vaccine"), (179, "by the WHO."))
+            + _words(3, 104, (52, "Rotarix"), (171, "GlaxoSmithKline"))
+            + _words(4, 113, (60, "Live attenuated oral"), (179, "Received prequalification"))
+        )
+        cells = text_aligned_table_cells((48, 63, 400, 130), words)
+        self.assertEqual(
+            self._cells_text(cells, words),
+            ["RotaTeq", "Live attenuated oral vaccine", "Rotarix", "Live attenuated oral",
+             "Merck Sharp", "Prequalified and licensed by the WHO.", "GlaxoSmithKline",
+             "Received prequalification"],
+        )
+
+    def test_justified_spaces_and_a_centred_heading_are_not_gutters(self):
+        words = (
+            _words(0, 10, (200, "Treatment approaches"), space=9.0)
+            + _words(1, 26, (10, "Label"), (155, "stretched words set wide"), space=5.0)
+            + _words(2, 42, (10, "Other"), (155, "stretched words again"), space=5.0)
+        )
+        self.assertEqual(
+            self._cells_text(text_aligned_table_cells((0, 0, 400, 50), words), words),
+            ["Label", "Other", "Treatment approaches", "stretched words set wide",
+             "stretched words again"],
+        )
+
+    def test_text_without_a_column_gutter_stays_protected(self):
+        words = (_words(0, 10, (10, "a paragraph of ordinary prose that wraps"))
+                 + _words(1, 20, (10, "onto a second line of the same width")))
+        self.assertEqual(text_aligned_table_cells((0, 0, 300, 40), words), [])
+
+    def test_a_line_spanning_the_gutter_merges_its_columns(self):
+        words = (
+            _words(0, 10, (10, "Name"), (200, "Value"))
+            + _words(1, 20, (10, "A heading that runs straight across the gutter"))
+            + _words(2, 30, (10, "Alpha"), (200, "First"))
+        )
+        # One column left means nothing divides cleanly, so the table stays whole.
+        self.assertEqual(text_aligned_table_cells((0, 0, 400, 50), words), [])
 
 
 class PreservationRuleTests(unittest.TestCase):

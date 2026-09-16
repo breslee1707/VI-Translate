@@ -38,6 +38,7 @@ from pdf2zh.rules import (
     matching_table_cells,
     page_has_image,
     should_translate_table_cell,
+    text_aligned_table_cells,
 )
 
 @dataclass(frozen=True)
@@ -175,6 +176,51 @@ def pymupdf_can_round_trip(path: Path) -> bool:
             except Exception:
                 pass  # a document that failed to save also fails to close
     return True
+
+
+def horizontal_rules(page: Document) -> list[tuple[float, float, float, float]]:
+    """Thin horizontal strokes and bars drawn on a page, in text coordinates."""
+    rules = []
+    try:
+        drawings = page.get_drawings()
+    except Exception:  # noqa: BLE001 - no rules only means less evidence of rows
+        return rules
+    for drawing in drawings:
+        for item in drawing.get("items", ()):
+            if item[0] == "l":
+                start, end = item[1], item[2]
+                if abs(start.y - end.y) <= 0.5 and abs(start.x - end.x) >= 5:
+                    rules.append((min(start.x, end.x), start.y, max(start.x, end.x), end.y))
+            elif item[0] == "re":
+                rect = item[1]
+                if rect.height <= 2.0 and rect.width >= 5:
+                    rules.append((rect.x0, rect.y0, rect.x1, rect.y1))
+    return rules
+
+
+def span_sizes(page: Document) -> list[tuple[float, float, float, float, float]]:
+    """Each text span's box and font size."""
+    sizes = []
+    for block in page.get_text("dict").get("blocks", ()):
+        for line in block.get("lines", ()):
+            for span in line.get("spans", ()):
+                if span.get("text", "").strip():
+                    sizes.append((*span["bbox"], float(span["size"])))
+    return sizes
+
+
+def mixes_text_sizes(
+    bounds: tuple[float, float, float, float],
+    spans: list[tuple[float, float, float, float, float]],
+) -> bool:
+    """Whether text inside the bounds is set in noticeably different sizes."""
+    x0, y0, x1, y1 = bounds
+    inside = [
+        size
+        for sx0, sy0, sx1, sy1, size in spans
+        if x0 <= (sx0 + sx1) / 2 <= x1 and y0 <= (sy0 + sy1) / 2 <= y1
+    ]
+    return bool(inside) and max(inside) > min(inside) * 1.15
 
 
 def apply_ocr_region_ownership(
@@ -378,8 +424,21 @@ def translate_patch(
             page_bounds = layout_bounds.setdefault(page.pageno, {})
             page_height = float(page_rect.height)
             page_words = source_page.get_text("words", sort=True)
+            page_rules = None
+            page_span_sizes = None
             for table_bounds in model_table_bounds:
-                for cell in matching_table_cells(table_bounds, detected_tables):
+                cells = matching_table_cells(table_bounds, detected_tables)
+                aligned = False
+                if not cells:
+                    # No grid to read cells from; the text alignment may still
+                    # divide the table cleanly, or return nothing and keep it.
+                    if page_rules is None:
+                        page_rules = horizontal_rules(source_page)
+                    cells = text_aligned_table_cells(table_bounds, page_words, page_rules)
+                    aligned = bool(cells)
+                    if aligned and page_span_sizes is None:
+                        page_span_sizes = span_sizes(source_page)
+                for cell in cells:
                     cx0 = max(float(cell[0]), table_bounds[0])
                     cy0 = max(float(cell[1]), table_bounds[1])
                     cx1 = min(float(cell[2]), table_bounds[2])
@@ -396,6 +455,12 @@ def translate_patch(
                         cell_words, (cx0, cy0, cx1, cy1)
                     ):
                         if not should_translate_table_cell(cluster.text):
+                            continue
+                        # A gridless table was never translated before, and a
+                        # cell such as "dA dimensioned at 200 mm" holds a
+                        # subscripted variable the reflow printed small and
+                        # raised. Mixed sizes keep such a cell as it was.
+                        if aligned and mixes_text_sizes(cluster.bbox, page_span_sizes):
                             continue
                         for word in cluster.words:
                             wx0, wy0, wx1, wy1 = (

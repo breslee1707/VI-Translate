@@ -6,6 +6,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from enum import Enum, IntEnum
+from statistics import median
 from string import Template
 from typing import Dict
 
@@ -16,7 +17,12 @@ from pdfminer.pdffont import PDFCIDFont, PDFUnicodeNotDefined
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
 from pdfminer.utils import apply_matrix_pt, mult_matrix
 from pymupdf import Font
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_not_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from pdf2zh.rules import (
     is_bullet_character,
@@ -26,6 +32,7 @@ from pdf2zh.rules import (
 )
 from pdf2zh.translator import (
     ENGINES,
+    UNRETRYABLE_ERRORS,
     BaseTranslator,
     encode_formula_placeholders,
     restore_formula_placeholders,
@@ -110,12 +117,25 @@ def text_style_from_descriptor(descriptor: Dict | None) -> TextStyle | None:
 
 
 def text_style_of(character: LTChar) -> TextStyle:
-    """Emphasis for one glyph: what the font declares, else what it is called."""
+    """Emphasis for one glyph: what the font declares, else what it is called.
+
+    A descriptor can say a face is italic, but it seldom says a face is bold:
+    ForceBold and FontWeight are both optional. Google Docs writes Flags 6 for
+    TimesNewRomanPS-BoldMT and nothing else, so reading the descriptor alone
+    set every bold heading of the RISKS report in regular type. Boldness
+    therefore also comes from the name; slant still comes from the descriptor.
+    """
     descriptor = getattr(getattr(character, "font", None), "descriptor", None)
     style = text_style_from_descriptor(descriptor)
-    if style is not None:
-        return style
-    return text_style_from_font(character.fontname)
+    if style is None:
+        return text_style_from_font(character.fontname)
+    named = text_style_from_font(character.fontname)
+    if named in (TextStyle.BOLD, TextStyle.BOLD_ITALIC):
+        if style == TextStyle.REGULAR:
+            return TextStyle.BOLD
+        if style == TextStyle.ITALIC:
+            return TextStyle.BOLD_ITALIC
+    return style
 
 
 def text_orientation(matrix) -> tuple[float, float, float, float] | None:
@@ -273,6 +293,60 @@ def glyph_layout_class(
     neighbours = [int(cls) for cls, count in zip(expanded_classes, expanded_counts)
                   if cls > 1 and count >= glyph_area * 0.15]
     return neighbours[0] if len(neighbours) == 1 else original
+
+
+def typical_line_pitch(baselines: Iterable[float], size: float) -> float | None:
+    """The usual step from one line to the next among a region's body glyphs."""
+    rows = sorted({round(float(value), 1) for value in baselines}, reverse=True)
+    steps = [
+        upper - lower
+        for upper, lower in zip(rows, rows[1:])
+        if size * 0.8 <= upper - lower <= size * 3
+    ]
+    return median(steps) if steps else None
+
+
+# A numbered heading or list item: "5.0.1. ", "3) ", "b. ", "(iv) ", "• ", "① ".
+ITEM_OPENING_PATTERN = re.compile(
+    r"\s*(?:\(?\d{1,3}(?:\.\d{1,3})*[.)]|\(?[A-Za-z][.)]|\(?[ivxlcdmIVXLCDM]{1,6}[.)]"
+    r"|[•●▪■◦○◆◇►▶‣–—①-⓿-])\s"
+)
+CJK_PATTERN = re.compile(r"[　-ヿ㐀-鿿가-힯＀-￯]")
+
+
+def wrap_starts_new_item(
+    gap: float, size: float, pitch: float | None, opening: str = ""
+) -> bool:
+    """Whether wrapping back to the left edge begins a new item, not the next line.
+
+    A gap of one and a half font sizes used to be enough. That is ordinary
+    leading in a document set at 1.5 line spacing, which Google Docs and most
+    Vietnamese coursework use, so every line of the RISKS report became a
+    paragraph of its own: the translator got 539 fragments of sentences, and
+    each was a separate request. Past that gap the region's own line pitch now
+    decides, unless the new line opens with a heading or item number, which
+    starts a new paragraph as before. Single-spaced documents are unchanged.
+    """
+    if gap <= size * 1.5:
+        return False
+    if pitch is None or gap > pitch * 1.25:
+        return True
+    return ITEM_OPENING_PATTERN.match(opening) is not None
+
+
+def paragraph_source_leading(
+    pitch: float | None, size: float, wraps: bool
+) -> float | None:
+    """The leading, in ems, of a wrapped paragraph set with wide line spacing.
+
+    Only spacing of 1.4 em or more counts, so single-spaced documents keep the
+    target language's leading exactly as before. The fit loop still tightens
+    it down to the language floor when the translation needs the room.
+    """
+    if not wraps or pitch is None or size <= 0:
+        return None
+    leading = pitch / size
+    return min(leading, 2.5) if leading >= 1.4 else None
 
 
 def line_ends_paragraph(
@@ -532,6 +606,81 @@ def preferred_translation(text: str, language: str) -> str | None:
     return f"{leading}{replacement}{trailing}"
 
 
+# A blocked or unreachable service is waited out once for the whole document
+# inside the translator, and a verdict on one segment will not change, so
+# neither is retried here. That leaves a glitch in a single answer, which a
+# couple of quick attempts cover. Eight attempts up to a minute apart used to
+# make every failing segment cost two minutes, four threads at a time.
+@retry(
+    retry=retry_if_not_exception_type(UNRETRYABLE_ERRORS),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def request_translation(translator: BaseTranslator, text: str) -> str:
+    return translator.translate(text)
+
+
+def rotated_glyph_geometry(
+    character: LTChar, orientation: tuple[float, float, float, float]
+) -> tuple[float, float, float]:
+    """Where a quarter-turned glyph starts and ends along its baseline, and which baseline.
+
+    Measured in the text's own frame: the first two values run along the
+    reading direction, the third across it through the glyph origin, so glyphs
+    of one rotated line share (nearly) the same third value.
+    """
+    a, b = orientation[0], orientation[1]
+    corners = (
+        (character.x0, character.y0),
+        (character.x0, character.y1),
+        (character.x1, character.y0),
+        (character.x1, character.y1),
+    )
+    along = [x * a + y * b for x, y in corners]
+    origin_x, origin_y = float(character.matrix[4]), float(character.matrix[5])
+    return min(along), max(along), origin_y * a - origin_x * b
+
+
+def rotated_run_stands_alone(
+    run: Sequence[tuple[float, float, float]],
+    others: Iterable[tuple[float, float, float]],
+    size: float,
+) -> bool:
+    """Whether quarter-turned glyphs form one whole line that is safe to rebuild.
+
+    Rotated text is rebuilt along a single baseline, which suits a rotated
+    heading. A landscape table set sideways on a portrait page is different:
+    its cells hold several lines, and the layout model can hand over a whole
+    row of cells as one region. Sorting those glyphs along the baseline
+    interleaved the lines ("DNAAs sHayybsridization"), a line split between
+    regions sent a fragment ("Hy") that came back as "Xin chào", and each
+    answer was printed on one shrunken line across the cells. A run is rebuilt
+    only when it is one unbroken line, nothing continues it on the same
+    baseline, and no neighbouring line runs alongside it.
+    """
+    if not run or size <= 0:
+        return False
+    baselines = [offset for _start, _end, offset in run]
+    if max(baselines) - min(baselines) > size * 0.5:
+        return False
+    ordered = sorted(run)
+    for previous, current in zip(ordered, ordered[1:]):
+        if current[0] - previous[1] > size * 1.5:
+            return False
+    start = min(glyph[0] for glyph in run)
+    end = max(glyph[1] for glyph in run)
+    baseline = sorted(baselines)[len(baselines) // 2]
+    for other_start, other_end, other_offset in others:
+        distance = abs(other_offset - baseline)
+        if distance <= size * 0.5:
+            if other_start <= end + size * 1.5 and other_end >= start - size * 1.5:
+                return False
+        elif distance <= size * 1.6 and min(end, other_end) > max(start, other_start):
+            return False
+    return True
+
+
 def should_translate_rotated_text(text: str) -> bool:
     """Keep rotated document-control identifiers such as reference numbers."""
     visible = strip_style_tags(text).strip()
@@ -675,6 +824,10 @@ class Paragraph:
         self.layout_bound: tuple[float, float, float, float] | None = None
         self.orientation = text_orientation(matrix or (1, 0, 0, 1))
         self.rotated_chars: list[LTChar] = []
+        # Rotated text that cannot be rebuilt safely is drawn from its source
+        # glyphs, together with the protected glyphs it held.
+        self.replay_source = False
+        self.replay_formulas: list[int] = []
         self.open_style = TextStyle.REGULAR
         # Replayed in front of this paragraph's runs. A translation cannot
         # carry a colour change through the translator the way it carries a
@@ -984,6 +1137,49 @@ class TranslateConverter(PDFConverterEx):
                 )
             )
 
+        # Each region's own line pitch, so that ordinary 1.5 line spacing is not
+        # mistaken for the gap between list items.
+        region_baselines: dict[int, list[tuple[float, float]]] = {}
+        region_cjk: Counter[int] = Counter()
+        line_start: LTChar | None = None
+        previous_glyph: LTChar | None = None
+        for child in ltpage:
+            if isinstance(child, LTChar) and not is_outside_page(child, self.page_clip):
+                child.layout_class = glyph_layout_class(
+                    self.layout[ltpage.pageid],
+                    (child.x0, child.y0, child.x1, child.y1),
+                    ocr_paragraphs,
+                )
+                if (text_orientation(child.matrix) == IDENTITY_ORIENTATION
+                        and child.get_text().strip()):
+                    region_baselines.setdefault(child.layout_class, []).append(
+                        (child.y0, child.size)
+                    )
+                    if CJK_PATTERN.match(child.get_text()):
+                        region_cjk[child.layout_class] += 1
+                # The first characters of each line, read ahead so the wrap
+                # test can see whether a line opens with an item number.
+                if (previous_glyph is None
+                        or child.x1 < previous_glyph.x0
+                        or abs(child.y0 - previous_glyph.y0) > previous_glyph.size * 0.5):
+                    line_start = child
+                    child.line_opening = ""
+                if line_start is not None and len(line_start.line_opening) < 12:
+                    line_start.line_opening += child.get_text()
+                previous_glyph = child
+        region_pitch: dict[int, float | None] = {}
+        for region, glyphs in region_baselines.items():
+            # CJK text keeps the gap rule it always had: without spaces, and with
+            # item numbers drawn apart from their text, joining its wrapped lines
+            # left a drawn circle behind its number in test_1.
+            if region_cjk[region] >= len(glyphs) * 0.3:
+                region_pitch[region] = None
+                continue
+            body = median(size for _y, size in glyphs)
+            region_pitch[region] = typical_line_pitch(
+                (y for y, size in glyphs if size >= body * 0.9), body
+            )
+
         ############################################################
         for child in ltpage:
             if isinstance(child, LTChar):
@@ -992,7 +1188,7 @@ class TranslateConverter(PDFConverterEx):
                 cur_v = False
                 layout = self.layout[ltpage.pageid]
                 h, w = layout.shape
-                cls = glyph_layout_class(layout, (child.x0, child.y0, child.x1, child.y1), ocr_paragraphs)
+                cls = child.layout_class
                 if is_bullet_character(child.get_text(), child.fontname):
                     cls = 0
                 orientation = text_orientation(child.matrix)
@@ -1060,7 +1256,10 @@ class TranslateConverter(PDFConverterEx):
                         # it's likely a new list item, not a continuation
                         if (cls not in ocr_paragraphs
                             and child.x1 < xt.x0
-                            and abs(child.y0 - xt.y0) > pstk[-1].size * 1.5):
+                            and wrap_starts_new_item(
+                                abs(child.y0 - xt.y0), pstk[-1].size, region_pitch.get(cls),
+                                getattr(child, "line_opening", ""),
+                            )):
                             close_style(len(sstk) - 1)
                             new_paragraph(child, cls)
                         elif child.x0 > xt.x1 + 1:
@@ -1092,6 +1291,7 @@ class TranslateConverter(PDFConverterEx):
                     adopt_graphic(pstk[-1], child)
                     if pstk[-1].orientation != IDENTITY_ORIENTATION:
                         pstk[-1].rotated_chars.append(child)
+                        child.rotated_paragraph = len(pstk) - 1
                         pstk[-1].text_length += len(child.get_text())
                     else:
                         if size_should_follow_body(
@@ -1148,6 +1348,13 @@ class TranslateConverter(PDFConverterEx):
                 varl.append(vlstk)
                 varf.append(vfix)
 
+        rotated_glyphs: dict[tuple, list[LTChar]] = {}
+        for child in ltpage:
+            if isinstance(child, LTChar):
+                orientation = text_orientation(child.matrix)
+                if orientation not in (None, IDENTITY_ORIENTATION):
+                    child.rotated_geometry = rotated_glyph_geometry(child, orientation)
+                    rotated_glyphs.setdefault(orientation, []).append(child)
         for index, paragraph in enumerate(pstk):
             close_style(index)
             if not paragraph.rotated_chars:
@@ -1160,6 +1367,18 @@ class TranslateConverter(PDFConverterEx):
                     + float(character.matrix[5]) * b
                 ),
             )
+            # Serialising below keeps only the rotated glyphs, so a protected
+            # glyph held in this paragraph (a bullet, a formula) would be lost.
+            held = [int(value) for value in re.findall(r"\{v(\d+)\}", sstk[index])]
+            stands_alone = rotated_run_stands_alone(
+                [character.rotated_geometry for character in ordered],
+                (
+                    glyph.rotated_geometry
+                    for glyph in rotated_glyphs.get(paragraph.orientation, [])
+                    if getattr(glyph, "rotated_paragraph", None) != index
+                ),
+                max(matrix_font_size(character.matrix) for character in ordered),
+            )
             sstk[index] = styled_character_text(ordered)
             paragraph.text_length = sum(len(char.get_text()) for char in ordered)
             first = ordered[0]
@@ -1167,7 +1386,11 @@ class TranslateConverter(PDFConverterEx):
             paragraph.x, paragraph.y = paragraph.anchor
             paragraph.size = matrix_font_size(first.matrix)
             paragraph.brk = False
-            if not should_translate_rotated_text(sstk[index]):
+            if held or not stands_alone:
+                paragraph.replay_source = True
+                paragraph.replay_formulas = held
+                preserved_segments.add(sstk[index])
+            elif not should_translate_rotated_text(sstk[index]):
                 preserved_segments.add(sstk[index])
 
         page_bounds = self.layout_bounds.get(ltpage.pageid, {})
@@ -1188,40 +1411,61 @@ class TranslateConverter(PDFConverterEx):
         ############################################################
         log.debug("\n==========[SSTACK]==========\n")
 
-        # Google throttles a long document, so back off instead of hammering it.
-        # Roughly two minutes of patience per segment, then give up rather than
-        # hang the run forever the way an unbounded retry used to.
-        @retry(
-            wait=wait_exponential(multiplier=1, min=1, max=60),
-            stop=stop_after_attempt(8),
-            reraise=True,
-        )
-        def request_translation(s: str) -> str:
-            return self.translator.translate(s)
-
         def translate_segment(s: str) -> str:
             preferred = preferred_translation(s, self.translator.lang_out)
             if preferred is not None:
                 return preferred
             encoded = encode_formula_placeholders(s)
-            translated = request_translation(encoded)
+            translated = request_translation(self.translator, encoded)
             return restore_formula_placeholders(s, translated)
+
+        def leave_untranslated(s: str, e: BaseException) -> str:
+            # A book is thousands of segments over tens of minutes, so one
+            # dead connection must not throw the whole document away. Keep
+            # the source text and let the caller report how much is missing.
+            if log.isEnabledFor(logging.DEBUG):
+                log.exception(e, exc_info=e)
+            else:
+                log.exception(e, exc_info=False)
+            self.record_translation_failure(s, type(e).__name__)
+            return s
 
         def worker(s: str) -> str:
             if not is_translatable_segment(s, preserved_segments):
                 return s
             try:
                 return translate_segment(s)
-            except BaseException as e:
-                # A book is thousands of segments over tens of minutes, so one
-                # dead connection must not throw the whole document away. Keep
-                # the source text and let the caller report how much is missing.
-                if log.isEnabledFor(logging.DEBUG):
-                    log.exception(e)
+            except BaseException as e:  # noqa: BLE001 - logged and reported by leave_untranslated
+                return leave_untranslated(s, e)
+
+        def translate_together(translate_many) -> list[str]:
+            # The whole page goes to the translator at once, so a service that
+            # blocks heavy use sees a request or two per page, not one per line.
+            news = list(sstk)
+            asked: list[int] = []
+            for index, s in enumerate(sstk):
+                if not is_translatable_segment(s, preserved_segments):
+                    continue
+                preferred = preferred_translation(s, self.translator.lang_out)
+                if preferred is None:
+                    asked.append(index)
                 else:
-                    log.exception(e, exc_info=False)
-                self.record_translation_failure(s, type(e).__name__)
-                return s
+                    news[index] = preferred
+            answers = translate_many(
+                [encode_formula_placeholders(sstk[index]) for index in asked]
+            )
+            for index, answer in zip(asked, answers):
+                # One refusal answers every segment of its batch; raising that
+                # one exception again for each would grow its traceback each time.
+                if isinstance(answer, BaseException):
+                    news[index] = leave_untranslated(sstk[index], answer)
+                    continue
+                try:
+                    news[index] = restore_formula_placeholders(sstk[index], answer)
+                except BaseException as e:  # noqa: BLE001 - logged and reported by leave_untranslated
+                    news[index] = leave_untranslated(sstk[index], e)
+            return news
+
         # Counted here rather than inside worker: worker runs on the pool, and
         # "+= 1" from several threads drops updates.
         translatable = sum(
@@ -1230,10 +1474,14 @@ class TranslateConverter(PDFConverterEx):
         self.translatable_segments += translatable
         self.segments_by_page[ltpage.pageid] += translatable
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.thread
-        ) as executor:
-            news = list(executor.map(worker, sstk))
+        translate_many = getattr(self.translator, "translate_many", None)
+        if translate_many is not None:
+            news = translate_together(translate_many)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.thread
+            ) as executor:
+                news = list(executor.map(worker, sstk))
 
         ############################################################
         def raw_string(fcur: str, cstk: str):
@@ -1499,30 +1747,41 @@ class TranslateConverter(PDFConverterEx):
         ]
         minimum_line_height = min_line_height_for_language(self.translator.lang_out)
 
+        def source_glyph_operation(character: LTChar) -> str:
+            """Draw a glyph exactly where, and how, the source drew it."""
+            a, b, c, d, e, f = character.matrix
+            scale = getattr(character, "source_scaling", 1.0)
+            rise = getattr(character, "source_rise", 0.0)
+            return gen_op_txt(
+                self.fontid[character.font],
+                getattr(character, "source_fontsize", 1.0),
+                e + c * rise, f + d * rise,
+                raw_string(self.fontid[character.font], chr(character.cid)),
+                TextStyle.REGULAR, (a * scale, b * scale, c, d),
+                getattr(character, "graphic_instruction", ""),
+            )
+
+        def replay_protected(identifiers: Iterable[int]) -> None:
+            for vid in identifiers:
+                ops_list.extend(source_glyph_operation(character) for character in var[vid])
+                for rule in varl[vid]:
+                    ops_list.append(gen_op_line(
+                        rule.pts[0][0], rule.pts[0][1],
+                        rule.pts[1][0] - rule.pts[0][0],
+                        rule.pts[1][1] - rule.pts[0][1], rule.linewidth,
+                    ))
+
         for id, new in enumerate(news):
             if pstk[id].cls == 0:
                 # A protected block is not prose to fit. Reflowing its glyphs
                 # shifted form labels and detached rules even with new==src.
-                for identifier in re.findall(r"\{v(\d+)\}", sstk[id]):
-                    vid = int(identifier)
-                    for character in var[vid]:
-                        a, b, c, d, e, f = character.matrix
-                        scale = getattr(character, "source_scaling", 1.0)
-                        rise = getattr(character, "source_rise", 0.0)
-                        ops_list.append(gen_op_txt(
-                            self.fontid[character.font],
-                            getattr(character, "source_fontsize", 1.0),
-                            e + c * rise, f + d * rise,
-                            raw_string(self.fontid[character.font], chr(character.cid)),
-                            TextStyle.REGULAR, (a * scale, b * scale, c, d),
-                            getattr(character, "graphic_instruction", ""),
-                        ))
-                    for rule in varl[vid]:
-                        ops_list.append(gen_op_line(
-                            rule.pts[0][0], rule.pts[0][1],
-                            rule.pts[1][0] - rule.pts[0][0],
-                            rule.pts[1][1] - rule.pts[0][1], rule.linewidth,
-                        ))
+                replay_protected(int(value) for value in re.findall(r"\{v(\d+)\}", sstk[id]))
+                continue
+            if pstk[id].replay_source:
+                ops_list.extend(
+                    source_glyph_operation(character) for character in pstk[id].rotated_chars
+                )
+                replay_protected(pstk[id].replay_formulas)
                 continue
             x: float = pstk[id].x
             y: float = pstk[id].y
@@ -1567,12 +1826,24 @@ class TranslateConverter(PDFConverterEx):
             # an extra line and print straight over the paragraph below it -
             # in a textbook whose paragraph boxes are stacked half a point
             # apart, there is nowhere else for that line to go.
-            # Count how many lines the original text occupied
-            orig_lines = (
-                max(1, round(height / (pstk[id].size * default_line_height)))
-                if brk
-                else 1
+            # A paragraph set with generous line spacing keeps it: rebuilt at
+            # the language's own leading, a 1.5-spaced report shrank into
+            # dense blocks with a gap under each one.
+            source_leading = paragraph_source_leading(
+                region_pitch.get(pstk[id].cls), pstk[id].size, brk
             )
+            # Count how many lines the original text occupied
+            if source_leading is not None:
+                orig_lines = max(
+                    1,
+                    round((height - pstk[id].size) / (pstk[id].size * source_leading)) + 1,
+                )
+            else:
+                orig_lines = (
+                    max(1, round(height / (pstk[id].size * default_line_height)))
+                    if brk
+                    else 1
+                )
             total_avail = paragraph_width_budget(x, x0, x1, orig_lines)
             # Measure actual width of translated text (excluding formula tags)
             total_new_width = 0
@@ -1824,7 +2095,7 @@ class TranslateConverter(PDFConverterEx):
                     "graphic": pstk[id].graphic_instruction,
                 })
 
-            line_height = default_line_height
+            line_height = max(default_line_height, source_leading or 0.0)
             fit_height = fit_budgets[id]
 
             # Fit the prose to the box on its own. Charging the formula's extra

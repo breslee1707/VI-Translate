@@ -5,11 +5,16 @@ from __future__ import annotations
 import html
 import json
 import logging
+import os
 import re
 import threading
+import time
 import unicodedata
 from collections import Counter
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any, ClassVar
+from urllib.parse import quote_plus, urlparse
 
 import requests
 
@@ -45,6 +50,270 @@ class SegmentTooLongError(ValueError):
     by the marker check, but plain prose is silently cut in half. Refusing the
     segment keeps the source text and lets the caller say what happened.
     """
+
+
+class SegmentRejectedError(ValueError):
+    """Raised when the service refuses one segment outright (HTTP 400).
+
+    The same text gets the same answer however often it is sent, so waiting
+    to send it again only holds up the page.
+    """
+
+
+class RateLimitedError(RuntimeError):
+    """Raised when Google refuses this network rather than this segment.
+
+    A heavy run is redirected to Google's CAPTCHA page and answered HTTP 429.
+    That verdict is on the address, so every later segment meets it too.
+    """
+
+
+class BatchMismatchError(RuntimeError):
+    """Raised when a batch does not come back one translated line per segment.
+
+    Sending the same batch again would only repeat the answer; halving it finds
+    the segment that did not keep to its own line.
+    """
+
+
+class ServiceUnavailableError(RuntimeError):
+    """Raised when the service gives no usable answer: no connection, a timeout, a 5xx."""
+
+
+# Sending these again repeats a verdict, or a wait the whole document already paid.
+UNRETRYABLE_ERRORS = (
+    SegmentTooLongError,
+    SegmentRejectedError,
+    RateLimitedError,
+    ServiceUnavailableError,
+    BatchMismatchError,
+)
+
+
+class OutageBackoff:
+    """Wait out an unreachable service once per document, not per segment.
+
+    Each segment used to retry on its own: eight attempts and about two minutes
+    of backoff, on four threads at once, so a 1944-segment book whose network
+    dropped would have spent some sixteen hours retrying. Here the workers hold
+    back together for a doubling pause. After PATIENCE seconds without an
+    answer each remaining segment is refused at once, and one request per pause
+    still checks whether the service is back. A block is not an outage and is
+    never waited out this way: see NetworkBlock.
+    """
+
+    FIRST_PAUSE = 5.0
+    LONGEST_PAUSE = 60.0
+    PATIENCE = 120.0
+
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._pause = self.FIRST_PAUSE
+        self._resume_at = float("-inf")
+        self._outage_began: float | None = None
+        # Counts recorded failures. A request carries the count it started
+        # under, so an answer to something sent before the latest failure says
+        # nothing new: four workers hitting one block pause once, not four
+        # times, and a reply that was already on its way does not end it.
+        self._failures = 0
+        self._failure: RateLimitedError | ServiceUnavailableError | None = None
+
+    def before_request(self) -> int:
+        """Hold a request while a pause is in force, then return the count it starts under.
+
+        Once patience has run out the outage is raised instead, except for the
+        single request per pause that checks whether it is over.
+        """
+        while True:
+            with self._lock:
+                now = self._clock()
+                exhausted = (
+                    self._outage_began is not None
+                    and now - self._outage_began >= self.PATIENCE
+                )
+                if now >= self._resume_at:
+                    if exhausted:
+                        self._resume_at = now + self._pause
+                    return self._failures
+                if exhausted:
+                    raise type(self._failure)(str(self._failure))
+                delay = self._resume_at - now
+            self._sleep(delay)
+
+    def failed(self, started: int, error: RateLimitedError | ServiceUnavailableError) -> None:
+        """Record a request that met the outage, and pause every worker."""
+        with self._lock:
+            self._failure = error
+            if started < self._failures:
+                return
+            now = self._clock()
+            if self._outage_began is None:
+                self._outage_began = now
+            self._failures += 1
+            self._resume_at = now + self._pause
+            self._pause = min(self._pause * 2, self.LONGEST_PAUSE)
+
+    def succeeded(self, started: int) -> None:
+        """Record an answer to a request sent since the latest failure."""
+        with self._lock:
+            if started < self._failures:
+                return
+            self._outage_began = None
+            self._failure = None
+            self._pause = self.FIRST_PAUSE
+            self._resume_at = float("-inf")
+
+
+class NetworkBlock:
+    """Remember that Google refused this network, and stop asking while it does.
+
+    A block does not lift while requests keep arriving, and version 0.3.0 kept
+    them arriving: each blocked segment was retried eight times on four
+    threads for as long as the document ran. Once refused, requests stop at
+    once - for the rest of the document, the rest of the queue and the next
+    run, since the moment is written to disk - and a single request per
+    RECHECK_AFTER seconds asks whether the block has lifted.
+    """
+
+    RECHECK_AFTER = 600.0
+
+    def __init__(
+        self,
+        path: str | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self._path = path
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._loaded = path is None
+        self._since: float | None = None
+
+    def before_request(self) -> None:
+        """Refuse a request while a block is fresh, letting one through per interval."""
+        with self._lock:
+            self._load()
+            if self._since is None:
+                return
+            now = self._clock()
+            # A clock set back would otherwise hold requests back indefinitely.
+            if 0 <= now - self._since < self.RECHECK_AFTER:
+                raise RateLimitedError(
+                    "Google Translate refused this network moments ago; no request is "
+                    "sent until the block has had time to lift"
+                )
+            # This request is the check; any other waits for its answer.
+            self._since = now
+            self._save()
+
+    def refused(self) -> None:
+        """Record that Google has just refused this network."""
+        with self._lock:
+            self._loaded = True
+            self._since = self._clock()
+            self._save()
+
+    def answered(self) -> None:
+        """Record a real answer: the block, if there was one, is over."""
+        with self._lock:
+            if self._since is None:
+                return
+            self._since = None
+            self._save()
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            with open(self._path, encoding="utf-8") as stream:
+                self._since = float(json.load(stream)["blocked_at"])
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            logger.debug("Ignoring unreadable Google block record: %s", error)
+
+    def _save(self) -> None:
+        if self._path is None:
+            return
+        try:
+            if self._since is None:
+                if os.path.exists(self._path):
+                    os.remove(self._path)
+                return
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            with open(self._path, "w", encoding="utf-8") as stream:
+                json.dump({"blocked_at": self._since}, stream)
+        except OSError as error:
+            logger.debug("Could not record the Google block: %s", error)
+
+
+class RequestPace:
+    """Send one request at a time, at least GAP seconds after the last answer.
+
+    Worker threads used to fire four requests at once, one per segment, which
+    is the traffic Google's abuse check looks for. Every translator in the
+    process shares one pace, so a queue of documents cannot overlap either.
+    """
+
+    GAP = 1.0
+
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._ready_at = float("-inf")
+
+    @contextmanager
+    def turn(self) -> Iterator[None]:
+        """Hold the only request slot, after waiting out the gap."""
+        with self._lock:
+            delay = self._ready_at - self._clock()
+            if delay > 0:
+                self._sleep(delay)
+            try:
+                yield
+            finally:
+                self._ready_at = self._clock() + self.GAP
+
+
+GOOGLE_BLOCK = NetworkBlock(
+    os.path.join(os.path.expanduser("~"), ".cache", "pdf2zh", "google-block.json")
+)
+GOOGLE_PACE = RequestPace()
+
+
+def is_google_block(response: requests.Response) -> bool:
+    """Whether Google answered with its verdict on the network, not a translation."""
+    if response.status_code == 429:
+        return True
+    return urlparse(response.url or "").path.startswith("/sorry/")
+
+
+BATCH_RESULT_PATTERN = re.compile(
+    r'(?s)class="(?:t0|result-container)">((?:[^<]|<br\s*/?>)*)', re.IGNORECASE
+)
+# Every character str.splitlines() breaks at.
+LINE_BREAK_PATTERN = re.compile("[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
+
+
+def result_lines(page: str) -> list[str]:
+    """The non-empty translated lines of an answer, whether broken by newline or <br>."""
+    match = BATCH_RESULT_PATTERN.search(page)
+    if match is None:
+        raise RuntimeError("Google Translate response did not contain a translation result")
+    text = html.unescape(re.sub(r"(?i)<br\s*/?>", "\n", match.group(1)))
+    lines = (remove_control_characters(line).strip() for line in text.splitlines())
+    return [line for line in lines if line]
 
 
 def remove_control_characters(value: str) -> str:
@@ -177,10 +446,33 @@ class BaseTranslator:
 
 
 class GoogleTranslator(BaseTranslator):
-    """Translate through Google's mobile web endpoint without an API key."""
+    """Translate through Google's mobile web endpoint without an API key.
+
+    The endpoint is meant for people, and Google blocks a network that uses it
+    like a batch service. Up to 0.3.0 every segment was its own request, four
+    at a time, retried eight times once refused: a 500-page book was thousands
+    of requests, and the retries kept knocking on a network already blocked.
+    A page's segments now travel together, one request at a time, and a
+    refusal stops requests instead of repeating them.
+    """
 
     name = "google"
     lang_map: ClassVar[dict[str, str]] = {"zh": "zh-CN"}
+
+    # The /m endpoint carries the text in the query string and rejects more
+    # than this; it is the service's limit, not a preference.
+    MAXIMUM_SEGMENT_CHARACTERS = 5000
+    # A batch is measured as it travels, percent-encoded: a Vietnamese letter
+    # takes up to nine bytes of the URL, an English one a single byte.
+    BATCH_QUERY_BYTES = 5000
+    BATCH_SEGMENTS = 50
+    # Google translates each line on its own and keeps the line breaks, so a
+    # blank line keeps segments apart without any marker it could translate.
+    BATCH_SEPARATOR = "\n\n"
+    # Batches that may come back with the wrong number of lines, while none has
+    # come back right, before a document sends its segments one by one.
+    BATCH_MISSES_ALLOWED = 3
+    GLITCH_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -206,10 +498,16 @@ class GoogleTranslator(BaseTranslator):
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
             )
         }
-
-    # The /m endpoint carries the text in the query string and rejects more
-    # than this; it is the service's limit, not a preference.
-    MAXIMUM_SEGMENT_CHARACTERS = 5000
+        # One translator serves every worker thread of a document, so an
+        # outage seen by one of them holds back all of them.
+        self.outage = OutageBackoff()
+        # Shared by every translator in the process, and the block also by the
+        # next process: they describe this network, not this document.
+        self.pace = GOOGLE_PACE
+        self.block = GOOGLE_BLOCK
+        self.sleep: Callable[[float], None] = time.sleep
+        self._batch_hits = 0
+        self._batch_misses = 0
 
     def do_translate(self, text: str) -> str:
         if len(text) > self.MAXIMUM_SEGMENT_CHARACTERS:
@@ -217,15 +515,7 @@ class GoogleTranslator(BaseTranslator):
                 f"segment of {len(text)} characters exceeds the "
                 f"{self.MAXIMUM_SEGMENT_CHARACTERS} the service accepts"
             )
-        response = self.session.get(
-            self.endpoint,
-            params={"tl": self.lang_out, "sl": self.lang_in, "q": text},
-            headers=self.headers,
-            timeout=30,
-        )
-        if response.status_code == 400:
-            raise RuntimeError("Google Translate rejected the text segment")
-        response.raise_for_status()
+        response = self._fetch(text)
         match = re.search(
             r'(?s)class="(?:t0|result-container)">(.*?)<',
             response.text,
@@ -233,6 +523,151 @@ class GoogleTranslator(BaseTranslator):
         if match is None:
             raise RuntimeError("Google Translate response did not contain a translation result")
         return remove_control_characters(html.unescape(match.group(1)))
+
+    def translate_many(self, texts: Sequence[str]) -> list[str | Exception]:
+        """Translate a page's segments in as few requests as the service allows.
+
+        Returns one answer per text, in order: its translation, or the exception
+        that kept it from being translated. Cached and repeated segments are
+        not sent at all.
+        """
+        keys = [normalise_number_abbreviation(text) for text in texts]
+        answers: dict[str, str | Exception] = {}
+        waiting: list[str] = []
+        for key in dict.fromkeys(keys):
+            cached = None if self.ignore_cache else self.cache.get(key)
+            if cached is None:
+                waiting.append(key)
+            else:
+                answers[key] = cached
+        for batch in self._batches(waiting):
+            self._translate_batch(batch, answers)
+        return [answers[key] for key in keys]
+
+    @property
+    def batching(self) -> bool:
+        return self._batch_hits > 0 or self._batch_misses < self.BATCH_MISSES_ALLOWED
+
+    def _batches(self, texts: Sequence[str]) -> Iterator[list[str]]:
+        """Group texts into requests, sending alone any that cannot share one."""
+        separator = len(quote_plus(self.BATCH_SEPARATOR))
+        batch: list[str] = []
+        used = 0
+        for text in texts:
+            size = len(quote_plus(text))
+            if size > self.BATCH_QUERY_BYTES or LINE_BREAK_PATTERN.search(text):
+                yield [text]
+                continue
+            if batch and (
+                used + separator + size > self.BATCH_QUERY_BYTES
+                or len(batch) >= self.BATCH_SEGMENTS
+            ):
+                yield batch
+                batch, used = [], 0
+            used = size if not batch else used + separator + size
+            batch.append(text)
+        if batch:
+            yield batch
+
+    def _translate_batch(self, batch: list[str], answers: dict[str, str | Exception]) -> None:
+        if len(batch) == 1 or not self.batching:
+            for text in batch:
+                answers[text] = self._translate_alone(text)
+            return
+        try:
+            lines = self._retrying(lambda: self._translate_joined(batch))
+        except (BatchMismatchError, SegmentRejectedError):
+            # A segment that did not keep to its own line, or one the service
+            # refused, spoils only its own half.
+            self._batch_misses += 1
+            middle = len(batch) // 2
+            self._translate_batch(batch[:middle], answers)
+            self._translate_batch(batch[middle:], answers)
+            return
+        except Exception as error:  # noqa: BLE001 - reported per segment by the caller
+            for text in batch:
+                answers[text] = error
+            return
+        self._batch_hits += 1
+        for text, line in zip(batch, lines):
+            answers[text] = line
+            if not self.ignore_cache:
+                self.cache.set(text, line)
+
+    def _translate_alone(self, text: str) -> str | Exception:
+        try:
+            translated = self._retrying(lambda: self.do_translate(text))
+        except Exception as error:  # noqa: BLE001 - reported per segment by the caller
+            return error
+        if not self.ignore_cache:
+            self.cache.set(text, translated)
+        return translated
+
+    def _translate_joined(self, batch: list[str]) -> list[str]:
+        response = self._fetch(self.BATCH_SEPARATOR.join(batch))
+        lines = result_lines(response.text)
+        if len(lines) != len(batch):
+            raise BatchMismatchError(
+                f"{len(batch)} segments came back as {len(lines)} lines"
+            )
+        return lines
+
+    def _retrying(self, attempt: Callable[[], Any]) -> Any:
+        """Repeat a request only for a glitch in one answer, a couple of times."""
+        for number in range(1, self.GLITCH_ATTEMPTS + 1):
+            try:
+                return attempt()
+            except UNRETRYABLE_ERRORS:
+                raise
+            except Exception:
+                if number == self.GLITCH_ATTEMPTS:
+                    raise
+                self.sleep(float(2 ** (number - 1)))
+        raise AssertionError("unreachable")
+
+    def _fetch(self, text: str) -> requests.Response:
+        """Send one request: paced, held back while the service is out, never into a block."""
+        while True:
+            self.block.before_request()
+            started = self.outage.before_request()
+            failure: ServiceUnavailableError | None = None
+            with self.pace.turn():
+                try:
+                    response = self.session.get(
+                        self.endpoint,
+                        params={"tl": self.lang_out, "sl": self.lang_in, "q": text},
+                        headers=self.headers,
+                        timeout=30,
+                    )
+                except (requests.ConnectionError, requests.Timeout) as error:
+                    # The exception text carries the request URL, which holds the
+                    # document's own words; only its kind is kept.
+                    failure = ServiceUnavailableError(
+                        f"Google Translate could not be reached ({type(error).__name__})"
+                    )
+            if failure is not None:
+                self.outage.failed(started, failure)
+                continue
+            if is_google_block(response):
+                self.block.refused()
+                raise RateLimitedError(
+                    "Google Translate is refusing requests from this network "
+                    "(HTTP 429, CAPTCHA page)"
+                )
+            if response.status_code >= 500:
+                self.outage.failed(
+                    started,
+                    ServiceUnavailableError(
+                        f"Google Translate answered HTTP {response.status_code}"
+                    ),
+                )
+                continue
+            self.outage.succeeded(started)
+            self.block.answered()
+            if response.status_code in (400, 413, 414):
+                raise SegmentRejectedError("Google Translate rejected the text segment")
+            response.raise_for_status()
+            return response
 
 
 def placeholders(text: str) -> list[str]:

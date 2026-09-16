@@ -82,9 +82,12 @@ LANGUAGE_NAMES = {
 
 OCR_NAMES = {
     "off": "Tắt OCR",
-    "standard": "Tự động (khuyên dùng)",
+    "standard": "Tự động",
     "enhanced": "Nâng cao (chậm)",
 }
+# OCR is slow, and it turns every scanned page into text for Google: a scanned
+# book becomes thousands of segments. It runs only for someone who turns it on.
+DEFAULT_OCR_MODE = "off"
 
 STATUS_MARKS = {"queued": "•", "running": "▶", "done": "✓", "partial": "!", "failed": "✕", "skipped": "–"}
 STATUS_COLORS = {
@@ -179,11 +182,28 @@ def collect_pdfs(paths: list[Path]) -> list[Path]:
     return list(unique)
 
 
+# Named beside the count, because a block and a dead connection each ask the
+# user for something different, and neither is a fault in their document.
+SERVICE_FAILURE_ADVICE = {
+    "RateLimitedError": "Google tạm chặn mạng này vì nhận quá nhiều yêu cầu; ứng dụng "
+    "đã ngừng gửi để lệnh chặn sớm được gỡ, hãy dịch lại sau",
+    "ServiceUnavailableError": "Google Dịch không phản hồi, hãy kiểm tra mạng rồi dịch lại",
+}
+
+
 def translation_outcome(result) -> tuple[str, str]:
     """Return the queue state and an honest, compact coverage summary."""
     details = []
     if result.untranslated:
-        details.append(f"{result.untranslated} đoạn chưa dịch được")
+        summary = f"{result.untranslated} đoạn chưa dịch được"
+        causes = [
+            advice
+            for reason, advice in SERVICE_FAILURE_ADVICE.items()
+            if result.reasons.get(reason)
+        ]
+        if causes:
+            summary += f" ({'; '.join(causes)}; phần đã dịch được giữ lại cho lần sau)"
+        details.append(summary)
     if result.image_only_pages:
         pages = ", ".join(str(page + 1) for page in result.image_only_pages)
         details.append(f"trang scan giữ nguyên: {pages}")
@@ -455,7 +475,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             controls, values=[OCR_NAMES[mode] for mode in OCR_MODES],
             width=200, height=34, font=ctk.CTkFont(self.ui_font, size=13),
         )
-        self.ocr.set(OCR_NAMES["standard"])
+        self.ocr.set(OCR_NAMES[DEFAULT_OCR_MODE])
         self.ocr.grid(row=1, column=1, pady=(0, PAD), sticky="w")
 
         self.translate_button = ctk.CTkButton(

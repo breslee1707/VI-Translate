@@ -65,7 +65,7 @@ python3 -m venv "<skill-root>/.venv"
 "<skill-root>/.venv/bin/python" -m pip install -r "<skill-root>/requirements.txt"
 ```
 
-Shared runner options include `--target-language` (default `vi`), `--source-language auto`, one-based `--pages 1,3-5`, `--threads 1..8` (default `4`), `--ignore-cache`, and `--overwrite`.
+Shared runner options include `--target-language` (default `vi`), `--source-language auto`, one-based `--pages 1,3-5`, `--threads 1..8` (default `4`; Google mode still sends one request at a time), `--ignore-cache`, and `--overwrite`.
 
 ## Google mode
 
@@ -84,6 +84,10 @@ macOS/Linux:
 ```
 
 For a batch, process files individually and report progress. A failure on one file must not stop the remaining files; collect and report all failures at the end.
+
+Google mode sends a page's segments in one request, one request at a time, because the free endpoint blocks a network that floods it. Never run several Google jobs in parallel.
+
+If a run reports segments refused with HTTP 429, Google has blocked the network for now. The runner stops sending at the first refusal and, for the next 10 minutes, refuses further runs without contacting Google, because every request into a block prolongs it. Do not rerun it in a loop or try to get past the CAPTCHA. Report it, then offer a later rerun (finished segments are cached) or handoff mode.
 
 ## Handoff mode
 

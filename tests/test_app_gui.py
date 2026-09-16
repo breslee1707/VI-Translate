@@ -13,6 +13,7 @@ from unittest import mock
 try:
     from app.gui import (
         App,
+        DEFAULT_OCR_MODE,
         LANGUAGE_NAMES,
         OCR_NAMES,
         collect_pdfs,
@@ -87,6 +88,11 @@ class LanguageMenuTests(unittest.TestCase):
         self.assertEqual(set(OCR_NAMES), set(OCR_MODES))
         self.assertEqual(len(set(OCR_NAMES.values())), len(OCR_NAMES))
 
+    def test_ocr_stays_off_until_the_user_turns_it_on(self):
+        """A scanned book read by OCR is thousands of Google requests, and slow."""
+        self.assertEqual(DEFAULT_OCR_MODE, "off")
+        self.assertIn(DEFAULT_OCR_MODE, OCR_NAMES)
+
 
 @unittest.skipIf(App is None, "desktop app dependencies are not installed")
 class TranslationOutcomeTests(unittest.TestCase):
@@ -94,6 +100,7 @@ class TranslationOutcomeTests(unittest.TestCase):
     def result(**overrides):
         values = {
             "untranslated": 0,
+            "reasons": {},
             "image_only_pages": (),
             "ocr_warnings": (),
         }
@@ -102,6 +109,28 @@ class TranslationOutcomeTests(unittest.TestCase):
 
     def test_clean_ocr_result_is_done(self):
         self.assertEqual(translation_outcome(self.result()), ("done", ""))
+
+    def test_a_blocked_network_is_named_so_the_user_waits_instead_of_retrying(self):
+        state, detail = translation_outcome(
+            self.result(untranslated=40, reasons={"RateLimitedError": 38, "ConnectionError": 2})
+        )
+        self.assertEqual(state, "partial")
+        self.assertIn("40 đoạn chưa dịch được", detail)
+        self.assertIn("Google tạm chặn", detail)
+        self.assertNotIn("kiểm tra mạng", detail)
+
+    def test_a_dead_connection_is_told_apart_from_a_block(self):
+        _, detail = translation_outcome(
+            self.result(untranslated=3, reasons={"ServiceUnavailableError": 3})
+        )
+        self.assertIn("kiểm tra mạng", detail)
+        self.assertNotIn("Google tạm chặn", detail)
+
+    def test_a_segment_that_did_not_fit_gets_no_network_advice(self):
+        _, detail = translation_outcome(
+            self.result(untranslated=1, reasons={"single line needs less than 50% font size": 1})
+        )
+        self.assertEqual(detail, "1 đoạn chưa dịch được")
 
     def test_preserved_scan_is_never_reported_as_done(self):
         state, detail = translation_outcome(self.result(image_only_pages=(0, 4)))
@@ -118,7 +147,7 @@ class TranslationOutcomeTests(unittest.TestCase):
     def test_worker_passes_selected_ocr_mode_and_reports_safety_partial(self):
         source = Path("scan.pdf")
         result = types.SimpleNamespace(
-            path=Path("translated/scan-vi.pdf"), untranslated=0,
+            path=Path("translated/scan-vi.pdf"), untranslated=0, reasons={},
             image_only_pages=(), ocr_warnings=("page 1: preserved (form grid)",),
         )
         app = types.SimpleNamespace(events=queue.Queue(), failures={})

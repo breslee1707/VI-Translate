@@ -17,7 +17,8 @@ The bundled core translates ordinary text while retaining document structures wh
 - Each reliable cell is reflowed within its own bounds while the source grid, fills, and borders remain unchanged.
 - When a dense cell is shrunk vertically, its line spacing is recomputed from the final font size so the last line cannot spill into the next row.
 - Cell translations may shrink to half the source font size. If text still cannot fit, that cell remains in the source language and the result is reported as partial.
-- Tables without a reliable cell grid remain fully protected.
+- A detected table drawn without a grid is divided by its text alignment: full-height white-space columns, and cells that end at a wider line gap, a rule, a bullet, or a change of left edge. A cell that mixes text sizes, such as a subscripted variable, keeps its source glyphs.
+- Tables that divide neither by a cell grid nor by text alignment remain fully protected.
 
 ## Numbered-page structures
 
@@ -65,7 +66,7 @@ These classifications preserve the complete page layout instead of reflowing num
 
 - A rendered image covering more than half the page marks the page as scanned. With OCR off, ordinary text-layer translation still uses backing rectangles where required. With OCR enabled, the scan raster is replaced only after safe source-text cleanup succeeds.
 - Standard and enhanced OCR process only image-only pages. They require explicit layout ownership and reject pages or regions containing unsafe grids, formulas, figures, code, damaged recognition, ambiguous reading order, or residual source ink. Preserved scan content is reported as partial; a document with no safe translatable segment is refused rather than delivered as a translation of nothing.
-- A segment left in the source language is reported with the reason it was left: it did not fit at the smallest allowed size, the translation came back with damaged formula markers, or the engine failed.
+- A segment left in the source language is reported with the reason it was left: it did not fit at the smallest allowed size, the translation came back with damaged formula markers, Google refused the network (HTTP 429), the service did not answer, or the engine failed.
 - Structural PDF repair uses a temporary copy. The source file is never
   overwritten. Repair is triggered by the engine failing to rewrite the
   document, not by a second library's willingness to open it, and a document

@@ -30,10 +30,13 @@ from pdf2zh.converter import (
     line_ends_paragraph,
     glyph_layout_class,
     output_font_lacks_glyph,
+    paragraph_source_leading,
     run_is_prose,
     stroke_colour_from_fill,
     preferred_translation,
     rescale_operations,
+    rotated_glyph_geometry,
+    rotated_run_stands_alone,
     should_translate_rotated_text,
     size_should_follow_body,
     styled_text_matrix,
@@ -42,9 +45,12 @@ from pdf2zh.converter import (
     text_orientation,
     text_style_from_descriptor,
     text_style_from_font,
+    text_style_of,
+    typical_line_pitch,
     uses_synthetic_bold,
     vertical_ink_extent,
     vertical_shift_to_bounds,
+    wrap_starts_new_item,
 )
 from pdf2zh.high_level import output_style_font_paths
 from pdf2zh.converter import PDFConverterEx
@@ -370,6 +376,49 @@ class TableCellFitTests(unittest.TestCase):
         )
 
 
+class LineSpacingTests(unittest.TestCase):
+    """The RISKS report is set at 1.5 line spacing, 12 pt text on a 20.7 pt pitch."""
+
+    def test_the_pitch_is_the_usual_step_between_body_lines(self):
+        baselines = [700.0, 679.3, 658.6, 637.9, 617.2]
+        self.assertAlmostEqual(typical_line_pitch(baselines, 12.0), 20.7, places=1)
+        # A raised glyph a few points up, and a paragraph gap, do not set the pitch.
+        self.assertAlmostEqual(
+            typical_line_pitch(baselines + [703.5, 560.0], 12.0), 20.7, places=1
+        )
+        self.assertIsNone(typical_line_pitch([700.0], 12.0))
+
+    def test_ordinary_one_and_a_half_spacing_is_not_a_new_item(self):
+        """Every line of the report became a segment: 539 fragments instead of 144 paragraphs."""
+        self.assertFalse(wrap_starts_new_item(20.7, 12.0, 20.7))
+        self.assertTrue(wrap_starts_new_item(32.0, 12.0, 20.7))
+
+    def test_single_spaced_documents_split_exactly_as_before(self):
+        self.assertFalse(wrap_starts_new_item(14.4, 12.0, 14.4))
+        self.assertTrue(wrap_starts_new_item(19.0, 12.0, 14.4))
+        self.assertTrue(wrap_starts_new_item(19.0, 12.0, None))
+
+    def test_a_widely_spaced_paragraph_keeps_its_spacing_and_a_single_spaced_one_does_not_change(self):
+        """Rebuilt at 1.2 em, a 1.5-spaced report shrank into dense blocks with gaps below."""
+        self.assertAlmostEqual(paragraph_source_leading(20.7, 12.0, True), 1.725)
+        self.assertIsNone(paragraph_source_leading(14.4, 12.0, True))
+        self.assertIsNone(paragraph_source_leading(20.7, 12.0, False))
+        self.assertIsNone(paragraph_source_leading(None, 12.0, True))
+        self.assertEqual(paragraph_source_leading(60.0, 12.0, True), 2.5)
+
+    def test_a_numbered_heading_on_the_next_line_still_starts_its_own_paragraph(self):
+        """"5.0. Khung tiếp cận…" and "5.0.1. Từ domestic banking…" were merged."""
+        self.assertTrue(wrap_starts_new_item(20.7, 12.0, 20.7, "5.0.1. Từ dom"))
+        self.assertTrue(wrap_starts_new_item(20.7, 12.0, 20.7, "b) Ngân hàng"))
+        self.assertFalse(wrap_starts_new_item(20.7, 12.0, 20.7, "2019 was a y"))
+        self.assertFalse(wrap_starts_new_item(14.0, 12.0, 20.7, "5.0.1. Từ dom"))
+
+    def test_without_a_measured_pitch_the_old_gap_rule_applies(self):
+        """CJK regions get no pitch: test_1 lost the circle around "2" when its lines were joined."""
+        self.assertTrue(wrap_starts_new_item(31.0, 12.0, None, "异；"))
+        self.assertTrue(wrap_starts_new_item(39.0, 12.0, None, "2将收货清单"))
+
+
 class OrientationAndStyleTests(unittest.TestCase):
     def test_quarter_turn_matrices_are_classified(self):
         self.assertEqual(text_orientation((8, 0, 0, 8, 0, 0)), IDENTITY_ORIENTATION)
@@ -416,6 +465,44 @@ class OrientationAndStyleTests(unittest.TestCase):
         self.assertIsNone(preferred_translation("Designation", "fr"))
         self.assertFalse(should_translate_rotated_text("Ref. no. 304-2"))
         self.assertTrue(should_translate_rotated_text("Designation"))
+
+    @staticmethod
+    def _rotated_line(baseline: float, start: float, words: int, size: float = 8.0):
+        """Glyph geometry for one sideways line: (start, end, baseline) per glyph."""
+        return [(start + index * size * 0.5, start + (index + 1) * size * 0.5, baseline)
+                for index in range(words * 6)]
+
+    def test_rotated_geometry_follows_the_reading_direction(self):
+        glyph = SimpleNamespace(x0=100.0, y0=200.0, x1=108.0, y1=205.0,
+                                matrix=(0, 8, -8, 0, 107.0, 200.0))
+        start, end, baseline = rotated_glyph_geometry(glyph, (0.0, 1.0, -1.0, 0.0))
+        self.assertEqual((start, end), (200.0, 205.0))
+        self.assertEqual(baseline, -107.0)
+
+    def test_an_isolated_rotated_heading_is_rebuilt(self):
+        heading = self._rotated_line(100.0, 0.0, 1)
+        # The next column's heading sits a column's width away, not a line's.
+        neighbour = self._rotated_line(125.0, 0.0, 1)
+        self.assertTrue(rotated_run_stands_alone(heading, neighbour, 8.0))
+
+    def test_a_wrapped_rotated_table_cell_keeps_its_source_glyphs(self):
+        """Combatting page 6: two lines of one sideways cell, 9 pt apart."""
+        first = self._rotated_line(100.0, 0.0, 4)
+        second = self._rotated_line(109.0, 0.0, 3)
+        self.assertFalse(rotated_run_stands_alone(first, second, 8.0))
+        self.assertFalse(rotated_run_stands_alone(second, first, 8.0))
+        # Handed over as one region, sorting them along the baseline interleaved them.
+        self.assertFalse(rotated_run_stands_alone(first + second, [], 8.0))
+
+    def test_a_rotated_line_cut_between_regions_is_not_translated_as_a_fragment(self):
+        """"Hy" alone came back as "Xin chào"; the rest of its word sat in another region."""
+        line = self._rotated_line(100.0, 0.0, 3)
+        self.assertFalse(rotated_run_stands_alone(line[:2], line[2:], 8.0))
+
+    def test_two_cells_on_one_rotated_baseline_are_not_one_line(self):
+        first = self._rotated_line(100.0, 0.0, 2)
+        second = self._rotated_line(100.0, 150.0, 1)
+        self.assertFalse(rotated_run_stands_alone(first + second, [], 8.0))
 
     def test_synthetic_italic_composes_with_rotation(self):
         self.assertEqual(
@@ -572,6 +659,21 @@ class OrientationAndStyleTests(unittest.TestCase):
         self.assertEqual(text_style_from_descriptor({"Flags": 4}), TextStyle.REGULAR)
         self.assertIsNone(text_style_from_descriptor({}))
         self.assertIsNone(text_style_from_descriptor(None))
+
+    def test_a_bold_face_the_descriptor_does_not_mark_bold_stays_bold(self):
+        """Google Docs: Flags 6 for TimesNewRomanPS-BoldMT, 70 for BoldItalicMT."""
+        def glyph(name, flags):
+            return SimpleNamespace(fontname=name, font=SimpleNamespace(descriptor={"Flags": flags}))
+
+        self.assertEqual(text_style_of(glyph("AAAAAA+TimesNewRomanPS-BoldMT", 6)), TextStyle.BOLD)
+        self.assertEqual(
+            text_style_of(glyph("CAAAAA+TimesNewRomanPS-BoldItalicMT", 70)), TextStyle.BOLD_ITALIC
+        )
+        self.assertEqual(text_style_of(glyph("DAAAAA+TimesNewRomanPS-ItalicMT", 68)), TextStyle.ITALIC)
+        self.assertEqual(text_style_of(glyph("BAAAAA+TimesNewRomanPSMT", 6)), TextStyle.REGULAR)
+        # Slant still belongs to the descriptor: an abbreviated italic name stays upright
+        # when the embedded font says it is upright.
+        self.assertEqual(text_style_of(glyph("MinionPro-It", 4)), TextStyle.REGULAR)
 
     def test_only_the_newest_colour_of_each_kind_is_replayed(self):
         """`rg` and `g` write the same slot, so replaying both lets the older win."""

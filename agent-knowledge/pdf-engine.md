@@ -30,6 +30,12 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
 - Tables translate per reliable cell only when the model region and
   `PyMuPDF.find_tables()` overlap by at least 50%. Grid, fill, and border
   operators remain source content. Unreliable tables stay protected.
+  A model table with no grid is divided by its text alignment instead
+  (`text_aligned_table_cells`): columns are white-space gutters wider than
+  twice the table's own word spacing that hold text on at least two rows, and a
+  cell ends at a wider line gap, a rule, a bullet, or a change of left edge. A
+  table that does not divide that way stays protected, and a gridless cell that
+  mixes text sizes (a subscripted variable) keeps its source glyphs.
 - Fully protected blocks replay source glyph matrices, font size, horizontal
   scaling and rise without prose fitting. Their horizontal grid rules stay in
   the source stream. Array operands use PDF whitespace syntax, not Python list
@@ -38,12 +44,20 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   glyph is unnecessary and can rotate the content a second time when the page
   uses `/Rotate 90`; page-level rotation and landscape tables stay exact.
 - Quarter-turn text uses logical baseline orientation. Reflected matrices used
-  with negative font sizes are normalized before classification.
+  with negative font sizes are normalized before classification. Only an
+  isolated single rotated line is rebuilt; a rotated line with a neighbour
+  alongside it, a continuation on its baseline or protected glyphs inside it
+  (a sideways table) replays its source glyphs.
 - Symbol/Wingdings private-use bullets remain source glyphs in their embedded
   dingbat font; prose fonts must not receive those code points.
 - Text fitting accounts for first-line indentation, final glyph ink, formula
   offsets, and cell borders. The minimum translated size is 50% of source;
   unsafe overflow falls back to source text and records a partial result.
+- A wrap back to the left edge starts a new paragraph only when the gap exceeds
+  1.5 em and 1.25 times the region's own line pitch, or when the new line
+  opens with a heading or item number. A wrapped paragraph whose source pitch
+  is 1.4 em or more keeps that leading, and the fit loop may still tighten it.
+  Single-spaced documents split and lead exactly as before.
 - Leading is never compressed below `min_line_height_for_language`, measured
   from real glyph ink (`vi` = 1.10 em). A paragraph short of room reduces
   leading to that floor, then borrows the clear gap below it
@@ -63,8 +77,9 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   `page_has_image` (any image at all) drives the image-only report, because a
   scanner routinely emits one page as dozens of small tiles.
 - The experimental OCR path is opt-in at the CLI (`--ocr standard|enhanced`)
-  and defaults to standard in the desktop GUI, where off/enhanced remain
-  explicit choices. The packaged smoke test loads both OCR profiles.
+  and in the desktop GUI, which starts at off: OCR is slow, and a scanned book
+  it reads becomes thousands of Google segments. The packaged smoke test loads
+  both OCR profiles.
   It adds an invisible sidecar only for image-only pages, never paints white
   backing rectangles on those pages, and replaces the scan image only after a
   safe inpainting pass. DocLayout inference is capped at 1024 pixels while OCR
@@ -83,6 +98,9 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   page for three horizontal rules, two vertical rules, or a crossing pair;
   detected table/formula regions remain independently protected.
 - Outer running headers/footers and standalone bullets remain source pixels.
+  So do item numbers and bullets that introduce text on their row; each starts
+  its item's paragraph and none counts as a recognition fragment. A bullet the
+  recogniser glued to its text is split off at its ink gap.
   Interior protected structures, dense grids, formula/numeric content, damaged
   characters, ambiguous ownership and residual ink still preserve the page and
   report partial. Safe cleanup uses Navier-Stokes inpainting; line-mask analysis
@@ -124,7 +142,45 @@ colour most of its own ink uses, because a colour change cannot travel through
 the translator the way a style marker can.
 
 Emphasis comes from the font descriptor's own flags before the font name, since
-the Adobe Pro families abbreviate the slanted face as `-It`.
+the Adobe Pro families abbreviate the slanted face as `-It`. Boldness also comes from the
+name: descriptors seldom mark it, and Google Docs exports carry `Flags 6` on
+`TimesNewRomanPS-BoldMT`. Regions of CJK text keep the 1.5 em gap rule for
+wrapped lines.
+
+## Translation Service
+
+Google's free `/m` endpoint is meant for people and blocks a network that uses
+it like a batch service: a 302 to `www.google.com/sorry/`, HTTP 429, a CAPTCHA
+page, no `Retry-After`. The verdict is on the address, lasts for hours, and does
+not lift while requests keep arriving. Up to 0.3.0 every segment was its own
+request, four at a time, and a refused segment was sent eight more times.
+
+- A page travels together. `GoogleTranslator.translate_many` joins a page's
+  uncached, distinct segments with blank lines, up to 5000 percent-encoded
+  bytes and 50 segments per request (a Vietnamese letter can take nine bytes of
+  the URL). Google translates each line on its own and keeps the breaks - what
+  goslate and Calibre's Ebook Translator rely on to batch it; the `/m` page
+  itself has not yet been checked from an unblocked network - so the answer
+  must hold exactly one non-empty line per segment, broken by newlines or
+  `<br>`. Any other count, or an HTTP 400, halves the batch; after three such
+  misses with no batch ever right the document sends segments one by one. A
+  segment holding a line break travels alone. On nine stubbed corpus documents
+  this cut requests 5-21 fold (RISKS 144 -> 29, a 41-page textbook excerpt
+  644 -> 45, the OCR'd ERP scan 207 -> 14) and every page rendered identically.
+- `RequestPace` lets one request out at a time, at least 1 s after the last
+  answer, for every translator in the process.
+- `NetworkBlock` stops at the first refusal. The rest of the document, the rest
+  of the queue and the next run (the moment is kept in
+  `~/.cache/pdf2zh/google-block.json`) are refused without a request, and one
+  request per 10 minutes checks whether the block has lifted.
+
+A dead connection or a 5xx is an outage, not a block. `OutageBackoff` pauses
+every worker together (5 s, doubling to 60 s), gives up after 120 s and still
+lets one request per pause check whether the service is back. A glitch in one
+answer gets three quick attempts. Nothing resends a segment the service refused
+(too long, HTTP 400). Never try to get past the CAPTCHA, or rotate proxies,
+domains or keys to dodge a block. Finished segments are cached, so a later run
+of the same file sends only what is still missing.
 
 ## Large Documents
 

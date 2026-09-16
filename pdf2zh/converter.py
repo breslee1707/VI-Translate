@@ -1419,21 +1419,53 @@ class TranslateConverter(PDFConverterEx):
             translated = request_translation(self.translator, encoded)
             return restore_formula_placeholders(s, translated)
 
+        def leave_untranslated(s: str, e: BaseException) -> str:
+            # A book is thousands of segments over tens of minutes, so one
+            # dead connection must not throw the whole document away. Keep
+            # the source text and let the caller report how much is missing.
+            if log.isEnabledFor(logging.DEBUG):
+                log.exception(e, exc_info=e)
+            else:
+                log.exception(e, exc_info=False)
+            self.record_translation_failure(s, type(e).__name__)
+            return s
+
         def worker(s: str) -> str:
             if not is_translatable_segment(s, preserved_segments):
                 return s
             try:
                 return translate_segment(s)
-            except BaseException as e:
-                # A book is thousands of segments over tens of minutes, so one
-                # dead connection must not throw the whole document away. Keep
-                # the source text and let the caller report how much is missing.
-                if log.isEnabledFor(logging.DEBUG):
-                    log.exception(e)
+            except BaseException as e:  # noqa: BLE001 - logged and reported by leave_untranslated
+                return leave_untranslated(s, e)
+
+        def translate_together(translate_many) -> list[str]:
+            # The whole page goes to the translator at once, so a service that
+            # blocks heavy use sees a request or two per page, not one per line.
+            news = list(sstk)
+            asked: list[int] = []
+            for index, s in enumerate(sstk):
+                if not is_translatable_segment(s, preserved_segments):
+                    continue
+                preferred = preferred_translation(s, self.translator.lang_out)
+                if preferred is None:
+                    asked.append(index)
                 else:
-                    log.exception(e, exc_info=False)
-                self.record_translation_failure(s, type(e).__name__)
-                return s
+                    news[index] = preferred
+            answers = translate_many(
+                [encode_formula_placeholders(sstk[index]) for index in asked]
+            )
+            for index, answer in zip(asked, answers):
+                # One refusal answers every segment of its batch; raising that
+                # one exception again for each would grow its traceback each time.
+                if isinstance(answer, BaseException):
+                    news[index] = leave_untranslated(sstk[index], answer)
+                    continue
+                try:
+                    news[index] = restore_formula_placeholders(sstk[index], answer)
+                except BaseException as e:  # noqa: BLE001 - logged and reported by leave_untranslated
+                    news[index] = leave_untranslated(sstk[index], e)
+            return news
+
         # Counted here rather than inside worker: worker runs on the pool, and
         # "+= 1" from several threads drops updates.
         translatable = sum(
@@ -1442,10 +1474,14 @@ class TranslateConverter(PDFConverterEx):
         self.translatable_segments += translatable
         self.segments_by_page[ltpage.pageid] += translatable
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=self.thread
-        ) as executor:
-            news = list(executor.map(worker, sstk))
+        translate_many = getattr(self.translator, "translate_many", None)
+        if translate_many is not None:
+            news = translate_together(translate_many)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.thread
+            ) as executor:
+                news = list(executor.map(worker, sstk))
 
         ############################################################
         def raw_string(fcur: str, cstk: str):

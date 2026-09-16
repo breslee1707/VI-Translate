@@ -182,8 +182,8 @@ def collect_pdfs(paths: list[Path]) -> list[Path]:
 # Named beside the count, because a block and a dead connection each ask the
 # user for something different, and neither is a fault in their document.
 SERVICE_FAILURE_ADVICE = {
-    "RateLimitedError": "Google tạm chặn mạng này vì gửi quá nhiều yêu cầu, "
-    "hãy dịch lại sau hoặc đổi mạng khác",
+    "RateLimitedError": "Google tạm chặn mạng này vì nhận quá nhiều yêu cầu; ứng dụng "
+    "đã ngừng gửi để lệnh chặn sớm được gỡ, hãy dịch lại sau",
     "ServiceUnavailableError": "Google Dịch không phản hồi, hãy kiểm tra mạng rồi dịch lại",
 }
 

@@ -115,9 +115,10 @@ def _describe_failures(reasons: Mapping[str, int]) -> list[str]:
     if rate_limited:
         lines.append(
             f"{_count_of_segments(rate_limited)} stayed in the source language because "
-            "Google Translate is refusing requests from this network (HTTP 429). Translate "
-            "the file again later or from another network; unless --ignore-cache was "
-            "given, the segments that did translate are reused"
+            "Google Translate is refusing requests from this network (HTTP 429). No "
+            "request is sent until the block has had time to lift, since every request "
+            "into it prolongs it; translate the file again later. Unless --ignore-cache "
+            "was given, the segments that did translate are reused"
         )
     if unavailable:
         lines.append(

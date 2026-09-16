@@ -10,6 +10,8 @@ from pdf2zh.translator import (
     FormulaPlaceholderError,
     GoogleTranslator,
     HandoffTranslator,
+    NetworkBlock,
+    RequestPace,
     SegmentTooLongError,
     encode_formula_placeholders,
     has_unrepairable_mojibake,
@@ -249,6 +251,9 @@ class GoogleSegmentLengthTests(unittest.TestCase):
             raise RuntimeError("stop before the network")
 
         translator.session.get = fake_get
+        # Neither this machine's record of a Google block nor the shared pace.
+        translator.block = NetworkBlock()
+        translator.pace = RequestPace(sleep=lambda _seconds: None)
         with self.assertRaises(RuntimeError):
             translator.do_translate("a" * 5000)
         self.assertEqual(len(sent["q"]), 5000)

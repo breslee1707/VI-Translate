@@ -148,17 +148,38 @@ wrapped lines.
 
 ## Translation Service
 
-Google's free `/m` endpoint blocks a network that sends too much: a 302 to
-`www.google.com/sorry/`, HTTP 429, a CAPTCHA page, no `Retry-After`. The verdict
-is on the address, so it is handled once per document, never per segment.
-`OutageBackoff` pauses every worker together (5 s, doubling to 60 s). After
-120 s without an answer it refuses the remaining segments at once, and still
-lets one request per pause check whether the block has lifted. A dead
-connection or a 5xx gets the same treatment. The converter's own retry covers
-only a glitch in a single answer (3 quick attempts). It never resends a
-segment the service refused (too long, HTTP 400) or an outage already waited
-out. Never try to get past the CAPTCHA. Finished segments are cached, so a
-later run of the same file sends only what is still missing.
+Google's free `/m` endpoint is meant for people and blocks a network that uses
+it like a batch service: a 302 to `www.google.com/sorry/`, HTTP 429, a CAPTCHA
+page, no `Retry-After`. The verdict is on the address, lasts for hours, and does
+not lift while requests keep arriving. Up to 0.3.0 every segment was its own
+request, four at a time, and a refused segment was sent eight more times.
+
+- A page travels together. `GoogleTranslator.translate_many` joins a page's
+  uncached, distinct segments with blank lines, up to 5000 percent-encoded
+  bytes and 50 segments per request (a Vietnamese letter can take nine bytes of
+  the URL). Google translates each line on its own and keeps the breaks - what
+  goslate and Calibre's Ebook Translator rely on to batch it; the `/m` page
+  itself has not yet been checked from an unblocked network - so the answer
+  must hold exactly one non-empty line per segment, broken by newlines or
+  `<br>`. Any other count, or an HTTP 400, halves the batch; after three such
+  misses with no batch ever right the document sends segments one by one. A
+  segment holding a line break travels alone. On nine stubbed corpus documents
+  this cut requests 5-21 fold (RISKS 144 -> 29, a 41-page textbook excerpt
+  644 -> 45, the OCR'd ERP scan 207 -> 14) and every page rendered identically.
+- `RequestPace` lets one request out at a time, at least 1 s after the last
+  answer, for every translator in the process.
+- `NetworkBlock` stops at the first refusal. The rest of the document, the rest
+  of the queue and the next run (the moment is kept in
+  `~/.cache/pdf2zh/google-block.json`) are refused without a request, and one
+  request per 10 minutes checks whether the block has lifted.
+
+A dead connection or a 5xx is an outage, not a block. `OutageBackoff` pauses
+every worker together (5 s, doubling to 60 s), gives up after 120 s and still
+lets one request per pause check whether the service is back. A glitch in one
+answer gets three quick attempts. Nothing resends a segment the service refused
+(too long, HTTP 400). Never try to get past the CAPTCHA, or rotate proxies,
+domains or keys to dodge a block. Finished segments are cached, so a later run
+of the same file sends only what is still missing.
 
 ## Large Documents
 

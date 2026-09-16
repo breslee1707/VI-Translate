@@ -568,7 +568,8 @@ class OcrPreparationTests(unittest.TestCase):
 
     def test_ocr_region_prevents_font_metric_induced_sentence_fragments(self):
         # Real NASA OCR: sidecar font 8pt, source baseline step 13pt.
-        # The ordinary >1.5em gap heuristic incorrectly split every line.
+        # A >1.5em gap alone used to split every line. The region's own line
+        # pitch now keeps them together, owned by OCR or not.
         with tempfile.TemporaryDirectory() as temporary:
             document = pymupdf.open()
             page = document.new_page(width=300, height=200)
@@ -598,7 +599,7 @@ class OcrPreparationTests(unittest.TestCase):
                 if owned:
                     self.assertIn("the advancement", rows[0]["src"])
                     self.assertIn("science. The program", rows[0]["src"])
-            self.assertEqual(counts, [3, 1])
+            self.assertEqual(counts, [1, 1])
 
     def test_protected_form_glyphs_and_rules_retain_source_geometry(self):
         doc = pymupdf.open()

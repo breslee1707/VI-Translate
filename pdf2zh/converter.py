@@ -6,6 +6,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from enum import Enum, IntEnum
+from statistics import median
 from string import Template
 from typing import Dict
 
@@ -279,6 +280,60 @@ def glyph_layout_class(
     neighbours = [int(cls) for cls, count in zip(expanded_classes, expanded_counts)
                   if cls > 1 and count >= glyph_area * 0.15]
     return neighbours[0] if len(neighbours) == 1 else original
+
+
+def typical_line_pitch(baselines: Iterable[float], size: float) -> float | None:
+    """The usual step from one line to the next among a region's body glyphs."""
+    rows = sorted({round(float(value), 1) for value in baselines}, reverse=True)
+    steps = [
+        upper - lower
+        for upper, lower in zip(rows, rows[1:])
+        if size * 0.8 <= upper - lower <= size * 3
+    ]
+    return median(steps) if steps else None
+
+
+# A numbered heading or list item: "5.0.1. ", "3) ", "b. ", "(iv) ", "• ", "① ".
+ITEM_OPENING_PATTERN = re.compile(
+    r"\s*(?:\(?\d{1,3}(?:\.\d{1,3})*[.)]|\(?[A-Za-z][.)]|\(?[ivxlcdmIVXLCDM]{1,6}[.)]"
+    r"|[•●▪■◦○◆◇►▶‣–—①-⓿-])\s"
+)
+CJK_PATTERN = re.compile(r"[　-ヿ㐀-鿿가-힯＀-￯]")
+
+
+def wrap_starts_new_item(
+    gap: float, size: float, pitch: float | None, opening: str = ""
+) -> bool:
+    """Whether wrapping back to the left edge begins a new item, not the next line.
+
+    A gap of one and a half font sizes used to be enough. That is ordinary
+    leading in a document set at 1.5 line spacing, which Google Docs and most
+    Vietnamese coursework use, so every line of the RISKS report became a
+    paragraph of its own: the translator got 539 fragments of sentences, and
+    each was a separate request. Past that gap the region's own line pitch now
+    decides, unless the new line opens with a heading or item number, which
+    starts a new paragraph as before. Single-spaced documents are unchanged.
+    """
+    if gap <= size * 1.5:
+        return False
+    if pitch is None or gap > pitch * 1.25:
+        return True
+    return ITEM_OPENING_PATTERN.match(opening) is not None
+
+
+def paragraph_source_leading(
+    pitch: float | None, size: float, wraps: bool
+) -> float | None:
+    """The leading, in ems, of a wrapped paragraph set with wide line spacing.
+
+    Only spacing of 1.4 em or more counts, so single-spaced documents keep the
+    target language's leading exactly as before. The fit loop still tightens
+    it down to the language floor when the translation needs the room.
+    """
+    if not wraps or pitch is None or size <= 0:
+        return None
+    leading = pitch / size
+    return min(leading, 2.5) if leading >= 1.4 else None
 
 
 def line_ends_paragraph(
@@ -1069,6 +1124,49 @@ class TranslateConverter(PDFConverterEx):
                 )
             )
 
+        # Each region's own line pitch, so that ordinary 1.5 line spacing is not
+        # mistaken for the gap between list items.
+        region_baselines: dict[int, list[tuple[float, float]]] = {}
+        region_cjk: Counter[int] = Counter()
+        line_start: LTChar | None = None
+        previous_glyph: LTChar | None = None
+        for child in ltpage:
+            if isinstance(child, LTChar) and not is_outside_page(child, self.page_clip):
+                child.layout_class = glyph_layout_class(
+                    self.layout[ltpage.pageid],
+                    (child.x0, child.y0, child.x1, child.y1),
+                    ocr_paragraphs,
+                )
+                if (text_orientation(child.matrix) == IDENTITY_ORIENTATION
+                        and child.get_text().strip()):
+                    region_baselines.setdefault(child.layout_class, []).append(
+                        (child.y0, child.size)
+                    )
+                    if CJK_PATTERN.match(child.get_text()):
+                        region_cjk[child.layout_class] += 1
+                # The first characters of each line, read ahead so the wrap
+                # test can see whether a line opens with an item number.
+                if (previous_glyph is None
+                        or child.x1 < previous_glyph.x0
+                        or abs(child.y0 - previous_glyph.y0) > previous_glyph.size * 0.5):
+                    line_start = child
+                    child.line_opening = ""
+                if line_start is not None and len(line_start.line_opening) < 12:
+                    line_start.line_opening += child.get_text()
+                previous_glyph = child
+        region_pitch: dict[int, float | None] = {}
+        for region, glyphs in region_baselines.items():
+            # CJK text keeps the gap rule it always had: without spaces, and with
+            # item numbers drawn apart from their text, joining its wrapped lines
+            # left a drawn circle behind its number in test_1.
+            if region_cjk[region] >= len(glyphs) * 0.3:
+                region_pitch[region] = None
+                continue
+            body = median(size for _y, size in glyphs)
+            region_pitch[region] = typical_line_pitch(
+                (y for y, size in glyphs if size >= body * 0.9), body
+            )
+
         ############################################################
         for child in ltpage:
             if isinstance(child, LTChar):
@@ -1077,7 +1175,7 @@ class TranslateConverter(PDFConverterEx):
                 cur_v = False
                 layout = self.layout[ltpage.pageid]
                 h, w = layout.shape
-                cls = glyph_layout_class(layout, (child.x0, child.y0, child.x1, child.y1), ocr_paragraphs)
+                cls = child.layout_class
                 if is_bullet_character(child.get_text(), child.fontname):
                     cls = 0
                 orientation = text_orientation(child.matrix)
@@ -1145,7 +1243,10 @@ class TranslateConverter(PDFConverterEx):
                         # it's likely a new list item, not a continuation
                         if (cls not in ocr_paragraphs
                             and child.x1 < xt.x0
-                            and abs(child.y0 - xt.y0) > pstk[-1].size * 1.5):
+                            and wrap_starts_new_item(
+                                abs(child.y0 - xt.y0), pstk[-1].size, region_pitch.get(cls),
+                                getattr(child, "line_opening", ""),
+                            )):
                             close_style(len(sstk) - 1)
                             new_paragraph(child, cls)
                         elif child.x0 > xt.x1 + 1:
@@ -1676,12 +1777,24 @@ class TranslateConverter(PDFConverterEx):
             # an extra line and print straight over the paragraph below it -
             # in a textbook whose paragraph boxes are stacked half a point
             # apart, there is nowhere else for that line to go.
-            # Count how many lines the original text occupied
-            orig_lines = (
-                max(1, round(height / (pstk[id].size * default_line_height)))
-                if brk
-                else 1
+            # A paragraph set with generous line spacing keeps it: rebuilt at
+            # the language's own leading, a 1.5-spaced report shrank into
+            # dense blocks with a gap under each one.
+            source_leading = paragraph_source_leading(
+                region_pitch.get(pstk[id].cls), pstk[id].size, brk
             )
+            # Count how many lines the original text occupied
+            if source_leading is not None:
+                orig_lines = max(
+                    1,
+                    round((height - pstk[id].size) / (pstk[id].size * source_leading)) + 1,
+                )
+            else:
+                orig_lines = (
+                    max(1, round(height / (pstk[id].size * default_line_height)))
+                    if brk
+                    else 1
+                )
             total_avail = paragraph_width_budget(x, x0, x1, orig_lines)
             # Measure actual width of translated text (excluding formula tags)
             total_new_width = 0
@@ -1933,7 +2046,7 @@ class TranslateConverter(PDFConverterEx):
                     "graphic": pstk[id].graphic_instruction,
                 })
 
-            line_height = default_line_height
+            line_height = max(default_line_height, source_leading or 0.0)
             fit_height = fit_budgets[id]
 
             # Fit the prose to the box on its own. Charging the formula's extra

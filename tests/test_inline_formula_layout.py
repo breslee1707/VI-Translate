@@ -30,6 +30,7 @@ from pdf2zh.converter import (
     line_ends_paragraph,
     glyph_layout_class,
     output_font_lacks_glyph,
+    paragraph_source_leading,
     run_is_prose,
     stroke_colour_from_fill,
     preferred_translation,
@@ -44,9 +45,11 @@ from pdf2zh.converter import (
     text_orientation,
     text_style_from_descriptor,
     text_style_from_font,
+    typical_line_pitch,
     uses_synthetic_bold,
     vertical_ink_extent,
     vertical_shift_to_bounds,
+    wrap_starts_new_item,
 )
 from pdf2zh.high_level import output_style_font_paths
 from pdf2zh.converter import PDFConverterEx
@@ -370,6 +373,49 @@ class TableCellFitTests(unittest.TestCase):
         self.assertFalse(
             text_fits_box_at_minimum_size("{v0}", 10, 10, 10, [20], self._measure)
         )
+
+
+class LineSpacingTests(unittest.TestCase):
+    """The RISKS report is set at 1.5 line spacing, 12 pt text on a 20.7 pt pitch."""
+
+    def test_the_pitch_is_the_usual_step_between_body_lines(self):
+        baselines = [700.0, 679.3, 658.6, 637.9, 617.2]
+        self.assertAlmostEqual(typical_line_pitch(baselines, 12.0), 20.7, places=1)
+        # A raised glyph a few points up, and a paragraph gap, do not set the pitch.
+        self.assertAlmostEqual(
+            typical_line_pitch(baselines + [703.5, 560.0], 12.0), 20.7, places=1
+        )
+        self.assertIsNone(typical_line_pitch([700.0], 12.0))
+
+    def test_ordinary_one_and_a_half_spacing_is_not_a_new_item(self):
+        """Every line of the report became a segment: 539 fragments instead of 144 paragraphs."""
+        self.assertFalse(wrap_starts_new_item(20.7, 12.0, 20.7))
+        self.assertTrue(wrap_starts_new_item(32.0, 12.0, 20.7))
+
+    def test_single_spaced_documents_split_exactly_as_before(self):
+        self.assertFalse(wrap_starts_new_item(14.4, 12.0, 14.4))
+        self.assertTrue(wrap_starts_new_item(19.0, 12.0, 14.4))
+        self.assertTrue(wrap_starts_new_item(19.0, 12.0, None))
+
+    def test_a_widely_spaced_paragraph_keeps_its_spacing_and_a_single_spaced_one_does_not_change(self):
+        """Rebuilt at 1.2 em, a 1.5-spaced report shrank into dense blocks with gaps below."""
+        self.assertAlmostEqual(paragraph_source_leading(20.7, 12.0, True), 1.725)
+        self.assertIsNone(paragraph_source_leading(14.4, 12.0, True))
+        self.assertIsNone(paragraph_source_leading(20.7, 12.0, False))
+        self.assertIsNone(paragraph_source_leading(None, 12.0, True))
+        self.assertEqual(paragraph_source_leading(60.0, 12.0, True), 2.5)
+
+    def test_a_numbered_heading_on_the_next_line_still_starts_its_own_paragraph(self):
+        """"5.0. Khung tiếp cận…" and "5.0.1. Từ domestic banking…" were merged."""
+        self.assertTrue(wrap_starts_new_item(20.7, 12.0, 20.7, "5.0.1. Từ dom"))
+        self.assertTrue(wrap_starts_new_item(20.7, 12.0, 20.7, "b) Ngân hàng"))
+        self.assertFalse(wrap_starts_new_item(20.7, 12.0, 20.7, "2019 was a y"))
+        self.assertFalse(wrap_starts_new_item(14.0, 12.0, 20.7, "5.0.1. Từ dom"))
+
+    def test_without_a_measured_pitch_the_old_gap_rule_applies(self):
+        """CJK regions get no pitch: test_1 lost the circle around "2" when its lines were joined."""
+        self.assertTrue(wrap_starts_new_item(31.0, 12.0, None, "异；"))
+        self.assertTrue(wrap_starts_new_item(39.0, 12.0, None, "2将收货清单"))
 
 
 class OrientationAndStyleTests(unittest.TestCase):

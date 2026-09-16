@@ -53,6 +53,11 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
 - Text fitting accounts for first-line indentation, final glyph ink, formula
   offsets, and cell borders. The minimum translated size is 50% of source;
   unsafe overflow falls back to source text and records a partial result.
+- A wrap back to the left edge starts a new paragraph only when the gap exceeds
+  1.5 em and 1.25 times the region's own line pitch, or when the new line
+  opens with a heading or item number. A wrapped paragraph whose source pitch
+  is 1.4 em or more keeps that leading, and the fit loop may still tighten it.
+  Single-spaced documents split and lead exactly as before.
 - Leading is never compressed below `min_line_height_for_language`, measured
   from real glyph ink (`vi` = 1.10 em). A paragraph short of room reduces
   leading to that floor, then borrows the clear gap below it

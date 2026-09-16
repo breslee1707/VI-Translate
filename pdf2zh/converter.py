@@ -553,6 +553,66 @@ def request_translation(translator: BaseTranslator, text: str) -> str:
     return translator.translate(text)
 
 
+def rotated_glyph_geometry(
+    character: LTChar, orientation: tuple[float, float, float, float]
+) -> tuple[float, float, float]:
+    """Where a quarter-turned glyph starts and ends along its baseline, and which baseline.
+
+    Measured in the text's own frame: the first two values run along the
+    reading direction, the third across it through the glyph origin, so glyphs
+    of one rotated line share (nearly) the same third value.
+    """
+    a, b = orientation[0], orientation[1]
+    corners = (
+        (character.x0, character.y0),
+        (character.x0, character.y1),
+        (character.x1, character.y0),
+        (character.x1, character.y1),
+    )
+    along = [x * a + y * b for x, y in corners]
+    origin_x, origin_y = float(character.matrix[4]), float(character.matrix[5])
+    return min(along), max(along), origin_y * a - origin_x * b
+
+
+def rotated_run_stands_alone(
+    run: Sequence[tuple[float, float, float]],
+    others: Iterable[tuple[float, float, float]],
+    size: float,
+) -> bool:
+    """Whether quarter-turned glyphs form one whole line that is safe to rebuild.
+
+    Rotated text is rebuilt along a single baseline, which suits a rotated
+    heading. A landscape table set sideways on a portrait page is different:
+    its cells hold several lines, and the layout model can hand over a whole
+    row of cells as one region. Sorting those glyphs along the baseline
+    interleaved the lines ("DNAAs sHayybsridization"), a line split between
+    regions sent a fragment ("Hy") that came back as "Xin chào", and each
+    answer was printed on one shrunken line across the cells. A run is rebuilt
+    only when it is one unbroken line, nothing continues it on the same
+    baseline, and no neighbouring line runs alongside it.
+    """
+    if not run or size <= 0:
+        return False
+    baselines = [offset for _start, _end, offset in run]
+    if max(baselines) - min(baselines) > size * 0.5:
+        return False
+    ordered = sorted(run)
+    for previous, current in zip(ordered, ordered[1:]):
+        if current[0] - previous[1] > size * 1.5:
+            return False
+    start = min(glyph[0] for glyph in run)
+    end = max(glyph[1] for glyph in run)
+    baseline = sorted(baselines)[len(baselines) // 2]
+    for other_start, other_end, other_offset in others:
+        distance = abs(other_offset - baseline)
+        if distance <= size * 0.5:
+            if other_start <= end + size * 1.5 and other_end >= start - size * 1.5:
+                return False
+        elif distance <= size * 1.6 and min(end, other_end) > max(start, other_start):
+            return False
+    return True
+
+
 def should_translate_rotated_text(text: str) -> bool:
     """Keep rotated document-control identifiers such as reference numbers."""
     visible = strip_style_tags(text).strip()
@@ -696,6 +756,10 @@ class Paragraph:
         self.layout_bound: tuple[float, float, float, float] | None = None
         self.orientation = text_orientation(matrix or (1, 0, 0, 1))
         self.rotated_chars: list[LTChar] = []
+        # Rotated text that cannot be rebuilt safely is drawn from its source
+        # glyphs, together with the protected glyphs it held.
+        self.replay_source = False
+        self.replay_formulas: list[int] = []
         self.open_style = TextStyle.REGULAR
         # Replayed in front of this paragraph's runs. A translation cannot
         # carry a colour change through the translator the way it carries a
@@ -1113,6 +1177,7 @@ class TranslateConverter(PDFConverterEx):
                     adopt_graphic(pstk[-1], child)
                     if pstk[-1].orientation != IDENTITY_ORIENTATION:
                         pstk[-1].rotated_chars.append(child)
+                        child.rotated_paragraph = len(pstk) - 1
                         pstk[-1].text_length += len(child.get_text())
                     else:
                         if size_should_follow_body(
@@ -1169,6 +1234,13 @@ class TranslateConverter(PDFConverterEx):
                 varl.append(vlstk)
                 varf.append(vfix)
 
+        rotated_glyphs: dict[tuple, list[LTChar]] = {}
+        for child in ltpage:
+            if isinstance(child, LTChar):
+                orientation = text_orientation(child.matrix)
+                if orientation not in (None, IDENTITY_ORIENTATION):
+                    child.rotated_geometry = rotated_glyph_geometry(child, orientation)
+                    rotated_glyphs.setdefault(orientation, []).append(child)
         for index, paragraph in enumerate(pstk):
             close_style(index)
             if not paragraph.rotated_chars:
@@ -1181,6 +1253,18 @@ class TranslateConverter(PDFConverterEx):
                     + float(character.matrix[5]) * b
                 ),
             )
+            # Serialising below keeps only the rotated glyphs, so a protected
+            # glyph held in this paragraph (a bullet, a formula) would be lost.
+            held = [int(value) for value in re.findall(r"\{v(\d+)\}", sstk[index])]
+            stands_alone = rotated_run_stands_alone(
+                [character.rotated_geometry for character in ordered],
+                (
+                    glyph.rotated_geometry
+                    for glyph in rotated_glyphs.get(paragraph.orientation, [])
+                    if getattr(glyph, "rotated_paragraph", None) != index
+                ),
+                max(matrix_font_size(character.matrix) for character in ordered),
+            )
             sstk[index] = styled_character_text(ordered)
             paragraph.text_length = sum(len(char.get_text()) for char in ordered)
             first = ordered[0]
@@ -1188,7 +1272,11 @@ class TranslateConverter(PDFConverterEx):
             paragraph.x, paragraph.y = paragraph.anchor
             paragraph.size = matrix_font_size(first.matrix)
             paragraph.brk = False
-            if not should_translate_rotated_text(sstk[index]):
+            if held or not stands_alone:
+                paragraph.replay_source = True
+                paragraph.replay_formulas = held
+                preserved_segments.add(sstk[index])
+            elif not should_translate_rotated_text(sstk[index]):
                 preserved_segments.add(sstk[index])
 
         page_bounds = self.layout_bounds.get(ltpage.pageid, {})
@@ -1509,30 +1597,41 @@ class TranslateConverter(PDFConverterEx):
         ]
         minimum_line_height = min_line_height_for_language(self.translator.lang_out)
 
+        def source_glyph_operation(character: LTChar) -> str:
+            """Draw a glyph exactly where, and how, the source drew it."""
+            a, b, c, d, e, f = character.matrix
+            scale = getattr(character, "source_scaling", 1.0)
+            rise = getattr(character, "source_rise", 0.0)
+            return gen_op_txt(
+                self.fontid[character.font],
+                getattr(character, "source_fontsize", 1.0),
+                e + c * rise, f + d * rise,
+                raw_string(self.fontid[character.font], chr(character.cid)),
+                TextStyle.REGULAR, (a * scale, b * scale, c, d),
+                getattr(character, "graphic_instruction", ""),
+            )
+
+        def replay_protected(identifiers: Iterable[int]) -> None:
+            for vid in identifiers:
+                ops_list.extend(source_glyph_operation(character) for character in var[vid])
+                for rule in varl[vid]:
+                    ops_list.append(gen_op_line(
+                        rule.pts[0][0], rule.pts[0][1],
+                        rule.pts[1][0] - rule.pts[0][0],
+                        rule.pts[1][1] - rule.pts[0][1], rule.linewidth,
+                    ))
+
         for id, new in enumerate(news):
             if pstk[id].cls == 0:
                 # A protected block is not prose to fit. Reflowing its glyphs
                 # shifted form labels and detached rules even with new==src.
-                for identifier in re.findall(r"\{v(\d+)\}", sstk[id]):
-                    vid = int(identifier)
-                    for character in var[vid]:
-                        a, b, c, d, e, f = character.matrix
-                        scale = getattr(character, "source_scaling", 1.0)
-                        rise = getattr(character, "source_rise", 0.0)
-                        ops_list.append(gen_op_txt(
-                            self.fontid[character.font],
-                            getattr(character, "source_fontsize", 1.0),
-                            e + c * rise, f + d * rise,
-                            raw_string(self.fontid[character.font], chr(character.cid)),
-                            TextStyle.REGULAR, (a * scale, b * scale, c, d),
-                            getattr(character, "graphic_instruction", ""),
-                        ))
-                    for rule in varl[vid]:
-                        ops_list.append(gen_op_line(
-                            rule.pts[0][0], rule.pts[0][1],
-                            rule.pts[1][0] - rule.pts[0][0],
-                            rule.pts[1][1] - rule.pts[0][1], rule.linewidth,
-                        ))
+                replay_protected(int(value) for value in re.findall(r"\{v(\d+)\}", sstk[id]))
+                continue
+            if pstk[id].replay_source:
+                ops_list.extend(
+                    source_glyph_operation(character) for character in pstk[id].rotated_chars
+                )
+                replay_protected(pstk[id].replay_formulas)
                 continue
             x: float = pstk[id].x
             y: float = pstk[id].y

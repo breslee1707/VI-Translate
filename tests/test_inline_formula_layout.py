@@ -34,6 +34,8 @@ from pdf2zh.converter import (
     stroke_colour_from_fill,
     preferred_translation,
     rescale_operations,
+    rotated_glyph_geometry,
+    rotated_run_stands_alone,
     should_translate_rotated_text,
     size_should_follow_body,
     styled_text_matrix,
@@ -416,6 +418,44 @@ class OrientationAndStyleTests(unittest.TestCase):
         self.assertIsNone(preferred_translation("Designation", "fr"))
         self.assertFalse(should_translate_rotated_text("Ref. no. 304-2"))
         self.assertTrue(should_translate_rotated_text("Designation"))
+
+    @staticmethod
+    def _rotated_line(baseline: float, start: float, words: int, size: float = 8.0):
+        """Glyph geometry for one sideways line: (start, end, baseline) per glyph."""
+        return [(start + index * size * 0.5, start + (index + 1) * size * 0.5, baseline)
+                for index in range(words * 6)]
+
+    def test_rotated_geometry_follows_the_reading_direction(self):
+        glyph = SimpleNamespace(x0=100.0, y0=200.0, x1=108.0, y1=205.0,
+                                matrix=(0, 8, -8, 0, 107.0, 200.0))
+        start, end, baseline = rotated_glyph_geometry(glyph, (0.0, 1.0, -1.0, 0.0))
+        self.assertEqual((start, end), (200.0, 205.0))
+        self.assertEqual(baseline, -107.0)
+
+    def test_an_isolated_rotated_heading_is_rebuilt(self):
+        heading = self._rotated_line(100.0, 0.0, 1)
+        # The next column's heading sits a column's width away, not a line's.
+        neighbour = self._rotated_line(125.0, 0.0, 1)
+        self.assertTrue(rotated_run_stands_alone(heading, neighbour, 8.0))
+
+    def test_a_wrapped_rotated_table_cell_keeps_its_source_glyphs(self):
+        """Combatting page 6: two lines of one sideways cell, 9 pt apart."""
+        first = self._rotated_line(100.0, 0.0, 4)
+        second = self._rotated_line(109.0, 0.0, 3)
+        self.assertFalse(rotated_run_stands_alone(first, second, 8.0))
+        self.assertFalse(rotated_run_stands_alone(second, first, 8.0))
+        # Handed over as one region, sorting them along the baseline interleaved them.
+        self.assertFalse(rotated_run_stands_alone(first + second, [], 8.0))
+
+    def test_a_rotated_line_cut_between_regions_is_not_translated_as_a_fragment(self):
+        """"Hy" alone came back as "Xin chào"; the rest of its word sat in another region."""
+        line = self._rotated_line(100.0, 0.0, 3)
+        self.assertFalse(rotated_run_stands_alone(line[:2], line[2:], 8.0))
+
+    def test_two_cells_on_one_rotated_baseline_are_not_one_line(self):
+        first = self._rotated_line(100.0, 0.0, 2)
+        second = self._rotated_line(100.0, 150.0, 1)
+        self.assertFalse(rotated_run_stands_alone(first + second, [], 8.0))
 
     def test_synthetic_italic_composes_with_rotation(self):
         self.assertEqual(

@@ -51,7 +51,7 @@ PDF Translate là ứng dụng mã nguồn mở dành cho Windows, macOS và And
 - **Giữ nguyên bố cục:** bảo toàn vị trí của đoạn văn, công thức, bảng, hình, mục lục và tài liệu tham khảo.
 - **Sẵn sàng để dùng:** tải về, giải nén và chạy; không cần cài Python hay model riêng.
 - **Xử lý hàng loạt:** kéo thả nhiều file PDF hoặc cả thư mục vào ứng dụng.
-- **OCR cục bộ cho trang scan:** chế độ Tự động đọc và dịch vùng văn bản an
+- **OCR cục bộ cho trang scan (bật khi cần):** chế độ Tự động đọc và dịch vùng văn bản an
   toàn; bảng, công thức và hình phức tạp được giữ nguyên thay vì bị phá bố cục.
 - **36 ngôn ngữ đích:** mặc định là tiếng Việt, cùng nhiều ngôn ngữ sử dụng chữ Latin.
 - **Không dừng cả hàng đợi:** một file lỗi không làm gián đoạn các file còn lại.
@@ -122,9 +122,9 @@ Chọn một trong ba cách:
 
 Chọn ngôn ngữ đích trong mục **Dịch sang**. Ứng dụng mặc định dịch sang **Tiếng Việt**.
 
-Với PDF scan, giữ **Trang ảnh scan → Tự động (khuyên dùng)**. Chế độ **Nâng
-cao** chậm hơn đáng kể và chủ yếu dùng để thử nghiệm; **Tắt OCR** nếu bạn chỉ
-muốn xử lý lớp chữ có sẵn. Một trang có bảng, công thức, hình hoặc nhận dạng
+OCR mặc định **tắt**, ứng dụng chỉ xử lý lớp chữ có sẵn. Với PDF scan, chọn
+**Trang ảnh scan → Tự động** trước khi bấm **Dịch**. Chế độ **Nâng cao** chậm
+hơn đáng kể và chủ yếu dùng để thử nghiệm. Một trang có bảng, công thức, hình hoặc nhận dạng
 không chắc chắn sẽ được giữ nguyên và hàng đợi báo **dịch một phần**.
 
 ### 3. Bắt đầu dịch

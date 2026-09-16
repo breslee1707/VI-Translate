@@ -82,9 +82,12 @@ LANGUAGE_NAMES = {
 
 OCR_NAMES = {
     "off": "Tắt OCR",
-    "standard": "Tự động (khuyên dùng)",
+    "standard": "Tự động",
     "enhanced": "Nâng cao (chậm)",
 }
+# OCR is slow, and it turns every scanned page into text for Google: a scanned
+# book becomes thousands of segments. It runs only for someone who turns it on.
+DEFAULT_OCR_MODE = "off"
 
 STATUS_MARKS = {"queued": "•", "running": "▶", "done": "✓", "partial": "!", "failed": "✕", "skipped": "–"}
 STATUS_COLORS = {
@@ -472,7 +475,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             controls, values=[OCR_NAMES[mode] for mode in OCR_MODES],
             width=200, height=34, font=ctk.CTkFont(self.ui_font, size=13),
         )
-        self.ocr.set(OCR_NAMES["standard"])
+        self.ocr.set(OCR_NAMES[DEFAULT_OCR_MODE])
         self.ocr.grid(row=1, column=1, pady=(0, PAD), sticky="w")
 
         self.translate_button = ctk.CTkButton(

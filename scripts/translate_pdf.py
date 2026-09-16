@@ -492,8 +492,8 @@ def translate_pdf(
                 )
             raise TranslationError(
                 f"No text could be extracted from {source.name}: the selected pages are "
-                "image-only scans. This tool does not perform OCR, so run OCR on the "
-                "PDF first and translate the result."
+                "image-only scans. OCR is off; translate the file again with OCR turned "
+                "on (--ocr standard)."
             )
 
         untranslated = len(report.failures)

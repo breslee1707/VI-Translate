@@ -104,8 +104,8 @@ class ScannedDocumentTests(unittest.TestCase):
             raised(
                 RuntimeError(
                     "No text could be extracted from tk.pdf: the selected pages are "
-                    "image-only scans. This tool does not perform OCR, so run OCR on "
-                    "the PDF first and translate the result."
+                    "image-only scans. OCR is off; translate the file again with OCR "
+                    "turned on (--ocr standard)."
                 )
             )
         )

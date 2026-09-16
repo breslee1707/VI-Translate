@@ -77,8 +77,9 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   `page_has_image` (any image at all) drives the image-only report, because a
   scanner routinely emits one page as dozens of small tiles.
 - The experimental OCR path is opt-in at the CLI (`--ocr standard|enhanced`)
-  and defaults to standard in the desktop GUI, where off/enhanced remain
-  explicit choices. The packaged smoke test loads both OCR profiles.
+  and in the desktop GUI, which starts at off: OCR is slow, and a scanned book
+  it reads becomes thousands of Google segments. The packaged smoke test loads
+  both OCR profiles.
   It adds an invisible sidecar only for image-only pages, never paints white
   backing rectangles on those pages, and replaces the scan image only after a
   safe inpainting pass. DocLayout inference is capped at 1024 pixels while OCR

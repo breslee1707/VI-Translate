@@ -80,8 +80,8 @@ _RULES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
         "E-PDF-03",
         ("scanned", "image-only", "OCR", "no extractable text"),
         "PDF chỉ chứa ảnh scan",
-        "Bật OCR Tự động trong ứng dụng. Vùng bảng, công thức hoặc hình không an "
-        "toàn sẽ được giữ nguyên và kết quả được báo là dịch một phần.",
+        "Bật OCR: chọn Trang ảnh scan → Tự động rồi dịch lại. Vùng bảng, công thức "
+        "hoặc hình không an toàn sẽ được giữ nguyên và kết quả được báo là dịch một phần.",
     ),
     (
         "E-NET-04",

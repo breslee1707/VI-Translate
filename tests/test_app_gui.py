@@ -13,6 +13,7 @@ from unittest import mock
 try:
     from app.gui import (
         App,
+        DEFAULT_OCR_MODE,
         LANGUAGE_NAMES,
         OCR_NAMES,
         collect_pdfs,
@@ -86,6 +87,11 @@ class LanguageMenuTests(unittest.TestCase):
 
         self.assertEqual(set(OCR_NAMES), set(OCR_MODES))
         self.assertEqual(len(set(OCR_NAMES.values())), len(OCR_NAMES))
+
+    def test_ocr_stays_off_until_the_user_turns_it_on(self):
+        """A scanned book read by OCR is thousands of Google requests, and slow."""
+        self.assertEqual(DEFAULT_OCR_MODE, "off")
+        self.assertIn(DEFAULT_OCR_MODE, OCR_NAMES)
 
 
 @unittest.skipIf(App is None, "desktop app dependencies are not installed")

@@ -38,7 +38,10 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   glyph is unnecessary and can rotate the content a second time when the page
   uses `/Rotate 90`; page-level rotation and landscape tables stay exact.
 - Quarter-turn text uses logical baseline orientation. Reflected matrices used
-  with negative font sizes are normalized before classification.
+  with negative font sizes are normalized before classification. Only an
+  isolated single rotated line is rebuilt; a rotated line with a neighbour
+  alongside it, a continuation on its baseline or protected glyphs inside it
+  (a sideways table) replays its source glyphs.
 - Symbol/Wingdings private-use bullets remain source glyphs in their embedded
   dingbat font; prose fonts must not receive those code points.
 - Text fitting accounts for first-line indentation, final glyph ink, formula
@@ -83,6 +86,9 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   page for three horizontal rules, two vertical rules, or a crossing pair;
   detected table/formula regions remain independently protected.
 - Outer running headers/footers and standalone bullets remain source pixels.
+  So do item numbers and bullets that introduce text on their row; each starts
+  its item's paragraph and none counts as a recognition fragment. A bullet the
+  recogniser glued to its text is split off at its ink gap.
   Interior protected structures, dense grids, formula/numeric content, damaged
   characters, ambiguous ownership and residual ink still preserve the page and
   report partial. Safe cleanup uses Navier-Stokes inpainting; line-mask analysis

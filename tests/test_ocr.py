@@ -31,6 +31,8 @@ from pdf2zh.ocr import (
     _reading_order,
     _residual_ink_fraction,
     _is_standalone_marker,
+    _introduced_items,
+    _split_glued_marker,
     _has_multiple_columns,
     page_is_image_only,
     prepare_ocr_pdf,
@@ -674,6 +676,74 @@ class OcrPreparationTests(unittest.TestCase):
             )
         reasons = _page_safety_reasons(image, lines, [], None)
         self.assertIn("too many OCR lines for safe reflow", reasons)
+
+    def _numbered_list(self, count: int = 6) -> list[OcrLine]:
+        """ERP page 10: each item number sits in its own gutter, a tab from the text."""
+        lines = []
+        for index in range(count):
+            top = 20 + index * 50
+            lines.append(self._line(f"{index + 1}.", (180, top, 239, top + 51)))
+            lines.append(self._line("The solution on the recommended platform is loaded.",
+                                    (313, top, 1265, top + 51)))
+        return lines
+
+    def test_item_numbers_introduce_their_text_and_are_not_fragments(self):
+        image = np.full((400, 1400, 3), 255, dtype=np.uint8)
+        lines = self._numbered_list()
+        items = _introduced_items(lines)
+        self.assertEqual(sorted(line.text for line in lines if id(line) in items),
+                         ["1.", "2.", "3.", "4.", "5.", "6."])
+        self.assertTrue(all(item.bbox[0] == 313 for item in items.values()))
+        reasons = _page_safety_reasons(image, lines, [], None)
+        self.assertNotIn("fragmented OCR lines", reasons)
+        self.assertNotIn("single-character OCR fragments", reasons)
+
+    def test_a_number_without_text_beside_it_is_still_a_fragment(self):
+        self.assertEqual(_introduced_items([self._line("3.", (180, 20, 239, 71))]), {})
+        stray = [self._line("12.", (180, 20 + index * 60, 239, 71 + index * 60))
+                 for index in range(4)]
+        stray.append(self._line("A short heading line", (300, 400, 900, 450)))
+        self.assertIn("fragmented OCR lines", _page_safety_reasons(
+            np.full((600, 1000, 3), 255, dtype=np.uint8), stray, [], None))
+
+    def test_each_numbered_item_starts_its_own_paragraph(self):
+        lines = self._numbered_list(3)
+        items = _introduced_items(lines)
+        text = [line for line in lines if id(line) not in items]
+        groups = _split_ocr_paragraphs(text, (180, 20, 1300, 200),
+                                       {item.bbox for item in items.values()})
+        self.assertEqual([len(group) for group in groups], [1, 1, 1])
+
+    def _bulleted_line_image(self, gap: int) -> tuple[np.ndarray, OcrLine]:
+        image = np.full((80, 700, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (20, 28), (34, 42), (0, 0, 0), -1)
+        cv2.putText(image, "Plant maintenance planning.", (34 + gap, 45),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 2, cv2.LINE_AA)
+        return image, self._line("■ Plant maintenance planning.", (18, 20, 520, 55))
+
+    def test_a_bullet_read_into_its_text_is_split_off_and_kept_in_the_raster(self):
+        """The OCR font has no U+25A0, so the glued bullet printed as U+0000."""
+        image, line = self._bulleted_line_image(gap=14)
+        marker, body = _split_glued_marker(image, line)
+        self.assertEqual(marker.text, "■")
+        self.assertTrue(_is_standalone_marker(marker.text))
+        self.assertEqual(body.text, "Plant maintenance planning.")
+        self.assertLessEqual(marker.bbox[2], 36)
+        self.assertGreaterEqual(body.bbox[0], 40)
+        self.assertEqual(_introduced_items([marker, body]), {id(marker): body})
+
+    def test_a_bullet_touching_its_text_is_drawn_as_a_bullet_the_font_has(self):
+        image, line = self._bulleted_line_image(gap=0)
+        (only,) = _split_glued_marker(image, line)
+        self.assertEqual(only.text, "• Plant maintenance planning.")
+        self.assertEqual(only.bbox, line.bbox)
+        font = pymupdf.Font(fontfile=str(OCR_FONT_PATH))
+        self.assertTrue(all(font.has_glyph(ord(character)) for character in only.text))
+
+    def test_text_without_a_leading_bullet_is_left_alone(self):
+        image = np.full((80, 700, 3), 255, dtype=np.uint8)
+        line = self._line("-5 degrees at night", (18, 20, 520, 55))
+        self.assertEqual(_split_glued_marker(image, line), [line])
 
 
 if __name__ == "__main__":

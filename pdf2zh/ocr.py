@@ -37,6 +37,12 @@ MAX_TEXT_BOX_COVERAGE = 0.45
 MAX_RESIDUAL_INK = 0.02
 MIN_PROTECTED_PAGE_COVERAGE = 0.01
 MAX_SAFE_OCR_LINES = 24
+# Bullets a recogniser reads into the start of the text they introduce.
+GLUED_MARKER_CHARACTERS = frozenset("•●▪◦○■□◆◇")
+# The one bullet the OCR font can draw.
+DRAWABLE_BULLET = "•"
+# An item number set apart from its text: "3.", "12)", "b.", "(iv)".
+ENUMERATOR_PATTERN = re.compile(r"\(?(?:\d{1,3}|[A-Za-z]|[ivxlcIVXLC]{2,6})[.)]")
 MOJIBAKE_MARKERS = ("\ufffd", "Ã", "Â", "â€", "âˆ", "Å")
 OCR_MARKER_CHARACTERS = frozenset("•●▪◦○■□◆◇–—-*")
 
@@ -263,6 +269,90 @@ def _is_standalone_marker(text: str) -> bool:
     return bool(clean) and all(character in OCR_MARKER_CHARACTERS for character in clean)
 
 
+def _is_list_marker(text: str) -> bool:
+    """A bullet or an item number such as ``3.``, ``b)`` or ``(iv)``."""
+    clean = text.strip()
+    return _is_standalone_marker(clean) or bool(ENUMERATOR_PATTERN.fullmatch(clean))
+
+
+def _rectangle(x0: float, y0: float, x1: float, y1: float) -> tuple[tuple[float, float], ...]:
+    return ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+
+
+def _introduced_items(lines: Sequence[OcrLine]) -> dict[int, OcrLine]:
+    """Map each list marker, by identity, to the text it introduces on its own row.
+
+    The recogniser reads an item number set in its own gutter ("1.", then the
+    item a tab away) as a line of its own. Taken as prose, six numbered items
+    became one paragraph, and the size fitted to "1." set all of it at 22 pt
+    over 13 pt text, so the lines were drawn through each other. Counted as
+    fragments, a page of numbered criteria was refused as damaged recognition.
+    A marker counts only when real text follows it on its row, so stray single
+    characters are still fragments.
+    """
+    items: dict[int, OcrLine] = {}
+    for marker in lines:
+        if not _is_list_marker(marker.text):
+            continue
+        _mx0, my0, mx1, my1 = marker.bbox
+        height = my1 - my0
+        followers = [
+            line
+            for line in lines
+            if line is not marker
+            and not _is_list_marker(line.text)
+            and len(line.text.strip()) >= 4
+            and 0 <= line.bbox[0] - mx1 <= height * 4
+            and min(my1, line.bbox[3]) - max(my0, line.bbox[1])
+            >= 0.5 * min(height, line.bbox[3] - line.bbox[1])
+        ]
+        if followers:
+            items[id(marker)] = min(followers, key=lambda line: line.bbox[0])
+    return items
+
+
+def _split_glued_marker(image: np.ndarray, line: OcrLine) -> list[OcrLine]:
+    """Separate a bullet the recogniser read into the start of its text.
+
+    The OCR font has no geometric bullets, so "■ Plant maintenance" drew glyph
+    0 and extracted as U+0000. The bullet is cut off at the blank columns
+    between its ink and the first letter, and then stays in the raster like
+    any standalone marker. Without such a gap it cannot be separated safely,
+    and it is drawn as the one bullet the font does have.
+    """
+    text = line.text.strip()
+    if len(text) < 2 or text[0] not in GLUED_MARKER_CHARACTERS or not text[1:].strip():
+        return [line]
+    fallback = [OcrLine(DRAWABLE_BULLET + text[1:], line.polygon, line.confidence)]
+    x0, y0, x1, y1 = line.bbox
+    left, top = max(0, int(x0)), max(0, int(y0))
+    right, bottom = min(image.shape[1], int(math.ceil(x1))), min(image.shape[0], int(math.ceil(y1)))
+    if right - left < 4 or bottom - top < 4:
+        return fallback
+    gray = cv2.cvtColor(image[top:bottom, left:right], cv2.COLOR_RGB2GRAY)
+    ink = (gray < float(np.median(gray)) - 45).any(axis=0)
+    columns = np.flatnonzero(ink)
+    if columns.size == 0:
+        return fallback
+    height = bottom - top
+    gap = max(2, int(height * 0.2))
+    start = int(columns[0])
+    end = next(
+        (index for index in range(start, ink.size) if not ink[index:index + gap].any()),
+        None,
+    )
+    if end is None or not height * 0.15 <= end - start <= height * 1.3:
+        return fallback
+    following = columns[columns >= end + gap]
+    if following.size == 0:
+        return fallback
+    text_start = left + int(following[0])
+    return [
+        OcrLine(text[0], _rectangle(left + start - 1, y0, left + end + 1, y1), line.confidence),
+        OcrLine(text[1:].strip(), _rectangle(text_start - 1, y0, x1, y1), line.confidence),
+    ]
+
+
 def _layout_regions(model: object, image: np.ndarray) -> list[OcrLayoutRegion]:
     prediction = model.predict(
         image[:, :, ::-1], imgsz=min(1024, max(32, int(image.shape[0] / 32) * 32))
@@ -394,11 +484,14 @@ def _page_safety_reasons(
     if _has_multiple_columns(lines, image.shape[1]) and not region_ownership_proven:
         reasons.append("multi-column OCR ownership")
 
-    short_lines = sum(len(line.text) <= 3 for line in lines)
-    one_character_lines = sum(len(line.text) == 1 for line in lines)
-    if lines and short_lines / len(lines) > 0.15:
+    # A list marker introducing its item is structure, not damaged recognition.
+    items = _introduced_items(lines)
+    counted = [line for line in lines if id(line) not in items]
+    short_lines = sum(len(line.text) <= 3 for line in counted)
+    one_character_lines = sum(len(line.text) == 1 for line in counted)
+    if counted and short_lines / len(counted) > 0.15:
         reasons.append("fragmented OCR lines")
-    if lines and one_character_lines / len(lines) > 0.08:
+    if counted and one_character_lines / len(counted) > 0.08:
         reasons.append("single-character OCR fragments")
     if len(lines) > MAX_SAFE_OCR_LINES and not region_ownership_proven:
         reasons.append("too many OCR lines for safe reflow")
@@ -840,7 +933,11 @@ def prepare_ocr_pdf(
                 warnings.append(f"page {index + 1}: OCR failed ({error})")
                 output.insert_pdf(document, from_page=index, to_page=index)
                 continue
-            lines = _merge_ocr_line_fragments(_normalise_result(result))
+            lines = [
+                piece
+                for line in _merge_ocr_line_fragments(_normalise_result(result))
+                for piece in _split_glued_marker(image, line)
+            ]
             lines_by_page[index] = tuple(lines)
             recognised += len(lines)
             if not lines:
@@ -883,14 +980,15 @@ def prepare_ocr_pdf(
                 continue
             accepted: list[OcrLine] = []
             combined_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+            items = _introduced_items(ordered)
             for line in ordered:
                 if _overlap_fraction(line.bbox, protected) > 0.01:
                     protected_count += 1
                     continue
-                # Keep bullets and list rules in the scan. Redrawing a
-                # standalone U+25CF through the prose font produced glyph 0
-                # (U+0000) and detached the marker from its paragraph.
-                if _is_standalone_marker(line.text):
+                # Keep bullets, item numbers and list rules in the scan.
+                # Redrawing a standalone U+25CF through the prose font produced
+                # glyph 0 (U+0000) and detached the marker from its paragraph.
+                if _is_standalone_marker(line.text) or id(line) in items:
                     protected_count += 1
                     continue
                 if line.confidence < profile.minimum_confidence or _line_rotation(line) > MAX_ROTATION_DEGREES:
@@ -916,7 +1014,10 @@ def prepare_ocr_pdf(
                 float(image.shape[1]),
                 float(page.rect.height),
                 scale,
-                paragraph_starts=_raster_bullet_starts(image, accepted),
+                paragraph_starts=(
+                    _raster_bullet_starts(image, accepted)
+                    | {item.bbox for item in items.values()}
+                ),
                 preserve_lines=_is_verse_layout(ordered),
             )
             needs_region_ownership = requires_proof

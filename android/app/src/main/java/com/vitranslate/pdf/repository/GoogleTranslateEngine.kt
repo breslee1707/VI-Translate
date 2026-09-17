@@ -12,7 +12,7 @@ import java.util.regex.Pattern
 class GoogleTranslateEngine(
     private val sourceLang: String = "auto",
     private val targetLang: String = "vi"
-) {
+) : TranslationEngine {
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -21,6 +21,11 @@ class GoogleTranslateEngine(
     private val cache = ConcurrentHashMap<String, String>()
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
     private val resultPattern = Pattern.compile("(?s)class=\"(?:t0|result-container)\">(.*?)<")
+
+    @Throws(IOException::class, FormulaPlaceholderException::class)
+    override fun translate(rawText: String): String {
+        return translate(rawText, ignoreCache = false)
+    }
 
     @Throws(IOException::class, FormulaPlaceholderException::class)
     fun translate(rawText: String, ignoreCache: Boolean = false): String {

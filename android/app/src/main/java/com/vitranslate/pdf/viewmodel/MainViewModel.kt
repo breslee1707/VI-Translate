@@ -23,6 +23,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val queueItems = TranslationController.queueItems
     val selectedLanguage = TranslationController.selectedLanguage
+    val engineType = TranslationController.engineType
+    val useOcr = TranslationController.useOcr
     val overwrite = TranslationController.overwrite
     val customOutputDirectory = TranslationController.customOutputDirectory
     val isTranslating = TranslationController.isTranslating
@@ -34,6 +36,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setSelectedLanguage(language: TargetLanguage) =
         TranslationController.setSelectedLanguage(language)
+
+    fun setEngineConfig(
+        type: com.vitranslate.pdf.ui.components.SelectedEngineType,
+        apiKey: String,
+        modelName: String,
+        endpoint: String
+    ) = TranslationController.setEngineConfig(type, apiKey, modelName, endpoint)
+
+    fun setUseOcr(enabled: Boolean) = TranslationController.setUseOcr(enabled)
 
     fun setOverwrite(value: Boolean) = TranslationController.setOverwrite(value)
 

@@ -58,11 +58,61 @@ class PdfLayoutPreserver(private val context: Context) {
         }
     }
 
+    private fun extractBlocksViaOcr(inputUri: Uri, pageIndex: Int, cropBox: PDRectangle): List<TextBlock> {
+        return try {
+            val pfd = context.contentResolver.openFileDescriptor(inputUri, "r") ?: return emptyList()
+            pfd.use { descriptor ->
+                val pdfRenderer = android.graphics.pdf.PdfRenderer(descriptor)
+                pdfRenderer.use { renderer ->
+                    if (pageIndex >= renderer.pageCount) return emptyList()
+                    val rendererPage = renderer.openPage(pageIndex)
+                    val width = (rendererPage.width * 2).coerceAtLeast(512)
+                    val height = (rendererPage.height * 2).coerceAtLeast(512)
+                    val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+                    rendererPage.render(bitmap, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                    rendererPage.close()
+
+                    val ocrResult = kotlinx.coroutines.runBlocking {
+                        OcrEngine.extractTextFromBitmap(bitmap).getOrNull()
+                    } ?: return emptyList()
+
+                    val pageWidth = cropBox.upperRightX - cropBox.lowerLeftX
+                    val pageHeight = cropBox.upperRightY - cropBox.lowerLeftY
+                    val scaleX = pageWidth / width.toFloat()
+                    val scaleY = pageHeight / height.toFloat()
+
+                    ocrResult.lines.mapNotNull { ocrLine ->
+                        val rect = ocrLine.boundingBox ?: return@mapNotNull null
+                        val pdfX = cropBox.lowerLeftX + (rect.left * scaleX)
+                        val pdfY = cropBox.upperRightY - (rect.bottom * scaleY)
+                        val boxWidth = (rect.right - rect.left) * scaleX
+                        val boxHeight = (rect.bottom - rect.top) * scaleY
+                        val fontSize = (boxHeight * 0.8f).coerceAtLeast(8f)
+
+                        TextBlock(
+                            text = ocrLine.text,
+                            x = pdfX,
+                            y = pdfY,
+                            fontSize = fontSize,
+                            width = boxWidth,
+                            ascent = fontSize * 0.8f,
+                            descent = fontSize * 0.2f
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     fun translatePdf(
         inputUri: Uri,
         outputDirUriOrPath: String?,
         targetLang: String,
         overwrite: Boolean,
+        customEngine: TranslationEngine? = null,
+        useOcr: Boolean = true,
         onProgress: (done: Int, total: Int) -> Unit,
         onLog: ((String) -> Unit)? = null,
         isCancelled: () -> Boolean = { false }
@@ -77,7 +127,7 @@ class PdfLayoutPreserver(private val context: Context) {
         }
         val outputFileName = "$baseName-$targetLang.pdf"
         val (outputStream, resultPath) = prepareOutputStream(outputDirUriOrPath, outputFileName, overwrite)
-        val engine = GoogleTranslateEngine(sourceLang = "auto", targetLang = targetLang)
+        val engine: TranslationEngine = customEngine ?: GoogleTranslateEngine(sourceLang = "auto", targetLang = targetLang)
         var untranslatedCount = 0
 
         try {
@@ -95,7 +145,18 @@ class PdfLayoutPreserver(private val context: Context) {
                             val textCollector = PageTextCollector()
                             textCollector.extractPageText(document, page, pageIndex)
                             val collapsedBlocks = collapseVerticalFractions(textCollector.blocks)
-                            val textBlocks = groupIntoLineRuns(collapsedBlocks)
+                            var textBlocks = groupIntoLineRuns(collapsedBlocks)
+
+                            if (textBlocks.isEmpty() && useOcr) {
+                                onLog?.invoke("Trang ${pageIndex + 1}: Không tìm thấy văn bản PDF. Đang chạy OCR (ML Kit)...")
+                                val ocrBlocks = extractBlocksViaOcr(inputUri, pageIndex, page.cropBox)
+                                if (ocrBlocks.isNotEmpty()) {
+                                    textBlocks = ocrBlocks
+                                    onLog?.invoke("Trang ${pageIndex + 1}: OCR thành công với ${ocrBlocks.size} dòng văn bản.")
+                                } else {
+                                    onLog?.invoke("Trang ${pageIndex + 1}: Không quét được văn bản bằng OCR.")
+                                }
+                            }
 
                             if (textBlocks.isNotEmpty()) {
                                 val pageRight = textCollector.cropBox.upperRightX
@@ -116,7 +177,7 @@ class PdfLayoutPreserver(private val context: Context) {
                                     // Skip translating standalone math formulas and numeric choices, but preserve them in translations list
                                     if (textToTranslate.isBlank() || isPureMathOrFormula(textToTranslate)) {
                                         skippedMathCount++
-                                        translations.add(ParagraphTranslation(paragraph, originalText))
+                                        translations.add(ParagraphTranslation(paragraph, originalText, isMath = true))
                                         continue
                                     }
 
@@ -146,14 +207,15 @@ class PdfLayoutPreserver(private val context: Context) {
                                     } else {
                                         translatedRemainder
                                     }
-                                    translations.add(ParagraphTranslation(paragraph, translatedText))
+                                    translations.add(ParagraphTranslation(paragraph, translatedText, isMath = false))
                                 }
 
                                 onLog?.invoke("Trang ${pageIndex + 1}/$totalPages: ${textBlocks.size} dòng gộp thành ${paragraphs.size} đoạn. Đã dịch: ${translations.size}, Bỏ qua công thức: $skippedMathCount")
 
                                 if (translations.isNotEmpty()) {
-                                    // Strip original text from page streams so vector drawings & diagrams remain 100% pristine
-                                    val sourceTextRemoved = stripTextFromPage(document, page)
+                                    val hasMathInPage = translations.any { it.isMath }
+                                    // If page contains math formulas, DO NOT strip text from page stream so original math font glyphs are preserved 100%!
+                                    val sourceTextRemoved = if (!hasMathInPage) stripTextFromPage(document, page) else false
 
                                     PDPageContentStream(
                                         document,
@@ -164,6 +226,9 @@ class PdfLayoutPreserver(private val context: Context) {
                                     ).use { stream ->
                                         for (i in translations.indices) {
                                             val translation = translations[i]
+                                            // Math formulas are preserved in original PDF stream, skip redrawing them!
+                                            if (translation.isMath) continue
+
                                             val paragraph = translation.paragraph
                                             val cleanedText = stripTagsAndPlaceholders(translation.translated)
                                             val text = sanitizeForFont(cleanedText, font)
@@ -1380,7 +1445,8 @@ class PdfLayoutPreserver(private val context: Context) {
 
     private class ParagraphTranslation(
         val paragraph: Paragraph,
-        val translated: String
+        val translated: String,
+        val isMath: Boolean = false
     )
 
     /**

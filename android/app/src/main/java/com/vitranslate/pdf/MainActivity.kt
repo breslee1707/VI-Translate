@@ -151,6 +151,8 @@ fun MainScreen(
 ) {
     val queueItems by viewModel.queueItems.collectAsState()
     val selectedLanguage by viewModel.selectedLanguage.collectAsState()
+    val engineType by viewModel.engineType.collectAsState()
+    val useOcr by viewModel.useOcr.collectAsState()
     val overwrite by viewModel.overwrite.collectAsState()
     val customSaveDirectory by viewModel.customOutputDirectory.collectAsState()
     val isTranslating by viewModel.isTranslating.collectAsState()
@@ -162,6 +164,7 @@ fun MainScreen(
 
     var showLogDialog by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
+    var showAiSetupDialog by remember { mutableStateOf(false) }
     var currentLogText by remember { mutableStateOf("") }
 
     if (showLogDialog) {
@@ -179,6 +182,17 @@ fun MainScreen(
         AboutDialog(
             appVersion = BuildConfig.VERSION_NAME,
             onDismiss = { showAboutDialog = false }
+        )
+    }
+
+    if (showAiSetupDialog) {
+        AiEngineSetupDialog(
+            initialEngineType = engineType,
+            onDismissRequest = { showAiSetupDialog = false },
+            onApplySession = { type, apiKey, model, endpoint ->
+                viewModel.setEngineConfig(type, apiKey, model, endpoint)
+                showAiSetupDialog = false
+            }
         )
     }
 
@@ -206,6 +220,10 @@ fun MainScreen(
         ControlsView(
             selectedLanguage = selectedLanguage,
             onLanguageSelected = { viewModel.setSelectedLanguage(it) },
+            engineType = engineType,
+            onOpenEngineConfig = { showAiSetupDialog = true },
+            useOcr = useOcr,
+            onUseOcrChange = { viewModel.setUseOcr(it) },
             overwrite = overwrite,
             onOverwriteChange = { viewModel.setOverwrite(it) },
             customSaveDirectory = customSaveDirectory,

@@ -30,9 +30,9 @@ jobs:
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -40,7 +40,7 @@ jobs:
         shell: bash
         run: bash build-macos.sh
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v4
         with:
           name: PDFTranslate-macos-${{ matrix.arch }}
           path: dist/PDFTranslate-macos-${{ matrix.arch }}.dmg

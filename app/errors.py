@@ -39,6 +39,21 @@ class Failure:
 # when any marker appears in the chain's type names or messages.
 _RULES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     (
+        "E-NET-08",
+        ("RateLimitedError",),
+        "Google hiện từ chối yêu cầu từ kết nối này",
+        "Đợt dịch đã tạm dừng. Các đoạn dịch thành công được lưu để dùng lại. "
+        "Chọn Tiếp tục dịch sau để thử lại; hiện chưa xác định được thời gian "
+        "Google khôi phục. Không cần gửi lại liên tục.",
+    ),
+    (
+        "E-NET-09",
+        ("ServiceUnavailableError",),
+        "Dịch vụ dịch hiện không phản hồi hoặc từ chối truy cập",
+        "Đợt dịch đã tạm dừng. Kiểm tra kết nối rồi chọn Tiếp tục dịch. "
+        "Các đoạn dịch thành công được lưu để dùng lại.",
+    ),
+    (
         "E-OCR-07",
         ("OCR dependencies are missing", "OCR found no text that could be translated safely",
          "OCR failed", "could not encode cleaned raster"),

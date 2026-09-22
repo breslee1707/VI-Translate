@@ -151,9 +151,9 @@ wrapped lines.
 
 Google's free `/m` endpoint is meant for people and blocks a network that uses
 it like a batch service: a 302 to `www.google.com/sorry/`, HTTP 429, a CAPTCHA
-page, no `Retry-After`. The verdict is on the address, lasts for hours, and does
-not lift while requests keep arriving. Up to 0.3.0 every segment was its own
-request, four at a time, and a refused segment was sent eight more times.
+page, no `Retry-After`. Recovery time is unknown; do not promise the app's
+cooldown will lift Google's block. Up to 0.3.0 every segment was its own
+request, four at a time, with up to eight total attempts per segment.
 
 - A page travels together. `GoogleTranslator.translate_many` joins a page's
   uncached, distinct segments with blank lines, up to 5000 percent-encoded
@@ -173,6 +173,26 @@ request, four at a time, and a refused segment was sent eight more times.
   of the queue and the next run (the moment is kept in
   `~/.cache/pdf2zh/google-block.json`) are refused without a request, and one
   request per 10 minutes checks whether the block has lifted.
+
+The final block check and refusal verdict are inside the pacing lock, so a
+waiting caller cannot send after another caller sees 429. CAPTCHA HTML is
+also detected on HTTP 200, unless it is text inside a real translation result.
+The converter now aborts on a block or exhausted service outage; it does not
+lay out the rest of a book or publish a misleading partial PDF. The desktop
+queue pauses with E-NET-08/E-NET-09 and a Continue action; remaining files stay
+queued. Successful segments remain in the existing persistent cache. Retrying
+repeats local PDF/OCR processing but sends only uncached segments. Known active
+cooldowns are checked before OCR/model work, without reserving a probe.
+
+GUI stages cover OCR page progress, layout, service waits and PDF export.
+Page progress counts completed pages, including protected pages. OCR engines
+load only when an image-only page actually needs recognition. Local bounded
+`translated/translation-service.log` records request/cache/batch counters, not
+document text or query URLs. Empty/unparseable responses get three attempts
+for the document, then stop; ordinary HTTP access errors also stop instead of
+repeating for every segment. Cache entries are checked for formula/style tags
+before reuse and before saving new translations. A `<br>` in a single answer
+no longer discards the rest of that paragraph.
 
 A dead connection or a 5xx is an outage, not a block. `OutageBackoff` pauses
 every worker together (5 s, doubling to 60 s), gives up after 120 s and still

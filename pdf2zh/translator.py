@@ -80,6 +80,10 @@ class ServiceUnavailableError(RuntimeError):
     """Raised when the service gives no usable answer: no connection, a timeout, a 5xx."""
 
 
+class InvalidResponseError(RuntimeError):
+    """A successful HTTP response without usable translated text."""
+
+
 # Sending these again repeats a verdict, or a wait the whole document already paid.
 UNRETRYABLE_ERRORS = (
     SegmentTooLongError,
@@ -211,6 +215,13 @@ class NetworkBlock:
             self._since = now
             self._save()
 
+    def check_available(self) -> None:
+        """Check a cooldown without reserving its single recovery request."""
+        with self._lock:
+            self._load()
+            if self._since is not None and 0 <= self._clock() - self._since < self.RECHECK_AFTER:
+                raise RateLimitedError("Google Translate is cooling down after refusing this network")
+
     def refused(self) -> None:
         """Record that Google has just refused this network."""
         with self._lock:
@@ -296,7 +307,12 @@ def is_google_block(response: requests.Response) -> bool:
     """Whether Google answered with its verdict on the network, not a translation."""
     if response.status_code == 429:
         return True
-    return urlparse(response.url or "").path.startswith("/sorry/")
+    if urlparse(response.url or "").path.startswith("/sorry/"):
+        return True
+    body = response.text.lower()
+    return not BATCH_RESULT_PATTERN.search(response.text) and (
+        "our systems have detected unusual traffic" in body or "g-recaptcha" in body
+    )
 
 
 BATCH_RESULT_PATTERN = re.compile(
@@ -310,10 +326,13 @@ def result_lines(page: str) -> list[str]:
     """The non-empty translated lines of an answer, whether broken by newline or <br>."""
     match = BATCH_RESULT_PATTERN.search(page)
     if match is None:
-        raise RuntimeError("Google Translate response did not contain a translation result")
+        raise InvalidResponseError("Google Translate response did not contain a translation result")
     text = html.unescape(re.sub(r"(?i)<br\s*/?>", "\n", match.group(1)))
     lines = (remove_control_characters(line).strip() for line in text.splitlines())
-    return [line for line in lines if line]
+    result = [line for line in lines if line]
+    if not result:
+        raise InvalidResponseError("Google Translate returned an empty translation")
+    return result
 
 
 def remove_control_characters(value: str) -> str:
@@ -508,6 +527,13 @@ class GoogleTranslator(BaseTranslator):
         self.sleep: Callable[[float], None] = time.sleep
         self._batch_hits = 0
         self._batch_misses = 0
+        self._terminal_error: RateLimitedError | ServiceUnavailableError | None = None
+        self.stats: Counter[str] = Counter()
+        self.on_status: Callable[[str, int, int], None] | None = None
+
+    def _status(self, stage: str) -> None:
+        if self.on_status is not None:
+            self.on_status(stage, 0, 0)
 
     def do_translate(self, text: str) -> str:
         if len(text) > self.MAXIMUM_SEGMENT_CHARACTERS:
@@ -516,13 +542,8 @@ class GoogleTranslator(BaseTranslator):
                 f"{self.MAXIMUM_SEGMENT_CHARACTERS} the service accepts"
             )
         response = self._fetch(text)
-        match = re.search(
-            r'(?s)class="(?:t0|result-container)">(.*?)<',
-            response.text,
-        )
-        if match is None:
-            raise RuntimeError("Google Translate response did not contain a translation result")
-        return remove_control_characters(html.unescape(match.group(1)))
+        # HTML line breaks must not silently truncate a paragraph at its first line.
+        return " ".join(result_lines(response.text))
 
     def translate_many(self, texts: Sequence[str]) -> list[str | Exception]:
         """Translate a page's segments in as few requests as the service allows.
@@ -536,12 +557,21 @@ class GoogleTranslator(BaseTranslator):
         waiting: list[str] = []
         for key in dict.fromkeys(keys):
             cached = None if self.ignore_cache else self.cache.get(key)
+            if cached is not None:
+                try:
+                    restore_formula_placeholders(key, cached)
+                except FormulaPlaceholderError:
+                    cached = None
             if cached is None:
                 waiting.append(key)
             else:
                 answers[key] = cached
+                self.stats["cache_hits"] += 1
+        self.stats["segments"] += len(keys)
+        self.stats["duplicates"] += len(keys) - len(set(keys))
         for batch in self._batches(waiting):
             self._translate_batch(batch, answers)
+        logger.info("Google translation counters: %s", dict(self.stats))
         return [answers[key] for key in keys]
 
     @property
@@ -570,6 +600,9 @@ class GoogleTranslator(BaseTranslator):
             yield batch
 
     def _translate_batch(self, batch: list[str], answers: dict[str, str | Exception]) -> None:
+        if self._terminal_error is not None:
+            answers.update((text, self._terminal_error) for text in batch)
+            return
         if len(batch) == 1 or not self.batching:
             for text in batch:
                 answers[text] = self._translate_alone(text)
@@ -580,24 +613,38 @@ class GoogleTranslator(BaseTranslator):
             # A segment that did not keep to its own line, or one the service
             # refused, spoils only its own half.
             self._batch_misses += 1
+            self.stats["batch_misses"] += 1
             middle = len(batch) // 2
             self._translate_batch(batch[:middle], answers)
             self._translate_batch(batch[middle:], answers)
             return
         except Exception as error:  # noqa: BLE001 - reported per segment by the caller
+            if isinstance(error, (RateLimitedError, ServiceUnavailableError)):
+                self._terminal_error = error
             for text in batch:
                 answers[text] = error
             return
         self._batch_hits += 1
+        self.stats["batch_hits"] += 1
         for text, line in zip(batch, lines):
+            try:
+                restore_formula_placeholders(text, line)
+            except FormulaPlaceholderError as error:
+                answers[text] = error
+                continue
             answers[text] = line
             if not self.ignore_cache:
                 self.cache.set(text, line)
 
     def _translate_alone(self, text: str) -> str | Exception:
+        if self._terminal_error is not None:
+            return self._terminal_error
         try:
             translated = self._retrying(lambda: self.do_translate(text))
+            restore_formula_placeholders(text, translated)
         except Exception as error:  # noqa: BLE001 - reported per segment by the caller
+            if isinstance(error, (RateLimitedError, ServiceUnavailableError)):
+                self._terminal_error = error
             return error
         if not self.ignore_cache:
             self.cache.set(text, translated)
@@ -619,6 +666,12 @@ class GoogleTranslator(BaseTranslator):
                 return attempt()
             except UNRETRYABLE_ERRORS:
                 raise
+            except InvalidResponseError:
+                if number == self.GLITCH_ATTEMPTS:
+                    raise ServiceUnavailableError(
+                        "Google Translate repeatedly returned no usable translation"
+                    ) from None
+                self.sleep(float(2 ** (number - 1)))
             except Exception:
                 if number == self.GLITCH_ATTEMPTS:
                     raise
@@ -628,10 +681,15 @@ class GoogleTranslator(BaseTranslator):
     def _fetch(self, text: str) -> requests.Response:
         """Send one request: paced, held back while the service is out, never into a block."""
         while True:
-            self.block.before_request()
+            self.block.check_available()
             started = self.outage.before_request()
             failure: ServiceUnavailableError | None = None
             with self.pace.turn():
+                # Both the last check and the refusal verdict belong inside
+                # the request lock: a waiting worker must see the first 429.
+                self.block.before_request()
+                self._status("request")
+                self.stats["requests"] += 1
                 try:
                     response = self.session.get(
                         self.endpoint,
@@ -645,16 +703,20 @@ class GoogleTranslator(BaseTranslator):
                     failure = ServiceUnavailableError(
                         f"Google Translate could not be reached ({type(error).__name__})"
                     )
+                if failure is None and is_google_block(response):
+                    self.block.refused()
+                    self.stats["blocks"] += 1
+                    raise RateLimitedError(
+                        "Google Translate is refusing requests from this network (HTTP 429 or CAPTCHA)"
+                    )
+                if failure is None and response.status_code == 200 and BATCH_RESULT_PATTERN.search(response.text):
+                    self.block.answered()
             if failure is not None:
+                self._status("waiting")
                 self.outage.failed(started, failure)
                 continue
-            if is_google_block(response):
-                self.block.refused()
-                raise RateLimitedError(
-                    "Google Translate is refusing requests from this network "
-                    "(HTTP 429, CAPTCHA page)"
-                )
             if response.status_code >= 500:
+                self._status("waiting")
                 self.outage.failed(
                     started,
                     ServiceUnavailableError(
@@ -663,10 +725,12 @@ class GoogleTranslator(BaseTranslator):
                 )
                 continue
             self.outage.succeeded(started)
-            self.block.answered()
             if response.status_code in (400, 413, 414):
                 raise SegmentRejectedError("Google Translate rejected the text segment")
-            response.raise_for_status()
+            if response.status_code >= 400:
+                # requests.HTTPError includes q= and would expose document text
+                # in the support log. An access error must not repeat per segment.
+                raise ServiceUnavailableError(f"Google Translate answered HTTP {response.status_code}")
             return response
 
 

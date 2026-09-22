@@ -83,11 +83,18 @@ macOS/Linux:
 "<skill-root>/.venv/bin/python" "<skill-root>/scripts/translate_pdf.py" "<input.pdf>" --output-dir "<output-dir>"
 ```
 
-For a batch, process files individually and report progress. A failure on one file must not stop the remaining files; collect and report all failures at the end.
+For a batch, process files individually and report progress. A file-specific
+failure must not stop the remaining files. A Google block or exhausted service
+outage pauses the whole queue; successful translations remain cached for a
+later retry, and no incomplete PDF is published for that interrupted file.
 
 Google mode sends a page's segments in one request, one request at a time, because the free endpoint blocks a network that floods it. Never run several Google jobs in parallel.
 
-If a run reports segments refused with HTTP 429, Google has blocked the network for now. The runner stops sending at the first refusal and, for the next 10 minutes, refuses further runs without contacting Google, because every request into a block prolongs it. Do not rerun it in a loop or try to get past the CAPTCHA. Report it, then offer a later rerun (finished segments are cached) or handoff mode.
+If a run encounters HTTP 429 or a CAPTCHA, the runner stops the document and
+pauses the queue. For the next 10 minutes it refuses further Google runs before
+OCR/model work. This is the app's cooldown, not a prediction of Google's
+recovery time. Do not rerun it in a loop or try to get past the CAPTCHA. Report
+it, then offer a later rerun (finished segments are cached) or handoff mode.
 
 ## Handoff mode
 

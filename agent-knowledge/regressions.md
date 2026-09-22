@@ -64,3 +64,10 @@ Use this as a cause map, not a substitute for inspecting the failing PDF.
 
 When adding a new guard, reproduce the smallest failing geometry in a unit test
 and validate the real document visually. Do not encode a filename-specific fix.
+
+Service recovery regressions in `test_translation_recovery.py` cover a request
+waiting behind a 429, HTTP-200 CAPTCHA, repeated empty/unparseable responses,
+single-answer HTML line breaks, corrupted marker cache entries, and a three-page
+PDF interrupted on page two. Resuming uses cached page one and translates only
+the remaining pages. Queue tests require a paused state, a Continue action,
+and no attempt to process subsequent files after a service-wide failure.

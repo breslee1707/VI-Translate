@@ -221,6 +221,13 @@ Skill cung cấp hai chế độ dịch:
 
 Google là chế độ mặc định và là chế độ được dùng trong app desktop. Handoff trích các đoạn văn sang JSONL để agent dịch, sau đó dựng lại PDF; dữ liệu không được gửi tới Google nhưng sẽ tốn token và mất nhiều thời gian hơn.
 
+Nếu Google từ chối yêu cầu hoặc dịch vụ không phản hồi sau thời gian thử lại,
+app **tạm dừng đợt dịch**, giữ các file còn lại trong hàng đợi. Các đoạn dịch
+thành công được lưu trong bộ nhớ đệm; bấm **Tiếp tục dịch** sau để dùng lại chúng.
+File đang làm dở chưa được xuất thành PDF. Sau khi bị chặn, app nghỉ ít nhất
+10 phút trước khi thử gửi lại; đây không phải thời gian Google cam kết mở chặn.
+Tiến độ phân biệt nhận dạng OCR, phân tích bố cục, chờ bản dịch và xuất PDF.
+
 Ví dụ với từ *conduction* trong tài liệu truyền nhiệt:
 
 | Google | Handoff |

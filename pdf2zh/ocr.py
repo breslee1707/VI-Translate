@@ -901,12 +901,13 @@ def prepare_ocr_pdf(
     pages: Sequence[int] | None,
     layout_model: object,
     recognizer: Callable[[np.ndarray], Any] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> OcrPreparation:
     """Create a sidecar and cleaned page images without modifying ``source``."""
     if mode not in OCR_PROFILES:
         raise ValueError(f"Unknown OCR mode: {mode}")
     profile = OCR_PROFILES[mode]
-    engine = recognizer or load_ocr_engine(mode)
+    engine = recognizer
     started = time.perf_counter()
     selected = set(pages) if pages is not None else None
     cleaned_images: dict[int, bytes] = {}
@@ -919,10 +920,14 @@ def prepare_ocr_pdf(
     output = pymupdf.open()
     with pymupdf.open(source) as document:
         for index, page in enumerate(document):
+            if on_progress:
+                on_progress(index + 1, len(document))
             if (selected is not None and index not in selected) or not page_is_image_only(page):
                 output.insert_pdf(document, from_page=index, to_page=index)
                 continue
 
+            if engine is None:
+                engine = load_ocr_engine(mode)
             pixmap = page.get_pixmap(dpi=profile.dpi, alpha=False)
             image = np.frombuffer(pixmap.samples, np.uint8).reshape(
                 pixmap.height, pixmap.width, pixmap.n

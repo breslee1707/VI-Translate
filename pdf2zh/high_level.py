@@ -9,8 +9,9 @@ import re
 import sys
 import tempfile
 from asyncio import CancelledError
+from contextlib import closing
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
@@ -293,6 +294,7 @@ def translate_patch(
     synthetic_styles: set[int] | None = None,
     skip_backing_pages: set[int] | None = None,
     ocr_regions_by_page: Dict | None = None,
+    on_status: Callable[[str, int, int], None] | None = None,
     **kwarg: Any,
 ) -> None:
     rsrcmgr = PDFResourceManager()
@@ -329,6 +331,8 @@ def translate_patch(
         ocr_paragraph_classes,
     )
 
+    if hasattr(device.translator, "on_status"):
+        device.translator.on_status = on_status
     assert device is not None
     obj_patch = {}
     interpreter = PDFPageInterpreterEx(rsrcmgr, device, obj_patch)
@@ -339,15 +343,16 @@ def translate_patch(
 
     parser = PDFParser(inf)
     doc = PDFDocument(parser)
-    with tqdm.tqdm(total=total_pages) as progress:
+    with closing(device), tqdm.tqdm(total=total_pages) as progress:
         for pageno, page in enumerate(PDFPage.create_pages(doc)):
             if cancellation_event and cancellation_event.is_set():
                 raise CancelledError("task cancelled")
             if pages and (pageno not in pages):
                 continue
-            progress.update()
             if callback:
                 callback(progress)
+            if on_status:
+                on_status("layout", pageno + 1, doc_zh.page_count)
             page.pageno = pageno
             page_rect = doc_zh[page.pageno].rect
             page_area = page_rect.width * page_rect.height
@@ -641,6 +646,9 @@ def translate_patch(
                     device.scanned_pages.add(pageno)
                 if pageno in pages_with_images:
                     device.pages_with_images.add(pageno)
+                progress.update()
+                if callback:
+                    callback(progress)
                 continue
             if pageno in scanned_pages:
                 device.scanned_pages.add(pageno)
@@ -651,8 +659,10 @@ def translate_patch(
             doc_zh.update_stream(page.page_xref, b"")
             doc_zh[page.pageno].set_contents(page.page_xref)
             interpreter.process_page(page)
+            progress.update()
+            if callback:
+                callback(progress)
 
-    device.close()
     return obj_patch, TranslationReport(
         failures=device.translation_failures,
         reasons=device.failure_reasons,
@@ -681,6 +691,7 @@ def translate_stream(
     ignore_cache: bool = False,
     skip_backing_pages: set[int] | None = None,
     ocr_regions_by_page: Dict | None = None,
+    on_status: Callable[[str, int, int], None] | None = None,
     **kwarg: Any,
 ):
     source_size = len(stream)
@@ -741,7 +752,13 @@ def translate_stream(
     fp = io.BytesIO()
 
     doc_zh.save(fp)
-    obj_patch, report = translate_patch(fp, **locals())
+    try:
+        obj_patch, report = translate_patch(fp, **locals())
+    except BaseException:
+        doc_zh.close()
+        if not doc_en.is_closed:
+            doc_en.close()
+        raise
 
     for obj_id, ops_new in obj_patch.items():
         # ops_old=doc_en.xref_stream(obj_id)
@@ -762,6 +779,8 @@ def translate_stream(
         doc_zh.subset_fonts(fallback=True)
         if create_dual:
             doc_en.subset_fonts(fallback=True)
+    if on_status:
+        on_status("saving", 0, 0)
     write_options = pdf_write_options(page_count, source_size)
     mono = doc_zh.write(**write_options)
     dual = (
@@ -769,6 +788,9 @@ def translate_stream(
         if create_dual
         else None
     )
+    doc_zh.close()
+    if not doc_en.is_closed:
+        doc_en.close()
     return (
         mono,
         dual,
@@ -845,6 +867,7 @@ def translate(
     ignore_cache: bool = False,
     skip_backing_pages: set[int] | None = None,
     ocr_regions_by_page: Dict | None = None,
+    on_status: Callable[[str, int, int], None] | None = None,
     **kwarg: Any,
 ):
     if not files:

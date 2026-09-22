@@ -34,6 +34,8 @@ from pdf2zh.translator import (
     ENGINES,
     UNRETRYABLE_ERRORS,
     BaseTranslator,
+    RateLimitedError,
+    ServiceUnavailableError,
     encode_formula_placeholders,
     restore_formula_placeholders,
 )
@@ -1420,6 +1422,10 @@ class TranslateConverter(PDFConverterEx):
             return restore_formula_placeholders(s, translated)
 
         def leave_untranslated(s: str, e: BaseException) -> str:
+            if isinstance(e, (RateLimitedError, ServiceUnavailableError)):
+                # Stop local layout work as well as network traffic. Successful
+                # translations are already cached; no misleading partial PDF.
+                raise e
             # A book is thousands of segments over tens of minutes, so one
             # dead connection must not throw the whole document away. Keep
             # the source text and let the caller report how much is missing.

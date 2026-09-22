@@ -8,6 +8,7 @@ handoff engine is reachable from the skill rather than from here.
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import queue
 import subprocess
@@ -16,6 +17,9 @@ import threading
 import tkinter
 import traceback
 import webbrowser
+from collections.abc import Iterator
+from contextlib import contextmanager
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from pathlib import Path
 
@@ -89,7 +93,7 @@ OCR_NAMES = {
 # book becomes thousands of segments. It runs only for someone who turns it on.
 DEFAULT_OCR_MODE = "off"
 
-STATUS_MARKS = {"queued": "•", "running": "▶", "done": "✓", "partial": "!", "failed": "✕", "skipped": "–"}
+STATUS_MARKS = {"queued": "•", "running": "▶", "done": "✓", "partial": "!", "failed": "✕", "skipped": "–", "paused": "Ⅱ"}
 STATUS_COLORS = {
     "queued": ("gray45", "gray60"),
     "running": ("#1f6feb", "#58a6ff"),
@@ -97,6 +101,7 @@ STATUS_COLORS = {
     "partial": ("#9a6700", "#d29922"),
     "failed": ("#cf222e", "#f85149"),
     "skipped": ("gray45", "gray60"),
+    "paused": ("#9a6700", "#d29922"),
 }
 ACCENT = STATUS_COLORS["running"]
 MUTED = ("gray45", "gray60")
@@ -185,10 +190,41 @@ def collect_pdfs(paths: list[Path]) -> list[Path]:
 # Named beside the count, because a block and a dead connection each ask the
 # user for something different, and neither is a fault in their document.
 SERVICE_FAILURE_ADVICE = {
-    "RateLimitedError": "Google tạm chặn mạng này vì nhận quá nhiều yêu cầu; ứng dụng "
-    "đã ngừng gửi để lệnh chặn sớm được gỡ, hãy dịch lại sau",
+    "RateLimitedError": "Google tạm chặn yêu cầu từ kết nối này; "
+    "hiện chưa xác định được thời gian khôi phục, hãy thử lại sau",
     "ServiceUnavailableError": "Google Dịch không phản hồi, hãy kiểm tra mạng rồi dịch lại",
 }
+
+
+@contextmanager
+def google_diagnostics(destination: Path) -> Iterator[None]:
+    """Bounded local counters only; never record request URLs or document text."""
+    logger = logging.getLogger("pdf2zh.translator")
+    handler = None
+    previous_level = logger.level
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            destination / "translation-service.log", maxBytes=262144,
+            backupCount=1, encoding="utf-8",
+        )
+        thread_id = threading.get_ident()
+        handler.addFilter(lambda record: record.thread == thread_id and
+                          record.msg == "Google translation counters: %s")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+    except OSError:
+        if handler is not None:
+            handler.close()
+        handler = None
+    try:
+        yield
+    finally:
+        if handler is not None:
+            logger.removeHandler(handler)
+            handler.close()
+        logger.setLevel(previous_level)
 
 
 def translation_outcome(result) -> tuple[str, str]:
@@ -780,7 +816,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def _start(self) -> None:
         if self.worker and self.worker.is_alive():
             return
-        pending = [path for path in self.files if self.states[path] in ("queued", "failed")]
+        pending = [path for path in self.files if self.states[path] in ("queued", "failed", "paused")]
         if not pending:
             self.status.configure(text="Không còn file nào cần dịch")
             return
@@ -819,24 +855,34 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             def report(done: int, total: int, _p: Path = path) -> None:
                 self.events.put(("page", _p, done, total))
 
+            def stage(name: str, done: int, total: int, _p: Path = path) -> None:
+                self.events.put(("stage", _p, name, done, total))
+
             try:
-                result = translate_pdf(
-                    path,
-                    destination,
-                    target_language=language,
-                    overwrite=overwrite,
-                    on_progress=report,
-                    ocr=ocr,
-                )
+                with google_diagnostics(destination):
+                    result = translate_pdf(
+                        path,
+                        destination,
+                        target_language=language,
+                        overwrite=overwrite,
+                        on_progress=report,
+                        on_status=stage,
+                        ocr=ocr,
+                    )
                 state, detail = translation_outcome(result)
                 self.events.put(("status", path, state, detail, result.path))
             except Exception as error:  # noqa: BLE001 - keep the queue moving
                 # One unreadable or already-translated file must not stop the batch.
                 failure = describe_failure(error)
                 state = "skipped" if failure.code == "E-OUT-05" else "failed"
-                log = self._log_failure(destination, path, error) if state == "failed" else None
+                if failure.code in ("E-NET-08", "E-NET-09"):
+                    state = "paused"
+                log = self._log_failure(destination, path, error) if state in ("failed", "paused") else None
                 self.failures[path] = (failure, log)
                 self.events.put(("status", path, state, failure.headline, None))
+                if state == "paused":
+                    # Keep remaining files queued and avoid repeating OCR/model work.
+                    break
             self.events.put(("progress", index / len(files), index, len(files)))
         self.events.put(("finished",))
 
@@ -978,6 +1024,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     # The whole reason, wrapped under the name, plus an
                     # invitation to open the rest.
                     row.set_state(state, "", f"{first_line}  -  bấm để xem chi tiết")
+                elif state == "paused":
+                    row.set_state(state, "Tạm dừng", self.failures[path][0].advice)
                 elif state == "partial":
                     row.set_state(state, "", first_line)
                 else:
@@ -987,6 +1035,25 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     for widget in (row.frame, row.mark, row.name, row.detail, row.message):
                         widget.configure(cursor="hand2")
                         widget.bind("<Button-1>", lambda _e, p=path: self._row_clicked(p))
+            elif event[0] == "stage":
+                _, path, stage, done, total = event
+                if self.states.get(path) != "running":
+                    continue
+                labels = {
+                    "preparing": "Đang chuẩn bị",
+                    "ocr": "Đang nhận dạng chữ OCR",
+                    "translating": "Đang phân tích bố cục và dịch",
+                    "layout": "Đang phân tích bố cục",
+                    "request": "Đang chờ bản dịch từ Google",
+                    "waiting": "Kết nối gián đoạn — đang chờ thử lại",
+                    "saving": "Đang xuất PDF",
+                }
+                label = labels.get(stage, "Đang xử lý")
+                if total:
+                    label += f" · trang {done}/{total}"
+                self.status.configure(text=f"{label} · {path.name}")
+                if stage == "ocr" and total:
+                    self.rows[path].detail.configure(text=f"OCR {done}/{total}")
             elif event[0] == "page":
                 # Per-page progress inside the file being translated. A textbook
                 # is hundreds of pages, so file-level progress alone looks stuck.
@@ -1024,6 +1091,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     summary += f", {counts['partial']} file dịch thiếu"
                 if counts.get("failed"):
                     summary += f", {counts['failed']} file lỗi"
+                if counts.get("paused"):
+                    summary = "Đã tạm dừng · Phần đã dịch được lưu để dùng lại"
+                    if counts.get("queued"):
+                        summary += f" · {counts['queued']} file đang chờ"
+                    self.translate_button.configure(text="Tiếp tục dịch")
                 self.status.configure(text=summary)
 
 

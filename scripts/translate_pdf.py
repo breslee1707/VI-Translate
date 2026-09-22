@@ -360,6 +360,7 @@ def _run_engine(
     on_progress: Callable[[int, int], None] | None = None,
     skip_backing_pages: set[int] | None = None,
     ocr_regions_by_page: dict | None = None,
+    on_status: Callable[[str, int, int], None] | None = None,
 ) -> "TranslationReport":
     """Run the core and return what it could not translate, and why."""
     from pdf2zh.high_level import translate
@@ -386,6 +387,8 @@ def _run_engine(
         callback=callback,
         ignore_cache=ignore_cache,
     )
+    if on_status is not None:
+        arguments["on_status"] = on_status
     if skip_backing_pages:
         arguments["skip_backing_pages"] = skip_backing_pages
     if ocr_regions_by_page:
@@ -411,6 +414,7 @@ def translate_pdf(
     emit_segments: Path | None = None,
     ocr: str = "off",
     on_progress: Callable[[int, int], None] | None = None,
+    on_status: Callable[[str, int, int], None] | None = None,
 ) -> Translation:
     """Translate one PDF, reporting any segments the engine could not translate."""
     _require_core()
@@ -431,6 +435,20 @@ def translate_pdf(
                 "Pass --overwrite only with replacement authorization."
             )
 
+    if engine == "google":
+        from pdf2zh.translator import GOOGLE_BLOCK, RateLimitedError
+
+        # No OCR/model work while a known service cooldown is active.
+        try:
+            GOOGLE_BLOCK.check_available()
+        except RateLimitedError as error:
+            raise TranslationError(
+                "Google Translate is temporarily paused after a network refusal; "
+                "successful translations remain cached. Try again later."
+            ) from error
+    if on_status:
+        on_status("preparing", 0, 0)
+
     with tempfile.TemporaryDirectory(prefix="pdf-translate-", dir=destination_dir) as temp:
         temp_output = Path(temp)
         processing_source = source
@@ -439,10 +457,13 @@ def translate_pdf(
             try:
                 from pdf2zh.ocr import OcrUnavailableError, prepare_ocr_pdf
 
+                if on_status:
+                    on_status("ocr", 0, 0)
                 ocr_preparation = prepare_ocr_pdf(
                     source,
                     temp_output / f"{source.stem}-ocr-sidecar.pdf",
                     mode=ocr,
+                    on_progress=(lambda done, total: on_status("ocr", done, total)) if on_status else None,
                     pages=_pages_to_indices(pages),
                     layout_model=_layout_model(os.environ.get("PDF_TRANSLATE_MODEL")),
                 )
@@ -455,6 +476,9 @@ def translate_pdf(
                 raise TranslationError(f"OCR preparation failed: {_describe(error)}") from error
         try:
             engine_arguments = {}
+            if on_status:
+                on_status("translating", 0, 0)
+                engine_arguments["on_status"] = on_status
             if ocr_preparation and ocr_preparation.pages:
                 engine_arguments["skip_backing_pages"] = set(ocr_preparation.pages)
                 engine_arguments["ocr_regions_by_page"] = (
@@ -535,6 +559,8 @@ def translate_pdf(
                 ) from error
             generated = cleaned_output
 
+        if on_status:
+            on_status("saving", 0, 0)
         staged = destination_dir / f".{destination.name}.tmp"
         try:
             shutil.copyfile(generated, staged)

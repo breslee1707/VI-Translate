@@ -5,7 +5,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -23,6 +25,10 @@ import com.vitranslate.pdf.model.TargetLanguage
 fun ControlsView(
     selectedLanguage: TargetLanguage,
     onLanguageSelected: (TargetLanguage) -> Unit,
+    engineType: SelectedEngineType = SelectedEngineType.GOOGLE_DEFAULT,
+    onOpenEngineConfig: () -> Unit = {},
+    useOcr: Boolean = true,
+    onUseOcrChange: (Boolean) -> Unit = {},
     overwrite: Boolean,
     onOverwriteChange: (Boolean) -> Unit,
     customSaveDirectory: String?,
@@ -50,6 +56,19 @@ fun ControlsView(
         }
     }
 
+    val engineDisplayName = remember(engineType) {
+        when (engineType) {
+            SelectedEngineType.GOOGLE_DEFAULT -> "Google Translate (Mặc định)"
+            SelectedEngineType.DEEPSEEK -> "DeepSeek AI (V3/R1)"
+            SelectedEngineType.GEMINI -> "Google Gemini AI (2.0/1.5)"
+            SelectedEngineType.OPENAI -> "OpenAI (GPT-4o)"
+            SelectedEngineType.OPENROUTER -> "OpenRouter"
+            SelectedEngineType.GROQ -> "Groq (Ultra Fast)"
+            SelectedEngineType.SILICONFLOW -> "SiliconCloud (DeepSeek)"
+            SelectedEngineType.CUSTOM_OPENAI -> "Custom / Local LLM"
+        }
+    }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -67,9 +86,6 @@ fun ControlsView(
             )
             Spacer(Modifier.height(6.dp))
 
-            // The language picker used to share a row with the action button,
-            // which left it about half the screen wide on a phone. Full width
-            // here, with the action below it.
             ExposedDropdownMenuBox(
                 expanded = expanded,
                 onExpandedChange = { if (!isTranslating) expanded = !expanded }
@@ -108,7 +124,43 @@ fun ControlsView(
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
+
+            // Engine Selection & AI Setup Button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Công cụ dịch",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = engineDisplayName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                TextButton(
+                    onClick = onOpenEngineConfig,
+                    enabled = !isTranslating
+                ) {
+                    Text("Cấu hình AI", style = MaterialTheme.typography.labelLarge)
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -143,13 +195,33 @@ fun ControlsView(
                 }
             }
 
-            // The whole row is the target rather than just the checkbox, and it
-            // is tall enough to hit without aiming.
+            // OCR Toggle Row
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 48.dp)
+                    .heightIn(min = 40.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(enabled = !isTranslating) { onUseOcrChange(!useOcr) }
+            ) {
+                Checkbox(
+                    checked = useOcr,
+                    onCheckedChange = { if (!isTranslating) onUseOcrChange(it) },
+                    enabled = !isTranslating
+                )
+                Text(
+                    text = "Tự động OCR trang PDF dạng ảnh (ML Kit)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            // Overwrite Checkbox
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 40.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .clickable(enabled = !isTranslating) { onOverwriteChange(!overwrite) }
             ) {

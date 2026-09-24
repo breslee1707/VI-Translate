@@ -72,6 +72,23 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    flavorDimensions += "engine"
+
+    productFlavors {
+        create("standard") {
+            dimension = "engine"
+            applicationIdSuffix = ".standard"
+            versionNameSuffix = "-standard"
+            buildConfigField("String", "ENGINE_TYPE", "\"STANDARD\"")
+        }
+        create("advanced") {
+            dimension = "engine"
+            applicationIdSuffix = ".advanced"
+            versionNameSuffix = "-advanced"
+            buildConfigField("String", "ENGINE_TYPE", "\"ADVANCED\"")
+        }
+    }
+
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
@@ -138,6 +155,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)
     implementation(libs.pdfbox.android)
+    implementation(libs.mlkit.text.recognition)
+    implementation(libs.onnxruntime.android)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

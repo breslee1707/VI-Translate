@@ -896,6 +896,76 @@ class HandoffTranslator(BaseTranslator):
                 stream.write(json.dumps({"src": text}, ensure_ascii=False) + "\n")
 
 
+class OpenAITranslator(BaseTranslator):
+    """Translate via OpenAI-compatible Chat Completions API (OpenAI, OpenRouter, DeepSeek, Ollama)."""
+
+    name = "openai"
+
+    def __init__(
+        self,
+        lang_in: str,
+        lang_out: str,
+        model: str | None = None,
+        *,
+        ignore_cache: bool = False,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        model_name = model or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
+        super().__init__(lang_in, lang_out, model_name, ignore_cache=ignore_cache, **kwargs)
+        self.api_key = (
+            api_key
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("DEEPSEEK_API_KEY")
+            or os.environ.get("OPENROUTER_API_KEY")
+            or ""
+        )
+        self.base_url = (
+            base_url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        ).rstrip("/")
+        self.session = requests.Session()
+
+    def do_translate(self, text: str) -> str:
+        if not text.strip():
+            return text
+
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        system_prompt = (
+            f"You are a professional document translator. Translate the text from {self.lang_in} to {self.lang_out}.\n"
+            "CRITICAL INSTRUCTIONS:\n"
+            "1. Preserve ALL tags such as <b0></b0>, <b1></b1>, <s1></s1>, <s2></s2> in their exact position.\n"
+            "2. Do NOT translate or alter tag IDs or placeholders.\n"
+            "3. Do NOT add extra explanations or Markdown code blocks. Output ONLY the raw translated text."
+        )
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+            "temperature": 0.1,
+        }
+
+        response = self.session.post(url, headers=headers, json=payload, timeout=40)
+        response.raise_for_status()
+        data = response.json()
+
+        try:
+            translated_content = data["choices"][0]["message"]["content"].strip()
+            return remove_control_characters(translated_content)
+        except (KeyError, IndexError, TypeError) as err:
+            raise RuntimeError(f"OpenAI-compatible translation response format invalid: {data}") from err
+
+
 ENGINES: dict[str, type[BaseTranslator]] = {
-    engine.name: engine for engine in (GoogleTranslator, HandoffTranslator)
+    engine.name: engine for engine in (GoogleTranslator, HandoffTranslator, OpenAITranslator)
 }
+

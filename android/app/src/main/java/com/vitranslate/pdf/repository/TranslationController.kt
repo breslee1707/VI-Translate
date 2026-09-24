@@ -52,6 +52,16 @@ object TranslationController {
         MutableStateFlow(TargetLanguage.getByCode(TargetLanguage.DEFAULT_CODE))
     val selectedLanguage: StateFlow<TargetLanguage> = _selectedLanguage.asStateFlow()
 
+    private val _engineType = MutableStateFlow(com.vitranslate.pdf.ui.components.SelectedEngineType.GOOGLE_DEFAULT)
+    val engineType: StateFlow<com.vitranslate.pdf.ui.components.SelectedEngineType> = _engineType.asStateFlow()
+
+    private var aiApiKey: String = ""
+    private var aiModelName: String = "gpt-4o-mini"
+    private var aiEndpoint: String = "https://api.openai.com/v1/chat/completions"
+
+    private val _useOcr = MutableStateFlow(true)
+    val useOcr: StateFlow<Boolean> = _useOcr.asStateFlow()
+
     private val _overwrite = MutableStateFlow(false)
     val overwrite: StateFlow<Boolean> = _overwrite.asStateFlow()
 
@@ -89,6 +99,7 @@ object TranslationController {
         val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         _overwrite.value = prefs.getBoolean(KEY_OVERWRITE, false)
         _customOutputDirectory.value = prefs.getString(KEY_OUTPUT_DIR, null)
+        _useOcr.value = prefs.getBoolean("use_ocr", true)
         scope.launch {
             val info = UpdateChecker().checkForUpdate()
             if (info != null && info.isNewerAvailable) {
@@ -103,7 +114,24 @@ object TranslationController {
     private fun prefs() =
         requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    // ---------------------------------------------------------------- settings
+    fun setEngineConfig(
+        type: com.vitranslate.pdf.ui.components.SelectedEngineType,
+        apiKey: String,
+        modelName: String,
+        endpoint: String
+    ) {
+        _engineType.value = type
+        aiApiKey = apiKey
+        aiModelName = modelName
+        aiEndpoint = endpoint
+        resetSkippedItems()
+    }
+
+    fun setUseOcr(value: Boolean) {
+        _useOcr.value = value
+        prefs().edit().putBoolean("use_ocr", value).apply()
+        resetSkippedItems()
+    }
 
     fun setSelectedLanguage(language: TargetLanguage) {
         _selectedLanguage.value = language
@@ -216,6 +244,58 @@ object TranslationController {
         var completedFiles = 0
         var cancelled = false
 
+        val customEngine: TranslationEngine? = when (_engineType.value) {
+            com.vitranslate.pdf.ui.components.SelectedEngineType.OPENAI -> AiTranslateEngine(
+                provider = AiProvider.OPENAI,
+                apiKey = aiApiKey,
+                modelName = aiModelName.ifBlank { "gpt-4o-mini" },
+                customEndpoint = aiEndpoint,
+                targetLang = _selectedLanguage.value.code
+            )
+            com.vitranslate.pdf.ui.components.SelectedEngineType.DEEPSEEK -> AiTranslateEngine(
+                provider = AiProvider.DEEPSEEK,
+                apiKey = aiApiKey,
+                modelName = aiModelName.ifBlank { "deepseek-chat" },
+                customEndpoint = aiEndpoint,
+                targetLang = _selectedLanguage.value.code
+            )
+            com.vitranslate.pdf.ui.components.SelectedEngineType.GEMINI -> AiTranslateEngine(
+                provider = AiProvider.GEMINI,
+                apiKey = aiApiKey,
+                modelName = aiModelName.ifBlank { "gemini-2.0-flash" },
+                targetLang = _selectedLanguage.value.code
+            )
+            com.vitranslate.pdf.ui.components.SelectedEngineType.OPENROUTER -> AiTranslateEngine(
+                provider = AiProvider.OPENROUTER,
+                apiKey = aiApiKey,
+                modelName = aiModelName.ifBlank { "deepseek/deepseek-chat" },
+                customEndpoint = aiEndpoint,
+                targetLang = _selectedLanguage.value.code
+            )
+            com.vitranslate.pdf.ui.components.SelectedEngineType.GROQ -> AiTranslateEngine(
+                provider = AiProvider.GROQ,
+                apiKey = aiApiKey,
+                modelName = aiModelName.ifBlank { "llama-3.3-70b-versatile" },
+                customEndpoint = aiEndpoint,
+                targetLang = _selectedLanguage.value.code
+            )
+            com.vitranslate.pdf.ui.components.SelectedEngineType.SILICONFLOW -> AiTranslateEngine(
+                provider = AiProvider.SILICONFLOW,
+                apiKey = aiApiKey,
+                modelName = aiModelName.ifBlank { "deepseek-ai/DeepSeek-V3" },
+                customEndpoint = aiEndpoint,
+                targetLang = _selectedLanguage.value.code
+            )
+            com.vitranslate.pdf.ui.components.SelectedEngineType.CUSTOM_OPENAI -> AiTranslateEngine(
+                provider = AiProvider.CUSTOM_OPENAI,
+                apiKey = aiApiKey,
+                modelName = aiModelName.ifBlank { "custom-model" },
+                customEndpoint = aiEndpoint,
+                targetLang = _selectedLanguage.value.code
+            )
+            com.vitranslate.pdf.ui.components.SelectedEngineType.GOOGLE_DEFAULT -> null
+        }
+
         try {
             for (item in pending) {
                 if (cancelRequested) {
@@ -231,6 +311,8 @@ object TranslationController {
                         outputDirUriOrPath = targetOutputDir,
                         targetLang = _selectedLanguage.value.code,
                         overwrite = _overwrite.value,
+                        customEngine = customEngine,
+                        useOcr = _useOcr.value,
                         onProgress = { donePages, totalPages ->
                             _isIndeterminate.value = false
                             val fileFraction =

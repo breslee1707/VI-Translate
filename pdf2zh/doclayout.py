@@ -2,7 +2,6 @@ import abc
 import ast
 import logging
 import os
-import sys
 
 import cv2
 import numpy as np
@@ -27,16 +26,6 @@ _BACKEND_PROVIDERS = {
 }
 
 _preferred_backend: str | None = None
-
-
-def can_cache_optimized_graph(
-    providers: list[str], *, frozen: bool | None = None
-) -> bool:
-    """Cache only in a mutable source environment, never inside a release."""
-    if frozen is None:
-        frozen = bool(getattr(sys, "frozen", False))
-    compiled_providers = {"CoreMLExecutionProvider", "TensorrtExecutionProvider"}
-    return not frozen and not compiled_providers.intersection(providers)
 
 
 def set_backend(name: str) -> None:
@@ -113,7 +102,8 @@ class OnnxModel(DocLayoutModel):
 
         # Providers like CoreML generate compiled nodes that cannot be
         # serialized, so only cache the optimized graph for CPU-only.
-        can_cache = can_cache_optimized_graph(providers)
+        compiled_providers = {"CoreMLExecutionProvider", "TensorrtExecutionProvider"}
+        can_cache = not compiled_providers.intersection(providers)
         if can_cache:
             optimized_path = model_path + ".optimized"
             if os.path.exists(optimized_path):
@@ -221,7 +211,15 @@ class OnnxModel(DocLayoutModel):
         new_h, new_w = pix.shape[2:]
 
         # Run inference
-        preds = self.model.run(None, {"images": pix})[0]
+        try:
+            preds = self.model.run(None, {"images": pix})[0]
+        except Exception as e:
+            if "CoreML" in str(e) and "CPUExecutionProvider" in self.model.get_providers():
+                logger.warning("CoreML execution failed, falling back to CPU: %s", e)
+                self.model.set_providers(["CPUExecutionProvider"])
+                preds = self.model.run(None, {"images": pix})[0]
+            else:
+                raise
 
         # Postprocess predictions
         preds = preds[preds[..., 4] > 0.25]

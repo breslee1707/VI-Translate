@@ -115,7 +115,7 @@ class TranslationOutcomeTests(unittest.TestCase):
             self.result(untranslated=40, reasons={"RateLimitedError": 38, "ConnectionError": 2})
         )
         self.assertEqual(state, "partial")
-        self.assertIn("40 đoạn chưa dịch được", detail)
+        self.assertIn("Hoàn thành — còn 40 đoạn chưa dịch", detail)
         self.assertIn("Google tạm chặn", detail)
         self.assertNotIn("kiểm tra mạng", detail)
 
@@ -130,7 +130,7 @@ class TranslationOutcomeTests(unittest.TestCase):
         _, detail = translation_outcome(
             self.result(untranslated=1, reasons={"single line needs less than 50% font size": 1})
         )
-        self.assertEqual(detail, "1 đoạn chưa dịch được")
+        self.assertEqual(detail, "Hoàn thành — còn 1 đoạn chưa dịch")
 
     def test_preserved_scan_is_never_reported_as_done(self):
         state, detail = translation_outcome(self.result(image_only_pages=(0, 4)))
@@ -160,6 +160,60 @@ class TranslationOutcomeTests(unittest.TestCase):
         status = next(event for event in events if event[0] == "status" and event[2] != "running")
         self.assertEqual(status[2], "partial")
         self.assertIn("OCR", status[3])
+
+    def test_completed_pdf_with_one_untranslated_segment_counts_as_finished(self):
+        source = Path("book.pdf")
+        output = Path("translated/book-vi.pdf")
+        app = types.SimpleNamespace(
+            events=queue.Queue(), states={source: "running"}, files=[source],
+            outputs={}, failures={}, rows={source: mock.Mock()},
+            translate_button=mock.Mock(), clear_button=mock.Mock(), status=mock.Mock(),
+            _go_determinate=mock.Mock(), _show_output_link=mock.Mock(),
+        )
+        state, detail = translation_outcome(self.result(untranslated=1))
+        app.events.put(("status", source, state, detail, output))
+        app.events.put(("finished",))
+        App._handle_events(app)
+        self.assertEqual(app.outputs[source], output)
+        self.assertEqual(app.states[source], "partial")
+        app.rows[source].set_state.assert_called_with("partial", "", "Hoàn thành — còn 1 đoạn chưa dịch")
+        app.status.configure.assert_called_with(text="Hoàn thành 1/1 file · 1 file còn phần chưa dịch")
+
+    def test_failed_pdf_is_not_counted_with_completed_partial_pdfs(self):
+        paths = [Path("done.pdf"), Path("partial.pdf"), Path("failed.pdf")]
+        app = types.SimpleNamespace(
+            events=queue.Queue(), states=dict(zip(paths, ("done", "partial", "failed"))), files=paths,
+            translate_button=mock.Mock(), clear_button=mock.Mock(), status=mock.Mock(),
+            _go_determinate=mock.Mock(),
+        )
+        app.events.put(("finished",))
+        App._handle_events(app)
+        summary = app.status.configure.call_args.kwargs["text"]
+        self.assertIn("Hoàn thành 2/3 file", summary)
+        self.assertIn("1 file còn phần chưa dịch", summary)
+        self.assertIn("1 file lỗi", summary)
+
+    def test_captcha_completion_continues_the_current_file_and_then_the_next(self):
+        paths = [Path("first.pdf"), Path("second.pdf")]
+        app = types.SimpleNamespace(events=queue.Queue(), failures={})
+
+        def translated(path, _destination, **options):
+            if path == paths[0]:
+                options["on_status"]("verification", 0, 0)
+                options["on_status"]("verified", 0, 0)
+            return types.SimpleNamespace(path=path.with_suffix(".translated.pdf"),
+                                         untranslated=0, reasons={}, image_only_pages=(), ocr_warnings=())
+
+        with mock.patch("app.gui.translate_pdf", side_effect=translated):
+            App._run(app, paths, "vi", False, "off", True)
+        events = list(app.events.queue)
+        verified = events.index(("stage", paths[0], "verified", 0, 0))
+        first_done = next(index for index, event in enumerate(events) if event[:3] == ("status", paths[0], "done"))
+        next_running = events.index(("status", paths[1], "running", "", None))
+        self.assertLess(verified, first_done)
+        self.assertLess(first_done, next_running)
+        self.assertFalse(app.failures)
+        self.assertFalse(any(event[0] == "status" and event[2] == "paused" for event in events))
 
 
 @unittest.skipIf(collect_pdfs is None, "desktop app dependencies are not installed")

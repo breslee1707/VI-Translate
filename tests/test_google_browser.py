@@ -45,7 +45,7 @@ class BrowserTransportTests(unittest.TestCase):
         with patch("pdf2zh.google_browser.BACKEND", backend):
             response = session.get(ENDPOINT, params=params)
         self.assertEqual(result_lines(response.text), ["Một <b0></b0>.", "<s1>Hai</s1>."])
-        backend.fetch.assert_called_once_with(params, verification, show_on_verification=True)
+        backend.fetch.assert_called_once_with(params, verification, show_on_verification=True, on_verified=None)
 
     def test_transport_cannot_be_used_to_browse_another_endpoint(self):
         with self.assertRaises(ValueError):
@@ -65,10 +65,20 @@ class BrowserTransportTests(unittest.TestCase):
         browser.session.on_verification()
         browser.on_status.assert_called_once_with("verification", 0, 0)
 
-    def test_gui_can_wait_for_user_choice_before_showing_the_browser(self):
-        browser = GoogleTranslator("en", "vi", ignore_cache=True,
-                                   envs={"google_browser": True, "google_verification_prompt": True})
-        self.assertFalse(browser.session.show_on_verification)
+    def test_browser_opens_verification_automatically_by_default(self):
+        browser = GoogleTranslator("en", "vi", ignore_cache=True, envs={"google_browser": True})
+        self.assertTrue(browser.session.show_on_verification)
+
+    def test_verification_completion_clears_the_pending_status(self):
+        backend = BrowserBackend()
+        backend.start = Mock()
+        backend._connection = Mock()
+        backend._connection.poll.return_value = True
+        backend._connection.recv.side_effect = [{"kind": "verification"}, {"kind": "result", "text": "Answer"}]
+        waiting, complete = Mock(), Mock()
+        self.assertEqual(backend.fetch({"q": "sample"}, waiting, on_verified=complete), "Answer")
+        waiting.assert_called_once_with()
+        complete.assert_called_once_with()
 
     def test_show_and_defer_controls_do_not_send_a_translation(self):
         backend = BrowserBackend()

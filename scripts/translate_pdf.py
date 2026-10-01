@@ -418,7 +418,6 @@ def translate_pdf(
     emit_segments: Path | None = None,
     ocr: str = "off",
     google_browser: bool = False,
-    google_verification_prompt: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
     on_status: Callable[[str, int, int], None] | None = None,
 ) -> Translation:
@@ -432,8 +431,6 @@ def translate_pdf(
         if sys.platform not in ("win32", "darwin") or engine != "google":
             raise TranslationError("Google browser mode requires the Windows or macOS desktop Google engine")
         envs["google_browser"] = True
-        if google_verification_prompt:
-            envs["google_verification_prompt"] = True
 
     destination: Path | None = None
     destination_dir: Path | None = None

@@ -236,9 +236,11 @@ Tiến độ phân biệt nhận dạng OCR, phân tích bố cục, chờ bản
 
 Tùy chọn **Google qua cửa sổ xác minh** dùng phiên Google riêng của app:
 Microsoft Edge WebView2 trên Windows và WKWebView trên macOS. Khi Google yêu
-cầu CAPTCHA, app hiện **Google cần xác minh**. Chọn **Mở xác minh** rồi tự
-hoàn tất trong cửa sổ Google; app sẽ tiếp tục dịch trên cùng phiên. Chọn
-**Để sau** hoặc đóng cửa sổ để tạm dừng và giữ các đoạn đã dịch.
+cầu CAPTCHA, app **tự mở cửa sổ Google** và hướng dẫn xác minh ngay trong
+hàng đợi. Người dùng tự hoàn tất CAPTCHA; app sẽ tiếp tục dịch trên cùng
+phiên rồi tự ẩn cửa sổ Google. Nút **Hiện lại cửa sổ Google** chỉ để đưa cửa
+sổ lên lại khi cần. Chọn **Để sau** hoặc đóng cửa sổ để tạm dừng và giữ các
+đoạn đã dịch. Chế độ này đã bật mặc định trên Windows và macOS.
 Phiên được giữ cho những lần chạy sau trên máy của người dùng. Chế độ này
 vẫn miễn phí và không bảo đảm Google luôn chấp nhận yêu cầu. CAPTCHA đã làm
 trong trình duyệt thông thường không tự chuyển sang phiên app.

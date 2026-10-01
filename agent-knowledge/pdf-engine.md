@@ -194,9 +194,12 @@ the CLI, and a selected "Google qua cửa sổ xác minh" control in the app.
 `pdf2zh/google_browser.py` runs a native browser in a spawned child: WebView2
 on Windows (profile at `~/.cache/pdf2zh/google-browser`) and WKWebView's
 application data store on macOS. No existing browser profile is read. The GUI
-keeps the browser hidden until "Google cần xác minh" offers "Mở xác minh" or
-"Để sau". Those controls show or close the existing browser, without a new
-translation request. CLI verification opens the browser automatically.
+keeps the browser hidden during ordinary translation and automatically shows
+it when Google requires verification. There is no extra opening confirmation.
+The queue explains the CAPTCHA step and offers "Hiện lại cửa sổ Google" or
+"Để sau". Those controls show or close the existing browser without a new
+translation request. Successful verification hides the browser and clears
+the pending notice. Browser mode is selected by default on Windows and macOS.
 A CAPTCHA waits for the user on that same page; closing it or exceeding ten
 minutes pauses the job. Deferring reports E-VERIFY-01, missing/failed native
 startup reports E-BROWSER-01 (with a Windows WebView2 download action).

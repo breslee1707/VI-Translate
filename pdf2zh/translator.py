@@ -572,7 +572,7 @@ class GoogleTranslator(BaseTranslator):
 
             self.session = BrowserSession(
                 lambda: self._status("verification"),
-                show_on_verification=not envs.get("google_verification_prompt", False),
+                on_verified=lambda: self._status("verified"),
             )
             # A user-verifiable browser has its own session. The Requests
             # cooldown is neither cleared nor reused for this transport.

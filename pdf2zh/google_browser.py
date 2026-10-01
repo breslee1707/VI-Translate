@@ -203,6 +203,7 @@ class BrowserBackend:
     def fetch(
         self, params: dict[str, str], on_verification: Callable[[], None],
         *, show_on_verification: bool = True,
+        on_verified: Callable[[], None] | None = None,
     ) -> str:
         with self._lock:
             self.start()
@@ -212,6 +213,7 @@ class BrowserBackend:
                     self._connection.send({"kind": "translate", "params": params,
                                            "show_on_verification": show_on_verification})
                 deadline = time.monotonic() + HUMAN_VERIFICATION_TIMEOUT + 15
+                awaiting_verification = False
                 while time.monotonic() < deadline:
                     if not self._connection.poll(0.5):
                         if not self._process.is_alive():
@@ -221,8 +223,11 @@ class BrowserBackend:
                     if self._verification_deferred:
                         raise self._unavailable()
                     if answer.get("kind") == "result":
+                        if awaiting_verification and on_verified is not None:
+                            on_verified()
                         return answer["text"]
                     if answer.get("kind") == "verification":
+                        awaiting_verification = True
                         on_verification()
                         continue
                     raise self._unavailable()
@@ -255,15 +260,18 @@ class BrowserSession:
 
     def __init__(
         self, on_verification: Callable[[], None], *, show_on_verification: bool = True,
+        on_verified: Callable[[], None] | None = None,
     ) -> None:
         self.on_verification = on_verification
         self.show_on_verification = show_on_verification
+        self.on_verified = on_verified
 
     def get(self, endpoint: str, *, params: dict[str, str], **_: Any) -> requests.Response:
         if endpoint != ENDPOINT:
             raise ValueError("The Google browser transport accepts only the translation endpoint")
         text = BACKEND.fetch(params, self.on_verification,
-                             show_on_verification=self.show_on_verification)
+                             show_on_verification=self.show_on_verification,
+                             on_verified=self.on_verified)
         response = requests.Response()
         response.status_code = 200
         response.url = ENDPOINT

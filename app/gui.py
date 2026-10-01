@@ -179,7 +179,10 @@ def collect_pdfs(paths: list[Path]) -> list[Path]:
     for path in paths:
         if path.is_dir():
             # Not glob("*.pdf"): that is case-sensitive on POSIX and would miss .PDF.
-            found.extend(sorted(p for p in path.iterdir() if _is_pdf(p)))
+            found.extend(sorted(
+                (p for p in path.iterdir() if _is_pdf(p)),
+                key=lambda entry: (entry.name.casefold(), entry.name),
+            ))
         elif path.suffix.lower() == ".pdf":
             found.append(path)
     unique: dict[Path, None] = {}

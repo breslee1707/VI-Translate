@@ -95,6 +95,7 @@ def _serve_browser(connection: Connection, storage: str, hidden: bool) -> None:
                             continue
                         verdict, text = page_verdict(state, params)
                         if verdict == "result":
+                            window.hide()
                             connection.send({"kind": "result", "text": text})
                             break
                         if verdict == "verification" and not verification_reported:

@@ -98,6 +98,24 @@ class BrowserTransportTests(unittest.TestCase):
         self.assertEqual(failure.code, "E-VERIFY-01")
         self.assertIsNotNone(backend._connection)
 
+    def test_failed_defer_control_does_not_claim_the_user_cancelled(self):
+        backend = BrowserBackend()
+        backend._connection = Mock()
+        backend._connection.send.side_effect = BrokenPipeError()
+        self.assertFalse(backend.send_control("close"))
+        self.assertFalse(backend._verification_deferred)
+
+    def test_defer_choice_wins_if_a_result_arrives_at_the_same_time(self):
+        backend = BrowserBackend()
+        backend.start = Mock()
+        backend._connection = Mock()
+        backend._connection.poll.side_effect = lambda _timeout: backend.send_control("close")
+        backend._connection.recv.return_value = {"kind": "result", "text": "Fresh result"}
+        from pdf2zh.translator import VerificationDeferredError
+
+        with self.assertRaises(VerificationDeferredError):
+            backend.fetch({"q": "private words"}, Mock())
+
     def test_runtime_start_failure_is_not_reported_as_a_google_outage(self):
         from pdf2zh.translator import BrowserRuntimeError
 

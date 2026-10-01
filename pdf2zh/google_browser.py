@@ -190,12 +190,14 @@ class BrowserBackend:
         with self._send_lock:
             if self._connection is None:
                 return False
+            was_deferred = self._verification_deferred
+            if kind == "close":
+                self._verification_deferred = True
             try:
                 self._connection.send({"kind": kind})
-                if kind == "close":
-                    self._verification_deferred = True
                 return True
             except (EOFError, OSError):
+                self._verification_deferred = was_deferred
                 return False
 
     def fetch(
@@ -216,6 +218,8 @@ class BrowserBackend:
                             raise self._unavailable()
                         continue
                     answer = self._connection.recv()
+                    if self._verification_deferred:
+                        raise self._unavailable()
                     if answer.get("kind") == "result":
                         return answer["text"]
                     if answer.get("kind") == "verification":

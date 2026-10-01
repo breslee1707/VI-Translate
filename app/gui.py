@@ -1026,7 +1026,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         dialog = ctk.CTkToplevel(self)
         self.verification_dialog = dialog
         dialog.title("Google cần xác minh")
-        dialog.geometry("540x260")
+        x = max(0, self.winfo_rootx() + (self.winfo_width() - 540) // 2)
+        y = max(0, self.winfo_rooty() + (self.winfo_height() - 260) // 3)
+        dialog.geometry(f"540x260+{x}+{y}")
         dialog.resizable(False, False)
         dialog.transient(self)
         ctk.CTkLabel(
@@ -1050,7 +1052,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         ctk.CTkButton(buttons, text="Mở xác minh", width=150,
                       command=lambda: choose(True)).pack(side="left")
         ctk.CTkButton(buttons, text="Để sau", width=110, fg_color="transparent",
-                      border_width=1, command=lambda: choose(False)).pack(side="right")
+                      border_width=1, border_color=BORDER_IDLE, text_color=ACCENT,
+                      hover_color=HOVER, command=lambda: choose(False)).pack(side="right")
         dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
 
     def _choose_google_verification(self, open_browser: bool) -> None:

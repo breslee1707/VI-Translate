@@ -538,7 +538,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.overwrite.grid(row=3, column=0, columnspan=2, padx=GAP, pady=(0, GAP), sticky="w")
         self.google_browser = ctk.CTkCheckBox(
-            controls, text="Google qua cửa sổ xác minh", checkbox_width=18, checkbox_height=18,
+            controls, text="Google qua trình duyệt (tự chọn, tự mở xác minh)", checkbox_width=18, checkbox_height=18,
             font=ctk.CTkFont(self.ui_font, size=12),
         )
         if sys.platform in ("win32", "darwin"):
@@ -1009,7 +1009,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             ).pack(side="left", padx=(PAD, 0))
         if failure.code == "E-BROWSER-01" and sys.platform == "win32":
             ctk.CTkButton(
-                buttons, text="Cài WebView2", width=120, height=32,
+                buttons, text="WebView2 dự phòng", width=155, height=32,
                 command=lambda: webbrowser.open("https://developer.microsoft.com/microsoft-edge/webview2/"),
                 font=ctk.CTkFont(self.ui_font, size=13),
             ).pack(side="left", padx=(PAD, 0))

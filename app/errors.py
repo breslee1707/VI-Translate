@@ -49,8 +49,10 @@ _RULES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
         "E-BROWSER-01",
         ("BrowserRuntimeError",),
         "Không khởi động được cửa sổ xác minh Google",
-        "Giải nén đầy đủ ứng dụng rồi thử lại. Trên Windows, hãy cài Microsoft Edge WebView2 Runtime "
-        "nếu còn thiếu. Phần đã dịch được giữ trong bộ nhớ đệm để dùng lại.",
+        "Giải nén đầy đủ ứng dụng, đóng cửa sổ Google của lần dịch trước rồi thử lại. "
+        "App tự tìm Chrome, Edge, Brave, Cốc Cốc hoặc Firefox đã cài. Trên Windows, "
+        "WebView2 Runtime là lựa chọn dự phòng nếu trình duyệt không dùng được. "
+        "Phần đã dịch được giữ trong bộ nhớ đệm để dùng lại.",
     ),
     (
         "E-NET-08",

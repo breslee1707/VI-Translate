@@ -134,12 +134,81 @@ def _serve_browser(connection: Connection, storage: str, hidden: bool) -> None:
         connection.close()
 
 
+def _serve_auto_browser(connection: Connection, storage: str, hidden: bool) -> None:
+    """Try installed browsers once at startup, then retain that session for all jobs."""
+    from pdf2zh.installed_browser import BrowserConnectionError, start_installed_browser
+
+    window = start_installed_browser(Path(storage), hidden)
+    if window is None:
+        _serve_browser(connection, storage, hidden)
+        return
+    try:
+        connection.send({"kind": "ready", "browser": window.browser.name})
+        while True:
+            if not connection.poll(0.5):
+                if window.process is None or window.process.poll() is not None:
+                    return
+                continue
+            job = connection.recv()
+            if job.get("kind") == "close":
+                return
+            if job.get("kind") == "show":
+                window.show()
+                continue
+            params = job["params"]
+            window.navigate(ENDPOINT + "?" + urlencode(params))
+            deadline = time.monotonic() + HUMAN_VERIFICATION_TIMEOUT
+            verification_reported = False
+            while time.monotonic() < deadline:
+                if connection.poll(0.5):
+                    control = connection.recv().get("kind")
+                    if control == "close":
+                        return
+                    if control == "show":
+                        window.show()
+                try:
+                    state = window.page_state("JSON.stringify(" + PAGE_STATE_JS + ")")
+                except BrowserConnectionError as error:
+                    # A cross-origin navigation can replace the evaluation context.
+                    if str(error) not in ("BrowserCommandFailed:Runtime.evaluate", "BrowserCommandFailed:script.evaluate"):
+                        raise
+                    if not window.is_open():
+                        raise BrowserConnectionError("AppBrowserTabClosed") from None
+                    continue
+                verdict, text = page_verdict(state, params)
+                if verdict == "result":
+                    window.hide()
+                    connection.send({"kind": "result", "text": text})
+                    break
+                if verdict == "verification" and not verification_reported:
+                    connection.send({"kind": "verification"})
+                    verification_reported = True
+                    if job.get("show_on_verification", True):
+                        window.show()
+                # Wait on this page for human verification without new requests.
+            else:
+                connection.send({"kind": "error"})
+                return
+    except (EOFError, OSError):
+        pass
+    except Exception:
+        try:
+            connection.send({"kind": "error"})
+        except OSError:
+            pass
+    finally:
+        window.close()
+        connection.close()
+
+
 class BrowserBackend:
     """Keep one private app profile across documents without reading Edge's profile."""
 
-    def __init__(self, *, storage: Path | None = None, hidden: bool = True) -> None:
+    def __init__(self, *, storage: Path | None = None, hidden: bool = True, embedded: bool = False) -> None:
         self.storage = storage or Path(os.path.expanduser("~")) / ".cache/pdf2zh/google-browser"
         self.hidden = hidden
+        self.embedded = embedded
+        self.browser_name = ""
         self._process: Any = None
         self._connection: Connection | None = None
         self._lock = threading.Lock()
@@ -167,12 +236,13 @@ class BrowserBackend:
         parent, child = context.Pipe()
         self._connection = parent
         self._process = context.Process(
-            target=_serve_browser, args=(child, str(self.storage), self.hidden), daemon=True,
+            target=_serve_browser if self.embedded else _serve_auto_browser,
+            args=(child, str(self.storage), self.hidden), daemon=True,
         )
         self._process.start()
         child.close()
         try:
-            answer = parent.recv() if parent.poll(45) else {"kind": "error", "reason": "StartupTimeout"}
+            answer = parent.recv() if parent.poll(90) else {"kind": "error", "reason": "StartupTimeout"}
             if answer.get("kind") != "ready":
                 self.close()
                 from pdf2zh.translator import BrowserRuntimeError
@@ -181,6 +251,7 @@ class BrowserBackend:
                     "Could not start the Google verification browser "
                     f"({answer.get('reason', 'StartupError')})"
                 )
+            self.browser_name = answer.get("browser", "WebView2" if sys.platform == "win32" else "WKWebView")
         except (EOFError, OSError):
             self.close()
             raise self._unavailable() from None
@@ -245,7 +316,7 @@ class BrowserBackend:
                 pass
             connection.close()
         if process is not None:
-            process.join(3)
+            process.join(8)
             if process.is_alive():
                 process.terminate()
                 process.join(3)

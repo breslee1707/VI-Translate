@@ -234,18 +234,25 @@ Nếu các lô liên tiếp không giữ được ranh giới đoạn, app chuy�
 đoạn sau ba lô lỗi để tránh chia nhỏ và gửi lại quá nhiều.
 Tiến độ phân biệt nhận dạng OCR, phân tích bố cục, chờ bản dịch và xuất PDF.
 
-Tùy chọn **Google qua cửa sổ xác minh** dùng phiên Google riêng của app:
-Microsoft Edge WebView2 trên Windows và WKWebView trên macOS. Khi Google yêu
+Tùy chọn **Google qua trình duyệt (tự chọn, tự mở xác minh)** dùng phiên Google
+riêng của app. App tự tìm Chrome, Edge, Brave, Cốc Cốc và Firefox đã cài, ưu
+tiên trình duyệt mặc định cho HTTPS nếu được hỗ trợ. Không tải thêm trình
+duyệt, WebDriver hay tiện ích. Nếu các trình duyệt đã cài không khởi động
+được, app dùng WebView2 trên Windows hoặc WKWebView trên macOS dự phòng. Khi Google yêu
 cầu CAPTCHA, app **tự mở cửa sổ Google** và hướng dẫn xác minh ngay trong
 hàng đợi. Người dùng tự hoàn tất CAPTCHA; app sẽ tiếp tục dịch trên cùng
-phiên rồi tự ẩn cửa sổ Google. Nút **Hiện lại cửa sổ Google** chỉ để đưa cửa
+phiên rồi tự thu nhỏ cửa sổ trình duyệt. Nút **Hiện lại cửa sổ Google** chỉ để đưa cửa
 sổ lên lại khi cần. Chọn **Để sau** hoặc đóng cửa sổ để tạm dừng và giữ các
 đoạn đã dịch. Chế độ này đã bật mặc định trên Windows và macOS.
 Phiên được giữ cho những lần chạy sau trên máy của người dùng. Chế độ này
 vẫn miễn phí và không bảo đảm Google luôn chấp nhận yêu cầu. CAPTCHA đã làm
 trong trình duyệt thông thường không tự chuyển sang phiên app.
-Windows cần WebView2 Runtime; khi không khởi động được, thông báo có nút
-**Cài WebView2** dẫn tới trang Microsoft. CLI Windows/macOS dùng
+Trình duyệt chạy bằng hồ sơ riêng tại `~/.cache/pdf2zh/google-browser/installed/`;
+app không đọc hoặc sao chép lịch sử, cookie hay mật khẩu từ hồ sơ cá nhân.
+Đổi trình duyệt có thể cần xác minh lại. App không tự đổi trình duyệt khi
+Google chặn và không tự giải CAPTCHA. Máy Windows có trình duyệt hỗ trợ
+không cần WebView2 Runtime; khi mọi lựa chọn đều không khởi động được,
+thông báo có nút **WebView2 dự phòng** dẫn tới trang Microsoft. CLI Windows/macOS dùng
 `--google-browser` với môi trường `requirements-app.txt`.
 
 Ví dụ với từ *conduction* trong tài liệu truyền nhiệt:

@@ -8,6 +8,8 @@ tkinterdnd2==0.4.3; sys_platform != "darwin"
 pyinstaller==6.11.1
 # Local OCR for image-only pages. Models are fetched and bundled at build time.
 rapidocr==3.9.2
-# A separate app-owned WebView2 session for user-completed Google verification.
+# Installed Chromium/Firefox transports; no browser or driver downloads.
+websocket-client==1.9.0
+# Embedded fallback when no installed browser can start a session.
 pywebview==6.2.1; sys_platform == "win32" or sys_platform == "darwin"
 pythonnet==3.2.0; sys_platform == "win32"

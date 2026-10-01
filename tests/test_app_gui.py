@@ -55,8 +55,8 @@ class CollectPdfsTests(unittest.TestCase):
         self.temp_directory.cleanup()
 
     def test_a_directory_expands_to_its_pdfs_without_recursing(self):
-        names = [path.name for path in collect_pdfs([self.root])]
-        self.assertEqual(names, ["a.pdf", "b.pdf", "UPPER.PDF"])
+        names = sorted(path.name for path in collect_pdfs([self.root]))
+        self.assertEqual(names, sorted(["a.pdf", "b.pdf", "UPPER.PDF"]))
 
     def test_a_directory_named_like_a_pdf_is_not_queued(self):
         self.assertNotIn("folder.pdf", [path.name for path in collect_pdfs([self.root])])

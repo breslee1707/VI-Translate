@@ -573,7 +573,15 @@ def translate_pdf(
         staged = destination_dir / f".{destination.name}.tmp"
         try:
             shutil.copyfile(generated, staged)
-            staged.replace(destination)
+            for attempt in range(5):
+                try:
+                    staged.replace(destination)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    import time
+                    time.sleep(0.2 * (2 ** attempt))
         finally:
             staged.unlink(missing_ok=True)
 

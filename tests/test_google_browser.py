@@ -147,6 +147,25 @@ class BrowserTransportTests(unittest.TestCase):
             backend.send_control.assert_called_with("close")
             app.status.configure.assert_called_once()
 
+    def test_queue_guidance_is_shown_while_verifying_and_hidden_afterward(self):
+        import queue
+        from pathlib import Path
+        from types import SimpleNamespace
+        from app.gui import App
+
+        source = Path("sample.pdf")
+        row = SimpleNamespace(detail=Mock(), message=Mock())
+        app = SimpleNamespace(events=queue.Queue(), states={source: "running"},
+                              rows={source: row}, status=Mock(), verification_actions=Mock())
+        app.events.put(("stage", source, "verification", 0, 0))
+        App._handle_events(app)
+        row.message.grid.assert_called_once_with()
+        app.verification_actions.grid.assert_called_once_with()
+        app.events.put(("stage", source, "verified", 0, 0))
+        App._handle_events(app)
+        row.message.grid_remove.assert_called_once_with()
+        app.verification_actions.grid_remove.assert_called_once_with()
+
     def test_closing_browser_is_a_terminal_error_without_document_text(self):
         backend = BrowserBackend()
         backend.start = Mock()

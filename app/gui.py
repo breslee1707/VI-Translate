@@ -1104,10 +1104,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     self.rows[path].message.configure(
                         text="Cửa sổ Google đã mở. Hãy hoàn tất CAPTCHA để app tự tiếp tục."
                     )
+                    self.rows[path].message.grid()
                 elif stage == "verified":
                     self.verification_actions.grid_remove()
                     self.rows[path].detail.configure(text="Đang dịch")
                     self.rows[path].message.configure(text="")
+                    self.rows[path].message.grid_remove()
                 if stage == "ocr" and total:
                     self.rows[path].detail.configure(text=f"OCR {done}/{total}")
             elif event[0] == "page":

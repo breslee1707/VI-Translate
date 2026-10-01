@@ -14,6 +14,11 @@ The release workflow rejects a mismatch.
 - Run the complete validation gate in [validation.md](validation.md).
 - Windows: run `build.ps1`; verify `dist/PDFTranslate-windows.zip`, payload
   files, SHA-256, and packaged `PDFTranslate.exe --smoke-test` exit code 0.
+  The smoke test also spawns a hidden WebView2 on local HTML. The Windows
+  payload requires WebView2 interop DLLs and Python.Runtime.dll; the target
+  Windows system needs Microsoft Edge WebView2 Runtime for Google browser mode.
+- macOS uses the built-in WKWebView with bundled PyObjC dependencies. Its
+  packaged and source smoke checks also load local HTML in a hidden child.
 - macOS builds require Darwin and the target architecture. `build-macos.sh`
   builds/smoke-tests/signs the `.app`, creates a DMG, and verifies it.
 
@@ -44,6 +49,10 @@ an interface, not just a download:
    `PDFTranslate-windows.zip`, `PDFTranslate-macos-apple-silicon.dmg`, and
    `PDFTranslate-macos-intel.dmg`.
 7. Download artifacts and compare local SHA-256 values with GitHub digests.
+
+Before tagging, dispatch `release.yml` on the feature branch to build and run
+the full test/dependency/Ruff gates for all three targets without publishing.
+The tag run repeats those gates before the publish job can run.
 
 `.github/workflows/macos-artifacts.yml` is an on-demand/branch build and does
 not replace the tag release gate. PyInstaller is not a cross-compiler; never

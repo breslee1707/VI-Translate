@@ -65,9 +65,24 @@ Use this as a cause map, not a substitute for inspecting the failing PDF.
 When adding a new guard, reproduce the smallest failing geometry in a unit test
 and validate the real document visually. Do not encode a filename-specific fix.
 
+Additional network regressions in `test_google_batching.py` reproduce an early
+successful batch followed by lost line breaks on three pages: 0.3.2 sent 238
+requests for 122 segments, while a consecutive-failure limit sends 124 with
+the same translations. Local failures followed by successful halves still
+allow later batching. `test_service_outage.py` also requires no more than 12
+requests per rolling minute and honors server Retry-After across restarts.
+
 Service recovery regressions in `test_translation_recovery.py` cover a request
 waiting behind a 429, HTTP-200 CAPTCHA, repeated empty/unparseable responses,
 single-answer HTML line breaks, corrupted marker cache entries, and a three-page
 PDF interrupted on page two. Resuming uses cached page one and translates only
 the remaining pages. Queue tests require a paused state, a Continue action,
 and no attempt to process subsequent files after a service-wide failure.
+
+`test_google_browser.py` accepts only the current Google query's result,
+rejects stale or foreign pages, keeps line breaks/formula/style tags, reports
+CAPTCHA to the user without answering it, retains the existing cache, and
+turns a closed/failed browser into a terminal error without logging source text.
+v0.3.3 additionally covers showing/closing that same window while a request
+waits, deferred verification's separate reason, runtime startup classification,
+and keeping the rest of the queue pending after either condition.

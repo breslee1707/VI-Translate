@@ -226,7 +226,27 @@ app **tạm dừng đợt dịch**, giữ các file còn lại trong hàng đợ
 thành công được lưu trong bộ nhớ đệm; bấm **Tiếp tục dịch** sau để dùng lại chúng.
 File đang làm dở chưa được xuất thành PDF. Sau khi bị chặn, app nghỉ ít nhất
 10 phút trước khi thử gửi lại; đây không phải thời gian Google cam kết mở chặn.
+Nếu Google yêu cầu chờ lâu hơn qua `Retry-After`, app giữ thời gian đó cả sau
+khi khởi động lại. Mỗi yêu cầu cách phản hồi trước ít nhất 5 giây để giảm tải;
+điều này không bảo đảm Google sẽ không chặn. Đổi DNS không gỡ được lỗi
+HTTP 429 hoặc CAPTCHA khi tên miền đã phân giải bình thường.
+Nếu các lô liên tiếp không giữ được ranh giới đoạn, app chuyển sang gửi từng
+đoạn sau ba lô lỗi để tránh chia nhỏ và gửi lại quá nhiều.
 Tiến độ phân biệt nhận dạng OCR, phân tích bố cục, chờ bản dịch và xuất PDF.
+
+Tùy chọn **Google qua cửa sổ xác minh** dùng phiên Google riêng của app:
+Microsoft Edge WebView2 trên Windows và WKWebView trên macOS. Khi Google yêu
+cầu CAPTCHA, app **tự mở cửa sổ Google** và hướng dẫn xác minh ngay trong
+hàng đợi. Người dùng tự hoàn tất CAPTCHA; app sẽ tiếp tục dịch trên cùng
+phiên rồi tự ẩn cửa sổ Google. Nút **Hiện lại cửa sổ Google** chỉ để đưa cửa
+sổ lên lại khi cần. Chọn **Để sau** hoặc đóng cửa sổ để tạm dừng và giữ các
+đoạn đã dịch. Chế độ này đã bật mặc định trên Windows và macOS.
+Phiên được giữ cho những lần chạy sau trên máy của người dùng. Chế độ này
+vẫn miễn phí và không bảo đảm Google luôn chấp nhận yêu cầu. CAPTCHA đã làm
+trong trình duyệt thông thường không tự chuyển sang phiên app.
+Windows cần WebView2 Runtime; khi không khởi động được, thông báo có nút
+**Cài WebView2** dẫn tới trang Microsoft. CLI Windows/macOS dùng
+`--google-browser` với môi trường `requirements-app.txt`.
 
 Ví dụ với từ *conduction* trong tài liệu truyền nhiệt:
 

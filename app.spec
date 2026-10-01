@@ -27,6 +27,9 @@ datas += collect_data_files("customtkinter")
 datas += collect_data_files("tkinterdnd2")
 datas += collect_data_files("babeldoc")
 datas += collect_data_files("rapidocr")
+datas += collect_data_files("webview")
+datas += collect_data_files("pythonnet")
+datas += collect_data_files("clr_loader")
 
 hiddenimports = [
     "peewee",
@@ -35,6 +38,12 @@ hiddenimports = [
     "pdf2zh.converter",
     "pdf2zh.translator",
     "pdf2zh.ocr",
+    "pdf2zh.google_browser",
+    "webview.platforms.winforms",
+    "webview.platforms.edgechromium",
+    "clr",
+    "pythonnet",
+    "clr_loader",
     # RapidOCR exposes its entrypoint lazily and chooses this backend at
     # runtime, so neither import is visible to PyInstaller's static scan.
     "rapidocr.main",

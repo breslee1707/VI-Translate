@@ -14,7 +14,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 if TYPE_CHECKING:
     from pdf2zh.high_level import TranslationReport
@@ -185,6 +185,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--threads", default=DEFAULT_THREADS, type=_positive_threads)
     parser.add_argument("--engine", default="google", choices=ENGINES)
     parser.add_argument(
+        "--google-browser", action="store_true",
+        help="Use a Google browser session with user-completed verification on Windows or macOS",
+    )
+    parser.add_argument(
         "--ocr",
         default="off",
         choices=OCR_MODES,
@@ -285,9 +289,9 @@ def _pages_to_indices(pages: str | None) -> list[int] | None:
     return indices
 
 
-def _segment_envs(segments: Path | None, emit_segments: Path | None) -> dict[str, str]:
+def _segment_envs(segments: Path | None, emit_segments: Path | None) -> dict[str, Any]:
     """Resolve the handoff file paths that the translator reads through `envs`."""
-    envs: dict[str, str] = {}
+    envs: dict[str, Any] = {}
     if segments is not None:
         source = segments.expanduser().resolve()
         if not source.is_file():
@@ -356,7 +360,7 @@ def _run_engine(
     threads: int,
     ignore_cache: bool,
     engine: str,
-    envs: dict[str, str],
+    envs: dict[str, Any],
     on_progress: Callable[[int, int], None] | None = None,
     skip_backing_pages: set[int] | None = None,
     ocr_regions_by_page: dict | None = None,
@@ -413,6 +417,7 @@ def translate_pdf(
     segments: Path | None = None,
     emit_segments: Path | None = None,
     ocr: str = "off",
+    google_browser: bool = False,
     on_progress: Callable[[int, int], None] | None = None,
     on_status: Callable[[str, int, int], None] | None = None,
 ) -> Translation:
@@ -422,6 +427,10 @@ def translate_pdf(
         raise TranslationError(f"Unsupported OCR mode: {ocr}")
     source = _validate_input(input_pdf)
     envs = _segment_envs(segments, emit_segments)
+    if google_browser:
+        if sys.platform not in ("win32", "darwin") or engine != "google":
+            raise TranslationError("Google browser mode requires the Windows or macOS desktop Google engine")
+        envs["google_browser"] = True
 
     destination: Path | None = None
     destination_dir: Path | None = None
@@ -435,7 +444,7 @@ def translate_pdf(
                 "Pass --overwrite only with replacement authorization."
             )
 
-    if engine == "google":
+    if engine == "google" and not google_browser:
         from pdf2zh.translator import GOOGLE_BLOCK, RateLimitedError
 
         # No OCR/model work while a known service cooldown is active.
@@ -608,6 +617,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             segments=args.segments,
             emit_segments=args.emit_segments,
             ocr=args.ocr,
+            **({"google_browser": True} if args.google_browser else {}),
         )
     except TranslationError as error:
         print(f"error: {error}", file=sys.stderr)

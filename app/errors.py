@@ -39,6 +39,20 @@ class Failure:
 # when any marker appears in the chain's type names or messages.
 _RULES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     (
+        "E-VERIFY-01",
+        ("VerificationDeferredError",),
+        "Đã để xác minh Google sau",
+        "Đợt dịch đã tạm dừng theo lựa chọn của bạn. Phần đã dịch được giữ để dùng lại. "
+        "Chọn Tiếp tục dịch khi bạn sẵn sàng xác minh.",
+    ),
+    (
+        "E-BROWSER-01",
+        ("BrowserRuntimeError",),
+        "Không khởi động được cửa sổ xác minh Google",
+        "Giải nén đầy đủ ứng dụng rồi thử lại. Trên Windows, hãy cài Microsoft Edge WebView2 Runtime "
+        "nếu còn thiếu. Phần đã dịch được giữ trong bộ nhớ đệm để dùng lại.",
+    ),
+    (
         "E-NET-08",
         ("RateLimitedError",),
         "Google hiện từ chối yêu cầu từ kết nối này",

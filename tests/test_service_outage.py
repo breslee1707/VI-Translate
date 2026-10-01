@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from email.utils import formatdate
 import unittest
 from pathlib import Path
 
@@ -92,6 +93,44 @@ def translator_answering(
 
 
 class GoogleBlockTests(unittest.TestCase):
+    def test_server_retry_after_is_respected_across_restarts(self):
+        clock = FakeClock()
+        clock.now = 1_000_000.0
+        for retry_after in ("1800", formatdate(clock.now + 1800, usegmt=True)):
+            with self.subTest(retry_after=retry_after), tempfile.TemporaryDirectory() as folder:
+                record = Path(folder) / "google-block.json"
+                reply = blocked()
+                reply.headers["Retry-After"] = retry_after
+                translator, _, google = translator_answering(
+                    lambda _text: reply, clock=clock,
+                    block=NetworkBlock(str(record), clock=clock.clock),
+                )
+                with self.assertRaises(RateLimitedError):
+                    translator.do_translate("Hello")
+                recovered = NetworkBlock(str(record), clock=clock.clock)
+                clock.now += 601
+                with self.assertRaises(RateLimitedError):
+                    recovered.before_request()
+                clock.now += 1200
+                recovered.before_request()
+                self.assertEqual(len(google.sent), 1)
+                clock.now = 1_000_000.0
+
+    def test_invalid_or_short_retry_after_keeps_the_minimum_cooldown(self):
+        for value in ("invalid", "-10", "1", "nan", "inf"):
+            with self.subTest(retry_after=value):
+                translator, clock, google = translator_answering()
+                reply = blocked()
+                reply.headers["Retry-After"] = value
+                google.answer = lambda _text: reply
+                with self.assertRaises(RateLimitedError):
+                    translator.do_translate("Hello")
+                clock.now += 599
+                with self.assertRaises(RateLimitedError):
+                    translator.block.before_request()
+                clock.now += 2
+                translator.block.before_request()
+
     def test_a_block_stops_requests_at_once(self):
         """0.3.0 sent each blocked segment eight more times, which kept the block alive."""
         translator, clock, google = translator_answering()
@@ -230,6 +269,13 @@ class GoogleOutageTests(unittest.TestCase):
 
 
 class RequestPaceTests(unittest.TestCase):
+    def test_a_long_run_stays_under_twelve_requests_per_minute(self):
+        translator, _clock, google = translator_answering(lambda text: translation(f"vi:{text}"))
+        for number in range(30):
+            translator.do_translate(f"Sentence {number}")
+        for start in google.started:
+            self.assertLessEqual(sum(start <= sent < start + 60 for sent in google.started), 12)
+
     def test_requests_go_one_at_a_time_a_gap_apart(self):
         translator, _clock, google = translator_answering(lambda text: translation(f"vi:{text}"))
         for word in ("one", "two", "three"):

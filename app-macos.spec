@@ -34,6 +34,7 @@ datas += collect_data_files("customtkinter")
 datas += collect_data_files("tkinterdnd2")
 datas += collect_data_files("babeldoc")
 datas += collect_data_files("rapidocr")
+datas += collect_data_files("webview")
 
 hiddenimports = [
     "peewee",
@@ -42,6 +43,11 @@ hiddenimports = [
     "pdf2zh.converter",
     "pdf2zh.translator",
     "pdf2zh.ocr",
+    "pdf2zh.google_browser",
+    "webview.platforms.cocoa",
+    "WebKit",
+    "Security",
+    "UniformTypeIdentifiers",
     "rapidocr.main",
     "rapidocr.inference_engine.onnxruntime",
     # Reached only through pdf2zh.high_level; naming them keeps the compiled

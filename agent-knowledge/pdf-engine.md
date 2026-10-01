@@ -162,17 +162,59 @@ request, four at a time, with up to eight total attempts per segment.
   goslate and Calibre's Ebook Translator rely on to batch it; the `/m` page
   itself has not yet been checked from an unblocked network - so the answer
   must hold exactly one non-empty line per segment, broken by newlines or
-  `<br>`. Any other count, or an HTTP 400, halves the batch; after three such
-  misses with no batch ever right the document sends segments one by one. A
-  segment holding a line break travels alone. On nine stubbed corpus documents
+  `<br>`. Any other count, or an HTTP 400, halves the batch; after three
+  consecutive misses the document sends segments one by one. A successful
+  batch resets that streak; an early success cannot enable unlimited later
+  splitting. A segment holding a line break travels alone. On nine stubbed corpus documents
   this cut requests 5-21 fold (RISKS 144 -> 29, a 41-page textbook excerpt
   644 -> 45, the OCR'd ERP scan 207 -> 14) and every page rendered identically.
-- `RequestPace` lets one request out at a time, at least 1 s after the last
-  answer, for every translator in the process.
+- `RequestPace` lets one request out at a time, at least 5 s after the last
+  answer, for every translator in the process. This conservative budget is
+  not a Google quota and cannot guarantee the network will never be blocked.
 - `NetworkBlock` stops at the first refusal. The rest of the document, the rest
   of the queue and the next run (the moment is kept in
   `~/.cache/pdf2zh/google-block.json`) are refused without a request, and one
-  request per 10 minutes checks whether the block has lifted.
+  request per at least 10 minutes checks whether the block has lifted. A
+  longer `Retry-After` (seconds or HTTP date) is honored and saved across
+  restarts; old `blocked_at`-only records remain readable.
+
+A 2026-10-01 live probe got 302 to `/sorry/index`, then HTTP 429. The exact
+v0.1.0 and v0.3.2 adapters both refused that same response; their endpoint and
+User-Agent are identical. System DNS and Google Public DNS both resolved the
+host successfully. Changing DNS does not remove that HTTP-level network block.
+Do not test alternative Google addresses to get around the refusal. Successful
+live batching remained unverified until a later user-completed CAPTCHA in
+Edge. That Edge session translated three newline-separated sample segments
+correctly; the independent Requests session still got 429, despite IPv6
+being available and preferred by both DNS ordering and the system route.
+The session difference is observed; its precise Google-side cause is unknown.
+
+Windows and macOS offer `google_browser=True` in the runner, `--google-browser` at
+the CLI, and a selected "Google qua cửa sổ xác minh" control in the app.
+`pdf2zh/google_browser.py` runs a native browser in a spawned child: WebView2
+on Windows (profile at `~/.cache/pdf2zh/google-browser`) and WKWebView's
+application data store on macOS. No existing browser profile is read. The GUI
+keeps the browser hidden during ordinary translation and automatically shows
+it when Google requires verification. There is no extra opening confirmation.
+The queue explains the CAPTCHA step and offers "Hiện lại cửa sổ Google" or
+"Để sau". Those controls show or close the existing browser without a new
+translation request. Successful verification hides the browser and clears
+the pending notice. Browser mode is selected by default on Windows and macOS.
+A CAPTCHA waits for the user on that same page; closing it or exceeding ten
+minutes pauses the job. Deferring reports E-VERIFY-01, missing/failed native
+startup reports E-BROWSER-01 (with a Windows WebView2 download action).
+Only a result at the Google endpoint for the current exact query/language pair
+is accepted. Returned text enters the existing batch/marker checks and the
+same Google cache, with 5-second pacing. This browser's own verification
+state is separate from the Requests cooldown; the latter is never cleared.
+Windows smoke tests load a hidden local-HTML WebView2, requiring pywebview's
+interop DLLs, pythonnet and clr_loader data in the frozen payload.
+After the user verified this app-owned window on 2026-10-01, one live request
+translated three sample segments. A separate CLI run then translated a
+three-page PDF without another challenge; Vietnamese accents and bold were
+correct, formula/table regions were pixel-identical to the source, and every
+page was rendered and inspected. This verifies recovery in that session,
+not permanent freedom from Google's limits.
 
 The final block check and refusal verdict are inside the pacing lock, so a
 waiting caller cannot send after another caller sees 429. CAPTCHA HTML is
@@ -184,7 +226,7 @@ queued. Successful segments remain in the existing persistent cache. Retrying
 repeats local PDF/OCR processing but sends only uncached segments. Known active
 cooldowns are checked before OCR/model work, without reserving a probe.
 
-GUI stages cover OCR page progress, layout, service waits and PDF export.
+GUI stages cover OCR page progress, layout, request pacing, service waits and PDF export.
 Page progress counts completed pages, including protected pages. OCR engines
 load only when an image-only page actually needs recognition. Local bounded
 `translated/translation-service.log` records request/cache/batch counters, not

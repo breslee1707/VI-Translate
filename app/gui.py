@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import multiprocessing
 import os
 import queue
 import subprocess
@@ -351,6 +352,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.outputs: dict[Path, Path] = {}
         # Kept so a failed row can still show its full detail after the batch.
         self.failures: dict[Path, tuple[Failure, Path | None]] = {}
+        self.verification_dialog: ctk.CTkToplevel | None = None
         # What the header link does right now: open the release page, restart
         # into a downloaded build, or nothing while one is downloading.
         self.update_action: str | None = None
@@ -533,6 +535,13 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             font=ctk.CTkFont(self.ui_font, size=12),
         )
         self.overwrite.grid(row=3, column=0, columnspan=2, padx=GAP, pady=(0, GAP), sticky="w")
+        self.google_browser = ctk.CTkCheckBox(
+            controls, text="Google qua cửa sổ xác minh", checkbox_width=18, checkbox_height=18,
+            font=ctk.CTkFont(self.ui_font, size=12),
+        )
+        if sys.platform in ("win32", "darwin"):
+            self.google_browser.grid(row=4, column=0, columnspan=2, padx=GAP, pady=(0, GAP), sticky="w")
+            self.google_browser.select()
 
     def _build_queue(self) -> None:
         # A separate header, because CTkScrollableFrame's label_text cannot hold
@@ -826,6 +835,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         ocr_names = {name: mode for mode, name in OCR_NAMES.items()}
         ocr = ocr_names[self.ocr.get()]
         overwrite = bool(self.overwrite.get())
+        google_browser = sys.platform in ("win32", "darwin") and bool(self.google_browser.get())
 
         self.translate_button.configure(state="disabled", text="Đang dịch…")
         self.clear_button.configure(state="disabled")
@@ -841,12 +851,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.batch_done, self.batch_total = 0, len(pending)
         self.worker = threading.Thread(
-            target=self._run, args=(pending, language, overwrite, ocr), daemon=True
+            target=self._run, args=(pending, language, overwrite, ocr, google_browser), daemon=True
         )
         self.worker.start()
 
     def _run(
-        self, files: list[Path], language: str, overwrite: bool, ocr: str
+        self, files: list[Path], language: str, overwrite: bool, ocr: str, google_browser: bool = False
     ) -> None:
         for index, path in enumerate(files, 1):
             self.events.put(("status", path, "running", "", None))
@@ -860,6 +870,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
             try:
                 with google_diagnostics(destination):
+                    browser_options = {"google_browser": True, "google_verification_prompt": True} if google_browser else {}
                     result = translate_pdf(
                         path,
                         destination,
@@ -868,6 +879,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                         on_progress=report,
                         on_status=stage,
                         ocr=ocr,
+                        **browser_options,
                     )
                 state, detail = translation_outcome(result)
                 self.events.put(("status", path, state, detail, result.path))
@@ -875,7 +887,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 # One unreadable or already-translated file must not stop the batch.
                 failure = describe_failure(error)
                 state = "skipped" if failure.code == "E-OUT-05" else "failed"
-                if failure.code in ("E-NET-08", "E-NET-09"):
+                if failure.code in ("E-NET-08", "E-NET-09", "E-BROWSER-01", "E-VERIFY-01"):
                     state = "paused"
                 log = self._log_failure(destination, path, error) if state in ("failed", "paused") else None
                 self.failures[path] = (failure, log)
@@ -977,6 +989,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 command=lambda: self._open(log),
                 font=ctk.CTkFont(self.ui_font, size=13),
             ).pack(side="left", padx=(PAD, 0))
+        if failure.code == "E-BROWSER-01" and sys.platform == "win32":
+            ctk.CTkButton(
+                buttons, text="Cài WebView2", width=120, height=32,
+                command=lambda: webbrowser.open("https://developer.microsoft.com/microsoft-edge/webview2/"),
+                font=ctk.CTkFont(self.ui_font, size=13),
+            ).pack(side="left", padx=(PAD, 0))
         ctk.CTkButton(
             buttons, text="Đóng", width=90, height=32,
             fg_color="transparent", border_width=1, border_color=BORDER_IDLE,
@@ -995,6 +1013,49 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.progress.configure(mode="determinate")
             self.progress.set(0)
             self.determinate = True
+
+    def _show_google_verification(self, path: Path) -> None:
+        """Offer a clear choice before showing the user's CAPTCHA window."""
+        current = getattr(self, "verification_dialog", None)
+        if current is not None and current.winfo_exists():
+            current.lift()
+            return
+        dialog = ctk.CTkToplevel(self)
+        self.verification_dialog = dialog
+        dialog.title("Google cần xác minh")
+        dialog.geometry("540x260")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        ctk.CTkLabel(
+            dialog, text="Google cần xác minh để tiếp tục dịch", anchor="w",
+            font=ctk.CTkFont(self.ui_font, size=16, weight="bold"),
+        ).pack(fill="x", padx=EDGE, pady=(EDGE, PAD))
+        ctk.CTkLabel(
+            dialog, text=f"File: {path.name}\n\nBấm Mở xác minh rồi tự hoàn tất CAPTCHA trong cửa sổ Google. "
+                         "App sẽ tự tiếp tục và dùng lại phần đã dịch.",
+            anchor="w", justify="left", wraplength=490,
+            font=ctk.CTkFont(self.ui_font, size=12),
+        ).pack(fill="x", padx=EDGE)
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(fill="x", padx=EDGE, pady=GAP)
+
+        def choose(open_browser: bool) -> None:
+            self.verification_dialog = None
+            dialog.destroy()
+            self._choose_google_verification(open_browser)
+
+        ctk.CTkButton(buttons, text="Mở xác minh", width=150,
+                      command=lambda: choose(True)).pack(side="left")
+        ctk.CTkButton(buttons, text="Để sau", width=110, fg_color="transparent",
+                      border_width=1, command=lambda: choose(False)).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
+
+    def _choose_google_verification(self, open_browser: bool) -> None:
+        from pdf2zh.google_browser import BACKEND
+
+        BACKEND.send_control("show" if open_browser else "close")
+        if not open_browser:
+            self.status.configure(text="Đang tạm dừng — phần đã dịch được giữ để dùng lại")
 
     def _drain_events(self) -> None:
         try:
@@ -1045,6 +1106,8 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     "translating": "Đang phân tích bố cục và dịch",
                     "layout": "Đang phân tích bố cục",
                     "request": "Đang chờ bản dịch từ Google",
+                    "pacing": "Đang nghỉ giữa các yêu cầu Google",
+                    "verification": "Hãy xác minh CAPTCHA trong cửa sổ Google",
                     "waiting": "Kết nối gián đoạn — đang chờ thử lại",
                     "saving": "Đang xuất PDF",
                 }
@@ -1052,6 +1115,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 if total:
                     label += f" · trang {done}/{total}"
                 self.status.configure(text=f"{label} · {path.name}")
+                if stage == "verification":
+                    self.rows[path].detail.configure(text="Cần xác minh")
+                    self._show_google_verification(path)
                 if stage == "ocr" and total:
                     self.rows[path].detail.configure(text=f"OCR {done}/{total}")
             elif event[0] == "page":
@@ -1080,6 +1146,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 self.update_tag = event[1]
                 self._show_update_link(f"● Cài {event[1]} & khởi động lại", "install")
             elif event[0] == "finished":
+                verification_dialog = getattr(self, "verification_dialog", None)
+                if verification_dialog is not None and verification_dialog.winfo_exists():
+                    verification_dialog.destroy()
+                self.verification_dialog = None
                 self.translate_button.configure(state="normal", text="Dịch")
                 self.clear_button.configure(state="normal")
                 self._go_determinate()
@@ -1115,6 +1185,10 @@ def verify_engine() -> None:
 
     load_layout_model()
     verify_ocr_runtime()
+    if sys.platform in ("win32", "darwin"):
+        from pdf2zh.google_browser import verify_browser_runtime
+
+        verify_browser_runtime()
 
 
 def main() -> None:
@@ -1152,4 +1226,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

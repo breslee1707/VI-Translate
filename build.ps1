@@ -63,6 +63,9 @@ $required = @(
     "_internal\cv2",
     "_internal\onnxruntime",
     "_internal\pymupdf"
+    "_internal\webview\lib\Microsoft.Web.WebView2.Core.dll"
+    "_internal\webview\lib\Microsoft.Web.WebView2.WinForms.dll"
+    "_internal\pythonnet\runtime\Python.Runtime.dll"
 )
 if (-not $SkipAssets -or (Test-Path (Join-Path $root "app\assets\doclayout.onnx"))) {
     $required += "_internal\app\assets\doclayout.onnx"

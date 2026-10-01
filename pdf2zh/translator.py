@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -13,6 +14,8 @@ import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, ClassVar
 from urllib.parse import quote_plus, urlparse
 
@@ -78,6 +81,14 @@ class BatchMismatchError(RuntimeError):
 
 class ServiceUnavailableError(RuntimeError):
     """Raised when the service gives no usable answer: no connection, a timeout, a 5xx."""
+
+
+class BrowserRuntimeError(ServiceUnavailableError):
+    """The native verification browser could not be started on this machine."""
+
+
+class VerificationDeferredError(ServiceUnavailableError):
+    """The user chose to complete Google's verification later."""
 
 
 class InvalidResponseError(RuntimeError):
@@ -197,6 +208,7 @@ class NetworkBlock:
         self._lock = threading.Lock()
         self._loaded = path is None
         self._since: float | None = None
+        self._cooldown = self.RECHECK_AFTER
 
     def before_request(self) -> None:
         """Refuse a request while a block is fresh, letting one through per interval."""
@@ -206,7 +218,7 @@ class NetworkBlock:
                 return
             now = self._clock()
             # A clock set back would otherwise hold requests back indefinitely.
-            if 0 <= now - self._since < self.RECHECK_AFTER:
+            if 0 <= now - self._since < self._cooldown:
                 raise RateLimitedError(
                     "Google Translate refused this network moments ago; no request is "
                     "sent until the block has had time to lift"
@@ -219,14 +231,28 @@ class NetworkBlock:
         """Check a cooldown without reserving its single recovery request."""
         with self._lock:
             self._load()
-            if self._since is not None and 0 <= self._clock() - self._since < self.RECHECK_AFTER:
+            if self._since is not None and 0 <= self._clock() - self._since < self._cooldown:
                 raise RateLimitedError("Google Translate is cooling down after refusing this network")
 
-    def refused(self) -> None:
+    def refused(self, retry_after: str | None = None) -> None:
         """Record that Google has just refused this network."""
         with self._lock:
             self._loaded = True
             self._since = self._clock()
+            self._cooldown = self.RECHECK_AFTER
+            if retry_after:
+                try:
+                    delay = float(retry_after)
+                except ValueError:
+                    try:
+                        date = parsedate_to_datetime(retry_after)
+                        if date.tzinfo is None:
+                            date = date.replace(tzinfo=timezone.utc)
+                        delay = date.timestamp() - self._since
+                    except (ValueError, TypeError, OverflowError, OSError):
+                        delay = 0.0
+                if math.isfinite(delay):
+                    self._cooldown = max(self.RECHECK_AFTER, delay)
             self._save()
 
     def answered(self) -> None:
@@ -235,6 +261,7 @@ class NetworkBlock:
             if self._since is None:
                 return
             self._since = None
+            self._cooldown = self.RECHECK_AFTER
             self._save()
 
     def _load(self) -> None:
@@ -243,7 +270,13 @@ class NetworkBlock:
         self._loaded = True
         try:
             with open(self._path, encoding="utf-8") as stream:
-                self._since = float(json.load(stream)["blocked_at"])
+                record = json.load(stream)
+            since = float(record["blocked_at"])
+            cooldown = float(record.get("cooldown_seconds", self.RECHECK_AFTER))
+            if not math.isfinite(since) or not math.isfinite(cooldown):
+                raise ValueError("Non-finite Google cooldown")
+            self._since = since
+            self._cooldown = max(self.RECHECK_AFTER, cooldown)
         except FileNotFoundError:
             pass
         except (OSError, ValueError, KeyError, TypeError) as error:
@@ -259,7 +292,7 @@ class NetworkBlock:
                 return
             os.makedirs(os.path.dirname(self._path), exist_ok=True)
             with open(self._path, "w", encoding="utf-8") as stream:
-                json.dump({"blocked_at": self._since}, stream)
+                json.dump({"blocked_at": self._since, "cooldown_seconds": self._cooldown}, stream)
         except OSError as error:
             logger.debug("Could not record the Google block: %s", error)
 
@@ -272,7 +305,9 @@ class RequestPace:
     process shares one pace, so a queue of documents cannot overlap either.
     """
 
-    GAP = 1.0
+    # A conservative default for sustained book translations. This is our
+    # request budget, not a quota or recovery promise from the free service.
+    GAP = 5.0
 
     def __init__(
         self,
@@ -488,8 +523,8 @@ class GoogleTranslator(BaseTranslator):
     # Google translates each line on its own and keeps the line breaks, so a
     # blank line keeps segments apart without any marker it could translate.
     BATCH_SEPARATOR = "\n\n"
-    # Batches that may come back with the wrong number of lines, while none has
-    # come back right, before a document sends its segments one by one.
+    # Consecutive malformed batches before this document sends singly. An
+    # early success must not leave a later failure splitting every page.
     BATCH_MISSES_ALLOWED = 3
     GLITCH_ATTEMPTS = 3
 
@@ -500,6 +535,7 @@ class GoogleTranslator(BaseTranslator):
         model: str | None = None,
         *,
         ignore_cache: bool = False,
+        envs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -527,9 +563,20 @@ class GoogleTranslator(BaseTranslator):
         self.sleep: Callable[[float], None] = time.sleep
         self._batch_hits = 0
         self._batch_misses = 0
+        self._batch_failures = 0
         self._terminal_error: RateLimitedError | ServiceUnavailableError | None = None
         self.stats: Counter[str] = Counter()
         self.on_status: Callable[[str, int, int], None] | None = None
+        if envs and envs.get("google_browser"):
+            from pdf2zh.google_browser import BrowserSession
+
+            self.session = BrowserSession(
+                lambda: self._status("verification"),
+                show_on_verification=not envs.get("google_verification_prompt", False),
+            )
+            # A user-verifiable browser has its own session. The Requests
+            # cooldown is neither cleared nor reused for this transport.
+            self.block = NetworkBlock()
 
     def _status(self, stage: str) -> None:
         if self.on_status is not None:
@@ -576,7 +623,7 @@ class GoogleTranslator(BaseTranslator):
 
     @property
     def batching(self) -> bool:
-        return self._batch_hits > 0 or self._batch_misses < self.BATCH_MISSES_ALLOWED
+        return self._batch_failures < self.BATCH_MISSES_ALLOWED
 
     def _batches(self, texts: Sequence[str]) -> Iterator[list[str]]:
         """Group texts into requests, sending alone any that cannot share one."""
@@ -613,6 +660,7 @@ class GoogleTranslator(BaseTranslator):
             # A segment that did not keep to its own line, or one the service
             # refused, spoils only its own half.
             self._batch_misses += 1
+            self._batch_failures += 1
             self.stats["batch_misses"] += 1
             middle = len(batch) // 2
             self._translate_batch(batch[:middle], answers)
@@ -625,6 +673,7 @@ class GoogleTranslator(BaseTranslator):
                 answers[text] = error
             return
         self._batch_hits += 1
+        self._batch_failures = 0
         self.stats["batch_hits"] += 1
         for text, line in zip(batch, lines):
             try:
@@ -684,6 +733,7 @@ class GoogleTranslator(BaseTranslator):
             self.block.check_available()
             started = self.outage.before_request()
             failure: ServiceUnavailableError | None = None
+            self._status("pacing")
             with self.pace.turn():
                 # Both the last check and the refusal verdict belong inside
                 # the request lock: a waiting worker must see the first 429.
@@ -704,7 +754,7 @@ class GoogleTranslator(BaseTranslator):
                         f"Google Translate could not be reached ({type(error).__name__})"
                     )
                 if failure is None and is_google_block(response):
-                    self.block.refused()
+                    self.block.refused(response.headers.get("Retry-After"))
                     self.stats["blocks"] += 1
                     raise RateLimitedError(
                         "Google Translate is refusing requests from this network (HTTP 429 or CAPTCHA)"

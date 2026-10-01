@@ -124,6 +124,37 @@ class GoogleBatchTests(unittest.TestCase):
         page = '<div class="result-container">vi:One<br>vi:Two<br/>vi:&lt;b0&gt;&lt;/b0&gt;</div>'
         self.assertEqual(result_lines(page), ["vi:One", "vi:Two", "vi:<b0></b0>"])
 
+    def test_line_break_loss_after_success_does_not_keep_splitting_every_page(self):
+        state = {"keep_breaks": True}
+
+        def answer(text: str):
+            translated = line_by_line(text)
+            if not state["keep_breaks"]:
+                translated = " ".join(line for line in translated.splitlines() if line)
+            return google_page(translated)
+
+        translator, _clock, google = translator_answering(answer)
+        self.assertEqual(translator.translate_many(["First", "Second"]), ["vi:First", "vi:Second"])
+        state["keep_breaks"] = False
+        for page in range(3):
+            segments = [f"Page {page}, sentence {number}." for number in range(40)]
+            self.assertEqual(translator.translate_many(segments), [f"vi:{text}" for text in segments])
+        # One early success must not enable an unbounded binary split tree.
+        self.assertEqual(len(google.sent), 1 + GoogleTranslator.BATCH_MISSES_ALLOWED + 120)
+
+    def test_a_local_batch_failure_does_not_disable_later_successful_batches(self):
+        def answer(text: str):
+            translated = line_by_line(text)
+            if len(text.split("\n\n")) > 8:
+                translated = translated.replace("\n", " ")
+            return google_page(translated)
+
+        translator, _clock, google = translator_answering(answer)
+        for page in range(4):
+            segments = [f"Page {page}, sentence {number}." for number in range(16)]
+            self.assertEqual(translator.translate_many(segments), [f"vi:{text}" for text in segments])
+        self.assertEqual(len(google.sent), 12)
+
     def test_a_rejected_batch_is_halved_until_the_rejected_segment_stands_alone(self):
         def reject(text: str):
             if "Refused" in text:

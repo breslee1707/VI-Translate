@@ -40,8 +40,42 @@ jobs:
       - name: Create the virtual environment
         run: python -m venv .venv
 
+      - name: Ensure WebView2 Runtime
+        shell: pwsh
+        run: |
+          $runtimePaths = @(
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+            'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+            'HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          )
+          $runtimePresent = $runtimePaths | ForEach-Object {
+            (Get-ItemProperty -LiteralPath $_ -Name pv -ErrorAction SilentlyContinue).pv
+          } | Where-Object { $_ -and $_ -ne '0.0.0.0' }
+          if (-not $runtimePresent) {
+            $installer = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebview2Setup.exe'
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $installer
+            $signature = Get-AuthenticodeSignature -LiteralPath $installer
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+              throw 'WebView2 bootstrapper signature is invalid'
+            }
+            $install = Start-Process -FilePath $installer -ArgumentList '/silent', '/install' -Wait -PassThru -WindowStyle Hidden
+            if ($install.ExitCode -ne 0) { throw "WebView2 installation failed: $($install.ExitCode)" }
+          }
+
       - name: Build
         run: .\build.ps1
+
+      - name: Validate
+        shell: pwsh
+        run: |
+          .\.venv\Scripts\python.exe -m pip install ruff==0.16.4
+          if ($LASTEXITCODE -ne 0) { throw 'Ruff installation failed' }
+          .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Unit tests failed' }
+          .\.venv\Scripts\python.exe -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency check failed' }
+          .\.venv\Scripts\python.exe -m ruff check pdf2zh scripts app tests --select E9,F63,F7,F82
+          if ($LASTEXITCODE -ne 0) { throw 'Ruff checks failed' }
 
       - uses: actions/upload-artifact@v6
         with:
@@ -82,6 +116,15 @@ jobs:
       - name: Build app and DMG
         shell: bash
         run: bash build-macos.sh
+
+      - name: Validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv-macos/bin/python3 -m pip install ruff==0.16.4
+          .venv-macos/bin/python3 -m unittest discover -s tests -v
+          .venv-macos/bin/python3 -m pip check
+          .venv-macos/bin/python3 -m ruff check pdf2zh scripts app tests --select E9,F63,F7,F82
 
       - uses: actions/upload-artifact@v6
         with:

@@ -20,7 +20,10 @@ except ImportError:
     App = None
 from pdf2zh.high_level import translate_stream
 from pdf2zh.ocr import OCR_FONT_PATH, prepare_ocr_pdf
-from pdf2zh.translator import NetworkBlock, RateLimitedError, RequestPace, ServiceUnavailableError
+from pdf2zh.translator import (
+    NetworkBlock, RateLimitedError, RequestPace, ServiceUnavailableError,
+    VerificationDeferredError, BrowserRuntimeError,
+)
 from scripts.translate_pdf import TranslationError, translate_pdf
 from tests.test_google_batching import FakeCache, google_page, line_by_line
 from tests.test_ocr import EmptyLayoutModel
@@ -160,7 +163,8 @@ class TranslationRecoveryTests(unittest.TestCase):
 
     @unittest.skipIf(App is None, "desktop app dependencies are not installed")
     def test_queue_stops_at_service_failure_and_keeps_remaining_files_pending(self):
-        for error in (RateLimitedError("blocked"), ServiceUnavailableError("unavailable")):
+        for error in (RateLimitedError("blocked"), ServiceUnavailableError("unavailable"),
+                      VerificationDeferredError("later"), BrowserRuntimeError("missing")):
             with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as directory:
                 paths = [Path(directory) / f"{number}.pdf" for number in range(3)]
                 app = SimpleNamespace(events=queue.Queue(), failures={}, _log_failure=Mock(return_value=None))

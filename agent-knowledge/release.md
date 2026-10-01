@@ -33,8 +33,10 @@ an interface, not just a download:
   `app/update.py` refuses anything else and falls back to the release page.
 - The tag must be `v<APP_VERSION>`; a tag that is not dotted numbers is read
   as "no update" by every installed build.
-- Never publish a partial or re-uploaded asset under an existing tag: installed
-  apps download whatever that name points at and restart into it.
+- Never publish partial assets. Keep published tags/assets unchanged unless the
+  user explicitly requests replacement: installed apps download whatever that
+  name points at and restart into it. Follow the replacement procedure below
+  for that exceptional, user-authorized operation.
 - To rehearse an update without publishing, point `PDFTRANSLATE_UPDATE_API` at
   a local JSON file shaped like the GitHub releases API.
 
@@ -60,3 +62,18 @@ not replace the tag release gate. PyInstaller is not a cross-compiler; never
 claim a Windows-built Mac artifact was tested. Without a Developer ID,
 `build-macos.sh` applies an ad-hoc signature: users may need right-click → Open,
 and the DMG is not notarized.
+
+## Explicitly Authorized Same-Version Replacement
+
+On 2026-10-01 the user explicitly chose to replace the GitHub v0.3.4 assets
+after being told that existing v0.3.4 installs must download again manually.
+That authorization is specific to this replacement, not future releases.
+
+Preserve the original annotated tag object/commit, release metadata and all
+three downloaded assets with verified digests. Run the full native matrix
+preflight on the replacement source, merge and require the same tested tree.
+Set the existing release to draft before moving its tag; force-push only that
+exact tag with a lease on the previously verified tag object. The tag workflow
+must repeat all checks, replace all three assets while draft, then publish only
+after uploads finish. Verify every new digest and the downloaded Windows smoke
+test. Restore the saved original source/assets if replacement fails.

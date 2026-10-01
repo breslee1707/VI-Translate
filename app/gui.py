@@ -94,7 +94,7 @@ OCR_NAMES = {
 # book becomes thousands of segments. It runs only for someone who turns it on.
 DEFAULT_OCR_MODE = "off"
 
-STATUS_MARKS = {"queued": "•", "running": "▶", "done": "✓", "partial": "!", "failed": "✕", "skipped": "–", "paused": "Ⅱ"}
+STATUS_MARKS = {"queued": "•", "running": "▶", "done": "✓", "partial": "✓", "failed": "✕", "skipped": "–", "paused": "Ⅱ"}
 STATUS_COLORS = {
     "queued": ("gray45", "gray60"),
     "running": ("#1f6feb", "#58a6ff"),
@@ -235,7 +235,7 @@ def translation_outcome(result) -> tuple[str, str]:
     """Return the queue state and an honest, compact coverage summary."""
     details = []
     if result.untranslated:
-        summary = f"{result.untranslated} đoạn chưa dịch được"
+        summary = f"còn {result.untranslated} đoạn chưa dịch"
         causes = [
             advice
             for reason, advice in SERVICE_FAILURE_ADVICE.items()
@@ -250,7 +250,8 @@ def translation_outcome(result) -> tuple[str, str]:
     if result.ocr_warnings:
         details.append(f"OCR giữ lại {len(result.ocr_warnings)} vùng/trang không an toàn")
     partial = bool(details)
-    return ("partial" if partial else "done", "; ".join(details))
+    detail = "Hoàn thành — " + "; ".join(details) if partial else ""
+    return ("partial" if partial else "done", detail)
 
 
 class QueueRow:
@@ -1147,11 +1148,12 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 counts = {}
                 for state in self.states.values():
                     counts[state] = counts.get(state, 0) + 1
-                summary = f"Xong {counts.get('done', 0)}/{len(self.files)} file"
+                completed = counts.get("done", 0) + counts.get("partial", 0)
+                summary = f"Hoàn thành {completed}/{len(self.files)} file"
                 if counts.get("partial"):
-                    summary += f", {counts['partial']} file dịch thiếu"
+                    summary += f" · {counts['partial']} file còn phần chưa dịch"
                 if counts.get("failed"):
-                    summary += f", {counts['failed']} file lỗi"
+                    summary += f" · {counts['failed']} file lỗi"
                 if counts.get("paused"):
                     summary = "Đã tạm dừng · Phần đã dịch được lưu để dùng lại"
                     if counts.get("queued"):

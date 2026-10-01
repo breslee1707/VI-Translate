@@ -2,6 +2,14 @@
 
 Use this as a cause map, not a substitute for inspecting the failing PDF.
 
+An exported PDF with one untranslated segment is a completed output with a
+coverage warning, not an unfinished queue item. Keep internal `partial` state
+and its amber warning, show a completion tick and "Hoàn thành — còn N đoạn chưa
+dịch", and count `done + partial` in the completed-file total. Failed/paused
+files never enter that count. `test_app_gui.py` reproduces the former "Xong 0/1"
+for an existing partial output and checks that CAPTCHA completion continues the
+same file before starting the next queued file, without a manual resume.
+
 | Symptom | Proven cause | Guard / regression location |
 | --- | --- | --- |
 | GUI stops at the last page on a large book | Unused dual PDF doubled pages; font subsetting and `garbage=3` recompressed the whole document while holding the GIL | Mono-only app path and large-document thresholds in `high_level.py`; `test_large_document_finalization.py` |

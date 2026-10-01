@@ -65,6 +65,16 @@ Use this as a cause map, not a substitute for inspecting the failing PDF.
 When adding a new guard, reproduce the smallest failing geometry in a unit test
 and validate the real document visually. Do not encode a filename-specific fix.
 
+Mixed-direction glyphs in one model region must start separate paragraphs.
+A Japanese fatigue-strength paper's page 5 put horizontal "Ave." into the
+90-degree axis-label paragraph, then `rotated_geometry` was absent on those
+upright glyphs. `test_mixed_text_orientation.py` exercises both content orders.
+The same page's small plot was missed at 832-pixel inference: reflow moved its
+labels and rules. An unprotected rotated label below 1024-pixel inference now
+gets one 1024 recheck, adding only intersecting figure protection. A synthetic
+plot must remain pixel-identical; the real 13-page document completed locally
+and its affected plot's raster matched the source exactly.
+
 Additional network regressions in `test_google_batching.py` reproduce an early
 successful batch followed by lost line breaks on three pages: 0.3.2 sent 238
 requests for 122 segments, while a consecutive-failure limit sends 124 with
@@ -86,3 +96,18 @@ turns a closed/failed browser into a terminal error without logging source text.
 v0.3.3 additionally covers showing/closing that same window while a request
 waits, deferred verification's separate reason, runtime startup classification,
 and keeping the rest of the queue pending after either condition.
+
+`test_installed_browser.py` covers HTTPS-default preference (including Firefox),
+Brave/Cốc Cốc discovery, rejecting unknown executables and remote protocol hosts,
+exclusive app profile locks, startup-only failover and embedded fallback,
+command/event correlation, sanitized errors, Firefox BiDi results/window controls,
+and one navigation across a CAPTCHA followed by successful resume. Windows
+local-HTML QA used actual Chrome/Edge 154, Firefox 157, Brave 1.96.60 and Cốc Cốc
+152.0.7977.124; all five kept a test cookie after a full browser restart. No
+personal profiles were read. A user-completed CAPTCHA in the app-launched Edge
+then resumed a live two-segment translation automatically. After closing and
+reopening that same app profile, a different sample translated without another
+challenge. This is session recovery evidence, not a guarantee against rechecks.
+The same installed Edge transport translated a three-page live QA PDF with no
+fallback segments; all pages were rendered, Vietnamese/bold remained legible,
+and formula/table regions were pixel-identical to the immutable generated source.

@@ -1252,7 +1252,9 @@ class TranslateConverter(PDFConverterEx):
                         vfix = 0
                         vstk_size_only = True
                 if not vstk:
-                    if cls == xt_cls:
+                    # A layout region can contain both an axis label and
+                    # horizontal prose. They must not share a baseline.
+                    if cls == xt_cls and orientation == pstk[-1].orientation:
                         # Force paragraph break for list items: when text wraps back
                         # to left AND there's a significant vertical gap (> 1.5x font size),
                         # it's likely a new list item, not a continuation

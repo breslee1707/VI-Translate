@@ -411,6 +411,33 @@ def translate_patch(
                     )
                     box[y0:y1, x0:x1] = 0
 
+            # Small plots can be missed at the page-height inference size.
+            # Recheck only an unprotected rotated label, and only add figure
+            # protection; never replace the existing prose/table ownership.
+            rotated_bounds = []
+            for block in page_blocks:
+                for line in block.get("lines", []):
+                    if abs(line.get("dir", (1, 0))[1]) < 0.5:
+                        continue
+                    for span in line.get("spans", []):
+                        sx0, sy0, sx1, sy1 = span["bbox"]
+                        cx = int(np.clip((sx0 + sx1) / 2, 0, w - 1))
+                        cy = int(np.clip(h - (sy0 + sy1) / 2, 0, h - 1))
+                        if box[cy, cx] != 0:
+                            rotated_bounds.append((sx0, sy0, sx1, sy1))
+            if rotated_bounds and int(pix.height / 32) * 32 < 1024:
+                recheck = model.predict(image, imgsz=1024)[0]
+                for detection in recheck.boxes:
+                    if recheck.names[int(detection.cls)] != "figure":
+                        continue
+                    fx0, fy0, fx1, fy1 = map(float, detection.xyxy.squeeze())
+                    if not any(fx0 < sx1 and sx0 < fx1 and fy0 < sy1 and sy0 < fy1
+                               for sx0, sy0, sx1, sy1 in rotated_bounds):
+                        continue
+                    left, right = max(0, int(fx0 - 1)), min(w, int(fx1 + 1))
+                    bottom, top = max(0, int(h - fy1 - 1)), min(h, int(h - fy0 + 1))
+                    box[bottom:top, left:right] = 0
+
             # A model-detected table stays protected unless PyMuPDF can split
             # that same region into cells. Each reliable cell gets its own class
             # so its text is translated independently while the original grid,

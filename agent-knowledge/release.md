@@ -14,11 +14,12 @@ The release workflow rejects a mismatch.
 - Run the complete validation gate in [validation.md](validation.md).
 - Windows: run `build.ps1`; verify `dist/PDFTranslate-windows.zip`, payload
   files, SHA-256, and packaged `PDFTranslate.exe --smoke-test` exit code 0.
-  The smoke test also spawns a hidden WebView2 on local HTML. The Windows
-  payload requires WebView2 interop DLLs and Python.Runtime.dll; the target
-  Windows system needs Microsoft Edge WebView2 Runtime for Google browser mode.
-- macOS uses the built-in WKWebView with bundled PyObjC dependencies. Its
-  packaged and source smoke checks also load local HTML in a hidden child.
+  The smoke test also starts the automatic browser transport on local HTML.
+  QA the installed adapter and the embedded fallback separately. The Windows
+  payload retains WebView2 interop DLLs and Python.Runtime.dll for fallback;
+  users with a working installed browser don't need WebView2 Runtime.
+- macOS supports installed browsers and built-in WKWebView fallback with
+  bundled PyObjC dependencies. Packaged/source smoke uses local HTML in a child.
 - macOS builds require Darwin and the target architecture. `build-macos.sh`
   builds/smoke-tests/signs the `.app`, creates a DMG, and verifies it.
 

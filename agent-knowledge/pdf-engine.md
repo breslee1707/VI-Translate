@@ -190,25 +190,39 @@ being available and preferred by both DNS ordering and the system route.
 The session difference is observed; its precise Google-side cause is unknown.
 
 Windows and macOS offer `google_browser=True` in the runner, `--google-browser` at
-the CLI, and a selected "Google qua cửa sổ xác minh" control in the app.
-`pdf2zh/google_browser.py` runs a native browser in a spawned child: WebView2
-on Windows (profile at `~/.cache/pdf2zh/google-browser`) and WKWebView's
-application data store on macOS. No existing browser profile is read. The GUI
-keeps the browser hidden during ordinary translation and automatically shows
+the CLI, and a selected "Google qua trình duyệt (tự chọn, tự mở xác minh)" control.
+`pdf2zh/google_browser.py` runs a browser in a spawned child.
+`pdf2zh/installed_browser.py` discovers supported installed Chrome, Edge, Brave,
+Cốc Cốc and Firefox, prioritizing the HTTPS default. Windows discovery reads
+App Paths/StartMenuInternet and HTTPS UserChoice, then standard install paths;
+macOS uses NSWorkspace and Applications folders. Chromium uses CDP and Firefox
+uses direct WebDriver BiDi, without driver/extension/browser downloads.
+Each installed browser uses a locked persistent app profile under
+`~/.cache/pdf2zh/google-browser/installed/<browser>`, never a personal profile.
+Only our launched instance and its selected tab/window are controlled; the
+protocol accepts loopback WebSocket endpoints and suppresses query text in
+errors. Startup probes use local HTML and can try the next installed browser.
+After startup, a Google refusal never switches browsers or sends another query.
+If no installed transport starts, the native fallback uses WebView2 on Windows
+(existing profile `~/.cache/pdf2zh/google-browser`) or WKWebView's application
+data store on macOS. No existing personal browser profile is read. The GUI
+keeps the installed browser minimized during ordinary translation and shows
 it when Google requires verification. There is no extra opening confirmation.
 The queue explains the CAPTCHA step and offers "Hiện lại cửa sổ Google" or
 "Để sau". Those controls show or close the existing browser without a new
-translation request. Successful verification hides the browser and clears
+translation request. Successful verification minimizes the browser and clears
 the pending notice. Browser mode is selected by default on Windows and macOS.
 A CAPTCHA waits for the user on that same page; closing it or exceeding ten
 minutes pauses the job. Deferring reports E-VERIFY-01, missing/failed native
-startup reports E-BROWSER-01 (with a Windows WebView2 download action).
+startup reports E-BROWSER-01 (with an optional Windows WebView2 fallback action).
 Only a result at the Google endpoint for the current exact query/language pair
 is accepted. Returned text enters the existing batch/marker checks and the
 same Google cache, with 5-second pacing. This browser's own verification
 state is separate from the Requests cooldown; the latter is never cleared.
-Windows smoke tests load a hidden local-HTML WebView2, requiring pywebview's
-interop DLLs, pythonnet and clr_loader data in the frozen payload.
+Smoke tests start the automatically selected transport on local HTML. Embedded
+fallback QA also needs pywebview's interop DLLs, pythonnet and clr_loader data
+in the frozen payload. Systems with a working installed transport don't need
+WebView2 Runtime. macOS keeps WKWebView as the fallback for Safari defaults.
 After the user verified this app-owned window on 2026-10-01, one live request
 translated three sample segments. A separate CLI run then translated a
 three-page PDF without another challenge; Vietnamese accents and bold were

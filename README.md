@@ -49,8 +49,11 @@ PDF Translate là ứng dụng mã nguồn mở dành cho Windows, macOS và And
 ## Điểm nổi bật
 
 - **Giữ nguyên bố cục:** bảo toàn vị trí của đoạn văn, công thức, bảng, hình, mục lục và tài liệu tham khảo.
+- **Bản song ngữ (tùy chọn):** tạo thêm một file `-dual.pdf` để đối chiếu — hai trang cạnh nhau, xen kẽ từng trang, hoặc bản dịch kèm bản gốc nằm trong lớp ẩn **Original** để bật/tắt trong trình xem PDF. File bản dịch chính không thay đổi.
+- **Giao diện Tiếng Việt hoặc English:** đổi ngay ở góc trên cửa sổ. Ứng dụng nhớ ngôn ngữ giao diện, ngôn ngữ đích và kiểu bản song ngữ cho lần mở sau.
 - **Sẵn sàng để dùng:** tải về, giải nén và chạy; không cần cài Python hay model riêng.
-- **Xử lý hàng loạt:** kéo thả nhiều file PDF hoặc cả thư mục vào ứng dụng.
+- **Xử lý hàng loạt:** kéo thả nhiều file PDF hoặc cả thư mục vào ứng dụng. Hàng đợi cho biết số
+  trang của từng file, tiến độ theo trang của file đang dịch, và có nút mở bản dịch ngay khi xong.
 - **OCR cục bộ cho trang scan (bật khi cần):** chế độ Tự động đọc và dịch vùng văn bản an
   toàn; bảng, công thức và hình phức tạp được giữ nguyên thay vì bị phá bố cục.
 - **36 ngôn ngữ đích:** mặc định là tiếng Việt, cùng nhiều ngôn ngữ sử dụng chữ Latin.
@@ -122,6 +125,16 @@ Chọn một trong ba cách:
 
 Chọn ngôn ngữ đích trong mục **Dịch sang**. Ứng dụng mặc định dịch sang **Tiếng Việt**.
 
+Muốn có thêm bản đối chiếu, chọn **Bản song ngữ**:
+
+- **Hai trang cạnh nhau:** mỗi trang gốc nằm bên trái trang dịch của nó.
+- **Xen kẽ từng trang:** trang gốc, rồi trang dịch, lần lượt đến hết tài liệu.
+- **Bản gốc ở lớp ẩn:** trông như bản dịch; bật lớp **Original** trong bảng
+  Layers của trình xem (Adobe Acrobat/Reader, Foxit, Firefox...) để thấy bản gốc
+  ngay tại chỗ. Trình xem không có bảng Layers, như Chrome, chỉ hiện bản dịch.
+
+Chữ ở cả hai bản vẫn chọn và tìm kiếm được; liên kết và trích dẫn vẫn bấm được.
+
 OCR mặc định **tắt**, ứng dụng chỉ xử lý lớp chữ có sẵn. Với PDF scan, chọn
 **Trang ảnh scan → Tự động** trước khi bấm **Dịch**. Chế độ **Nâng cao** chậm
 hơn đáng kể và chủ yếu dùng để thử nghiệm. Một trang có bảng, công thức, hình hoặc nhận dạng
@@ -129,7 +142,11 @@ không chắc chắn sẽ được giữ nguyên và hàng đợi báo **dịch 
 
 ### 3. Bắt đầu dịch
 
-Bấm **Dịch**. Các file được xử lý lần lượt và hiển thị trạng thái ngay trong hàng đợi.
+Bấm **Dịch** — nút ghi luôn số file sẽ dịch, ví dụ **Dịch 3 file**. Các file được xử lý lần
+lượt; file đang dịch hiện số trang đã xong và thanh tiến độ ngay trên dòng của nó. Dịch xong,
+mỗi dòng có nút **Mở**, **Song ngữ** (khi có bản song ngữ) và **Thư mục**; file lỗi có nút
+**Chi tiết** để đọc và sao chép báo cáo lỗi. Phím tắt: **Ctrl+O** chọn file, **Ctrl+Enter**
+bắt đầu dịch (trên Mac là **⌘**). Lỡ đóng cửa sổ khi đang dịch, ứng dụng hỏi lại trước khi dừng.
 
 Kết quả được lưu tự động vào thư mục `translated` nằm cạnh file nguồn:
 
@@ -137,10 +154,12 @@ Kết quả được lưu tự động vào thư mục `translated` nằm cạnh
 TaiLieu/
 ├── document.pdf
 └── translated/
-    └── document-vi.pdf
+    ├── document-vi.pdf
+    └── document-vi-dual.pdf   (khi chọn Bản song ngữ)
 ```
 
-Mặc định, ứng dụng không ghi đè kết quả đã có. Bật **Ghi đè file đã dịch trước đó** khi bạn muốn dịch lại.
+Mặc định, ứng dụng không ghi đè kết quả đã có: file đã có bản dịch được bỏ qua. Bật **Ghi đè
+file đã dịch trước đó** khi bạn muốn dịch lại, kể cả những file vừa bị bỏ qua.
 
 ## Được phát triển ở đây
 
@@ -148,14 +167,14 @@ Phần kế thừa từ dự án gốc là nhân đọc, phân tích bố cục 
 quyết định việc một trang tiếng Việt in ra có đọc được hay không đều được viết
 cho dự án này:
 
-**Ứng dụng desktop — 1.620 dòng trong [`app/`](app/)**
-Giao diện, kéo thả, hàng đợi nhiều file không dừng vì một file lỗi, mã lỗi đọc
-được kèm log để người dùng báo lỗi được, cơ chế tự cập nhật tự thay thư mục cài
-đặt rồi mở lại app, đóng gói PyInstaller cho Windows và cả hai kiến trúc macOS,
-workflow phát hành tự động. Không một dòng nào trong thư mục này đến từ dự án
-gốc.
+**Ứng dụng desktop — 3.232 dòng trong [`app/`](app/)**
+Giao diện tiếng Việt và tiếng Anh, kéo thả, hàng đợi nhiều file không dừng vì
+một file lỗi, mã lỗi đọc được kèm log để người dùng báo lỗi được, cơ chế tự cập
+nhật tự thay thư mục cài đặt rồi mở lại app, đóng gói PyInstaller cho Windows và
+cả hai kiến trúc macOS, workflow phát hành tự động. Không một dòng nào trong thư
+mục này đến từ dự án gốc.
 
-**Bộ quy tắc bảo toàn — [`pdf2zh/rules.py`](pdf2zh/rules.py) (519 dòng) và [contract sản phẩm](references/preservation-rules.md)**
+**Bộ quy tắc bảo toàn — [`pdf2zh/rules.py`](pdf2zh/rules.py) (708 dòng) và [contract sản phẩm](references/preservation-rules.md)**
 Đây là thứ phân biệt dự án với một công cụ dịch PDF thông thường: nhận diện vùng
 công thức và ký hiệu kỹ thuật để không dịch nhầm thành văn xuôi, giữ in đậm và
 in nghiêng qua vòng dịch, dựng lại chữ xoay 90 độ đúng chiều thay vì bẻ ngang,
@@ -172,10 +191,24 @@ và sửa tại đây:
   ở bước kết thúc.
 - Cả trang lộn ngược vì ma trận chữ phản chiếu `1 0 0 -1` bị hiểu nhầm là xoay.
 - Đoạn văn in đè lên đoạn bên dưới vì ngân sách chiều cao chỉ tính hộp của chính nó.
+- Số thập phân bị đổi dấu — *0.62* thành *0,62* — trong khi bảng bên cạnh vẫn
+  giữ *0.62*, vì đoạn chỉ có số vẫn được gửi cho Google.
+- Máy Mac Apple Silicon chạy macOS 26 không dịch được file nào vì model bố cục
+  chạy trên CoreML, còn ứng dụng lại khuyên cài lại vì nhầm lỗi CoreML với lỗi
+  thiếu thư viện.
+- Bảng trong trang web in ra PDF từ Chrome hoặc Edge bị dịch cụt giữa chữ —
+  *"the type of th"* — phần còn lại và mọi ô một dòng giữ nguyên tiếng Anh, vì
+  Chrome/Edge bản mới ghi `/Descent` của font là số dương khiến hai thư viện đọc
+  PDF đặt chữ lệch nhau nửa cỡ chữ.
+- Dòng thứ hai trở đi trong ô bảng bắt đầu lệch trái so với dòng đầu, có ô còn
+  tràn sang cột bên cạnh, vì dòng xuống hàng quay về mép ô thay vì mép chữ.
+- Chữ đầu câu trong ô bảng — *"True"* — giữ nguyên tiếng Anh, có ô in nhỏ còn
+  một nửa, vì nền của đoạn mã nội dòng tạo ra một ô nhỏ nằm trong ô thật và ô
+  nhỏ đó giành mất chữ của câu.
 
 Bảng nguyên nhân đầy đủ: [agent-knowledge/regressions.md](agent-knowledge/regressions.md).
 
-**278 test hồi quy — 3.422 dòng trong [`tests/`](tests/)**
+**498 test hồi quy — 6.570 dòng trong [`tests/`](tests/)**
 Mỗi lỗi đã sửa đều bị khoá lại bằng một test dựng đúng hình học nhỏ nhất gây ra nó,
 nên bản sửa không âm thầm mất đi ở lần thay đổi sau.
 
@@ -291,6 +324,14 @@ python -m venv .venv
 # 3. Dựng lại PDF
 .venv\Scripts\python.exe scripts\translate_pdf.py INPUT.pdf --engine handoff --segments translations.jsonl --output-dir OUT
 ```
+
+### Thêm bản song ngữ
+
+```powershell
+.venv\Scripts\python.exe scripts\translate_pdf.py INPUT.pdf --output-dir OUT --bilingual side-by-side
+```
+
+`--bilingual` nhận `side-by-side`, `alternating` hoặc `layers` và ghi thêm `INPUT-vi-dual.pdf` cạnh bản dịch.
 
 ### Build ứng dụng Windows
 

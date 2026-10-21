@@ -40,6 +40,7 @@ from pdf2zh.rules import (
     page_has_image,
     should_translate_table_cell,
     text_aligned_table_cells,
+    words_by_cell,
 )
 
 @dataclass(frozen=True)
@@ -177,6 +178,42 @@ def pymupdf_can_round_trip(path: Path) -> bool:
             except Exception:
                 pass  # a document that failed to save also fails to close
     return True
+
+
+def negate_positive_descents(document: Document) -> dict[int, str]:
+    """Give each font descriptor with a positive /Descent the negative value
+    the specification requires, and return the values it had by xref.
+
+    Recent Chrome and Edge write the descent as a positive distance (Skia/PDF
+    m152; m141 still wrote it negative). pdfminer negates such a value before
+    it builds a character's box; MuPDF keeps it, rescales ascent minus descent
+    to one em, and so places every word in that font about half an em above
+    its glyphs.
+    Table cells and formula regions are painted from MuPDF's words but read
+    back at the corners of pdfminer's glyph boxes, so on a printed web page a
+    cell was translated up to the middle of a word and the rest left in the
+    source language. Corrected before MuPDF loads the font, both boxes cover
+    the glyphs.
+    """
+    originals = {}
+    for xref in range(1, document.xref_length()):
+        try:
+            if document.xref_get_key(xref, "Type") != ("name", "/FontDescriptor"):
+                continue
+            kind, value = document.xref_get_key(xref, "Descent")
+            if kind in ("int", "float") and float(value) > 0:
+                document.xref_set_key(xref, "Descent", f"-{value}")
+                originals[xref] = value
+        except Exception as error:  # noqa: BLE001 - an unreadable object is no font to correct
+            logger.debug("Object %s was not read for its descent: %s", xref, error)
+    return originals
+
+
+def restore_descents(document: Document, originals: dict[int, str]) -> None:
+    """Put back what negate_positive_descents changed: the correction is only
+    for reading the page, and the output keeps the source's descriptors."""
+    for xref, value in originals.items():
+        document.xref_set_key(xref, "Descent", value)
 
 
 def horizontal_rules(page: Document) -> list[tuple[float, float, float, float]]:
@@ -470,6 +507,7 @@ def translate_patch(
                     aligned = bool(cells)
                     if aligned and page_span_sizes is None:
                         page_span_sizes = span_sizes(source_page)
+                clipped = []
                 for cell in cells:
                     cx0 = max(float(cell[0]), table_bounds[0])
                     cy0 = max(float(cell[1]), table_bounds[1])
@@ -477,12 +515,10 @@ def translate_patch(
                     cy1 = min(float(cell[3]), table_bounds[3])
                     if cx1 - cx0 <= 4 or cy1 - cy0 <= 1:
                         continue
-                    cell_words = [
-                        word
-                        for word in page_words
-                        if cx0 <= (float(word[0]) + float(word[2])) / 2 <= cx1
-                        and cy0 <= (float(word[1]) + float(word[3])) / 2 <= cy1
-                    ]
+                    clipped.append((cx0, cy0, cx1, cy1))
+                for (cx0, cy0, cx1, cy1), cell_words in zip(
+                    clipped, words_by_cell(clipped, page_words)
+                ):
                     for cluster in cluster_table_words(
                         cell_words, (cx0, cy0, cx1, cy1)
                     ):
@@ -663,7 +699,6 @@ def translate_patch(
                 )
                 ocr_paragraph_classes[pageno] = set(range(first_ocr_class, next_class))
 
-            layout[page.pageno] = box
             # A page classified as wholly protected has nothing to translate.
             # Leave its original content stream intact instead of decomposing
             # every glyph into new operators. That replay is unnecessary and
@@ -685,7 +720,12 @@ def translate_patch(
             doc_zh.update_object(page.page_xref, "<<>>")
             doc_zh.update_stream(page.page_xref, b"")
             doc_zh[page.pageno].set_contents(page.page_xref)
+            # The converter reads a page's mask only while that page is being
+            # processed. Kept for the whole run, the masks of a 400-page book
+            # held 1.5 GB (3.7 MB of float64 per A4 page).
+            layout[page.pageno] = box
             interpreter.process_page(page)
+            del layout[page.pageno]
             progress.update()
             if callback:
                 callback(progress)
@@ -743,6 +783,8 @@ def translate_stream(
     stream = io.BytesIO()
     doc_en.save(stream)
     doc_zh = Document(stream=stream)
+    # Before any page is read, so MuPDF loads each font with the correction.
+    source_descents = negate_positive_descents(doc_zh)
     if not create_dual:
         doc_en.close()
     page_count = doc_zh.page_count
@@ -786,6 +828,7 @@ def translate_stream(
         if not doc_en.is_closed:
             doc_en.close()
         raise
+    restore_descents(doc_zh, source_descents)
 
     for obj_id, ops_new in obj_patch.items():
         # ops_old=doc_en.xref_stream(obj_id)

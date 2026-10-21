@@ -15,7 +15,8 @@ import pymupdf
 
 from app.errors import describe_failure
 try:
-    from app.gui import App, STATUS_COLORS, STATUS_MARKS, google_diagnostics
+    from app.gui import App, STATUS_COLORS, google_diagnostics, primary_action
+    from app.icons import BADGE_STATES
 except ImportError:
     App = None
 from pdf2zh.high_level import translate_stream
@@ -186,16 +187,17 @@ class TranslationRecoveryTests(unittest.TestCase):
         paths = [Path("first.pdf"), Path("second.pdf")]
         app = SimpleNamespace(
             events=queue.Queue(), states={paths[0]: "paused", paths[1]: "queued"},
-            files=paths, translate_button=Mock(), clear_button=Mock(),
-            status=Mock(), _go_determinate=Mock(),
+            files=paths, status=Mock(), _go_determinate=Mock(), _set_busy=Mock(),
         )
         app.events.put(("finished",))
         App._handle_events(app)
-        app.translate_button.configure.assert_called_with(text="Tiếp tục dịch")
+        # The button is relabelled from the states once the batch hands it back.
+        app._set_busy.assert_called_once_with(False)
+        self.assertEqual(primary_action(app.states.values()), ("Tiếp tục dịch", True))
         summary = app.status.configure.call_args.kwargs["text"]
         self.assertIn("1 file đang chờ", summary)
         self.assertNotIn("Xong", summary)
-        self.assertIn("paused", STATUS_MARKS)
+        self.assertIn("paused", BADGE_STATES)
         self.assertIn("paused", STATUS_COLORS)
 
     @unittest.skipIf(App is None, "desktop app dependencies are not installed")

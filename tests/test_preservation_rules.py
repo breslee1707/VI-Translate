@@ -3,9 +3,10 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+import pymupdf
 from pdfminer.pdfinterp import PDFResourceManager
 
-from pdf2zh.converter import TranslateConverter, is_translatable_segment
+from pdf2zh.converter import TranslateConverter, has_words, is_translatable_segment
 from pdf2zh.rules import (
     BULLET_CHARACTERS,
     classify_preserved_page,
@@ -21,6 +22,7 @@ from pdf2zh.rules import (
     should_translate_table_cell,
     text_aligned_table_cells,
 )
+from tests.test_damaged_sources import translated
 
 
 def _words(line: int, y: float, *runs: tuple[float, str], space: float = 2.0) -> list[tuple]:
@@ -329,6 +331,32 @@ class TranslatableSegmentTests(unittest.TestCase):
         """A page of diagrams that carries one real line is not an image-only
         page, so a scan-heavy textbook is never refused for needing OCR."""
         self.assertTrue(is_translatable_segment("Figure 3: the lever arm", {"{v1}"}))
+
+    def test_figures_alone_have_no_words(self):
+        for figures in ("1.5 ", " 0.62", "5   4   3   2   1", "(12)", "{v3} = 0.5",
+                        "<s1>2024</s1>", "{v0} {v1}", "—"):
+            with self.subTest(segment=figures):
+                self.assertFalse(has_words(figures))
+        for words in ("Chapter 1", "<s1>Bold</s1> 2", "5 mm", "Hình 3", "图 3"):
+            with self.subTest(segment=words):
+                self.assertTrue(has_words(words))
+
+    def test_figures_are_never_sent_yet_still_count_as_text(self):
+        """Google returned "0.62" as "0,62" for Vietnamese while the table beside
+        it kept "0.62". Counted all the same, a chart is not taken for a scan."""
+        document = pymupdf.open()
+        page = document.new_page(width=300, height=300)
+        page.insert_text((20, 50), "Total weight of the sample", fontsize=11)
+        page.insert_text((20, 150), "0.62", fontsize=11)
+        page.insert_text((20, 250), "5   4   3   2   1", fontsize=11)
+        mono, report, sent = translated(document.tobytes())
+        self.assertEqual(sent, ["Total weight of the sample"])
+        self.assertEqual(report.translatable_segments, 3)
+        with pymupdf.open(stream=mono) as output:
+            self.assertEqual(
+                output[0].get_text().split("\n")[:3],
+                ["vi:Total weight of the sample", "0.62", "5   4   3   2   1"],
+            )
 
 
 class ImageOnlyPageTests(unittest.TestCase):

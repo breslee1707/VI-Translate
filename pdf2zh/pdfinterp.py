@@ -1,10 +1,15 @@
 import copy
+import gzip
 import logging
 import math
+import pickle
+import re
+from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple, cast
 
 import numpy as np
-from pdfminer import settings
+from pdfminer import cmapdb, settings
+from pdfminer.cmapdb import CMapDB
 from pdfminer.pdfcolor import PREDEFINED_COLORSPACE, PDFColorSpace
 from pdfminer.pdfdevice import PDFDevice
 from pdfminer.pdffont import PDFFont
@@ -42,6 +47,30 @@ from pdfminer.utils import (
 )
 
 log = logging.getLogger(__name__)
+
+# pdfminer 20250416 joins a font's /Encoding name onto each CMap folder and
+# unpickles whatever file that names (CVE-2025-64512), so a name holding a
+# path - on Windows a UNC share - runs code the document chose. It also
+# searches CMAP_PATH, by default /usr/share/pdfminer, a folder any user may
+# create at the root of a Windows drive (GHSA-f83h-ghpp-7wcc). Every CMap
+# pdfminer ships is a plain name in its own folder, and only those are loaded.
+BUNDLED_CMAPS = Path(cmapdb.__file__).parent / "cmap"
+CMAP_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_+-]*")
+
+
+def load_bundled_cmap(cls: type, name: str) -> type:
+    """pdfminer's CMap loader, limited to the CMaps installed with it."""
+    name = name.replace("\0", "")
+    if not CMAP_NAME_PATTERN.fullmatch(name):
+        raise CMapDB.CMapNotFound(name)
+    path = BUNDLED_CMAPS / f"{name}.pickle.gz"
+    if not path.is_file():
+        raise CMapDB.CMapNotFound(name)
+    with gzip.open(path) as data:
+        return type(name, (), pickle.loads(data.read()))
+
+
+CMapDB._load_data = classmethod(load_bundled_cmap)
 
 # Colour operators worth replaying in front of translated text, grouped by the
 # piece of state each one sets. `g`, `rg`, `k`, `sc` and `scn` all write the
@@ -153,6 +182,10 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         self.rsrcmgr = rsrcmgr
         self.device = device
         self.obj_patch = obj_patch
+        # Form XObjects being drawn further up the stack. A form that draws
+        # itself, directly or through another form, recursed until Python
+        # gave up and took the whole document with it.
+        self.open_forms: frozenset[int] = frozenset()
 
     def dup(self) -> "PDFPageInterpreterEx":
         return self.__class__(self.rsrcmgr, self.device, self.obj_patch)
@@ -228,7 +261,19 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
             else:
                 name = literal_name(spec)
             if name == "ICCBased" and isinstance(spec, list) and len(spec) >= 2:
-                return PDFColorSpace(name, stream_value(spec[1])["N"])
+                profile = stream_value(spec[1])
+                components = resolve1(profile.get("N"))
+                if isinstance(components, int) and components > 0:
+                    return PDFColorSpace(name, components)
+                # /N is required, yet some writers leave it out and name only
+                # the /Alternate space; reading it unchecked was a KeyError
+                # that lost the whole document (BabelDOC #336).
+                alternate = resolve1(profile.get("Alternate"))
+                if isinstance(alternate, list) and alternate:
+                    alternate = resolve1(alternate[0])
+                if isinstance(alternate, PSLiteral):
+                    return PREDEFINED_COLORSPACE.get(literal_name(alternate))
+                return None
             elif name == "DeviceN" and isinstance(spec, list) and len(spec) >= 2:
                 return PDFColorSpace(name, len(list_value(spec[1])))
             else:
@@ -376,7 +421,13 @@ class PDFPageInterpreterEx(PDFPageInterpreter):
         # log.debug("Processing xobj: %r", xobj)
         subtype = xobj.get("Subtype")
         if subtype is LITERAL_FORM and "BBox" in xobj:
+            if xobj.objid is not None and xobj.objid in self.open_forms:
+                # Its `Do` stays in the patched stream, so the output draws
+                # the form exactly as often as the source does.
+                log.warning("Form XObject %s draws itself; not entering it again", xobj.objid)
+                return
             interpreter = self.dup()
+            interpreter.open_forms = self.open_forms | {xobj.objid}
             bbox = cast(Rect, list_value(xobj["BBox"]))
             matrix = cast(Matrix, list_value(xobj.get("Matrix", MATRIX_IDENTITY)))
             # According to PDF reference 1.7 section 4.9.1, XObjects in

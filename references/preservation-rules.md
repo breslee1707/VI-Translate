@@ -8,13 +8,16 @@ The bundled core translates ordinary text while retaining document structures wh
 - Formula detection covers TeX and common math fonts plus monospace/code families such as Consolas, Courier, Menlo, Monaco, Inconsolata, Source Code, Fira Code, DejaVu Sans Mono, and Liberation Mono.
 - Ordinary-font blocks made only of mathematical operators and identifiers are protected, as are stacked numbered terms such as `F1/b0` inside prose.
 - Formula placeholders are validated after translation; a damaged or reordered placeholder leaves its segment untranslated instead of corrupting the PDF.
+- A segment with no letter outside its formula placeholders - a value, a range, a row of axis labels - is never sent to the translation service, so its digits, decimal separators and spacing stay exactly as the source wrote them. It still counts as text on its page.
 - Isolated formulas, formula captions, and figures remain protected layout regions.
 
 ## Tables
 
 - A layout-model table is translated cell by cell only when PyMuPDF can match a cell grid to at least half of the detected table region.
 - Visually merged cells are split into x-position clusters so natural-language labels can be translated without sending adjacent abbreviations, identifiers, numbers, or units to the translation service.
-- Each reliable cell is reflowed within its own bounds while the source grid, fills, and borders remain unchanged.
+- Each reliable cell is reflowed within its own bounds while the source grid, fills, and borders remain unchanged. Its wrapped lines start where its text starts, never further left toward the cell's rule or a neighbouring column.
+- Values a cell lists one per line keep their own lines; a line that wrapped only because the next word did not fit stays part of its sentence.
+- Each word belongs to exactly one cell, the one covering most of it, so a small cell found inside a larger one (an inline-code background) cannot take a word out of its sentence.
 - When a dense cell is shrunk vertically, its line spacing is recomputed from the final font size so the last line cannot spill into the next row.
 - Cell translations may shrink to half the source font size. If text still cannot fit, that cell remains in the source language and the result is reported as partial.
 - A detected table drawn without a grid is divided by its text alignment: full-height white-space columns, and cells that end at a wider line gap, a rule, a bullet, or a change of left edge. A cell that mixes text sizes, such as a subscripted variable, keeps its source glyphs.
@@ -72,11 +75,21 @@ These classifications preserve the complete page layout instead of reflowing num
   document, not by a second library's willingness to open it, and a document
   that still cannot be rewritten afterwards is reported rather than translated.
 - The translated PDF retains the source page canvas and page count; a requested page subset limits translation rather than removing pages.
-- The app emits only the mono translation. Output fonts are never subset: the
+- The engine emits only the mono translation. Output fonts are never subset: the
   content stream addresses glyphs by raw ID, so any pass that renumbers them
   repoints every translated character. Documents of 200 pages or 50 MB and
   larger also use light PDF serialization to avoid a long, UI-blocking
   finalization pass.
+- A bilingual copy is opt-in and is assembled afterwards from the untouched
+  source and the finished mono file: side by side, alternating pages, or the
+  translation with the original on a hidden `Original` layer. It never changes
+  the mono file, keeps both languages as selectable text, and a copy that
+  cannot be built is reported without discarding the translation.
+- A source PDF is untrusted input. Only the CMaps installed with pdfminer are
+  loaded, so a font cannot name a file elsewhere for the engine to unpickle. A
+  Form XObject that draws itself is entered once, and an ICC colour space
+  without a component count takes its alternate space; neither ends the
+  document.
 
 ## Known limits
 

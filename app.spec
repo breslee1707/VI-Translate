@@ -38,6 +38,7 @@ hiddenimports = [
     "pdf2zh.converter",
     "pdf2zh.translator",
     "pdf2zh.ocr",
+    "pdf2zh.bilingual",
     "pdf2zh.google_browser",
     "pdf2zh.installed_browser",
     "webview.platforms.winforms",

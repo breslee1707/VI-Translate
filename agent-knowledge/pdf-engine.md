@@ -18,6 +18,19 @@ a fit failure, a damaged formula marker, and a dead connection each need the
 user to do something different. The layout model's stride and class names
 come from the onnxruntime session, so nothing imports `onnx` directly.
 
+The layout model runs on the CPU provider unless `PDF_TRANSLATE_ONNX_BACKEND`
+(or `doclayout.set_backend`) asks for `coreml`, `cuda`, `dml` or `auto`, which
+restores every provider the wheel offers. Taking every provider let
+onnxruntime pick CoreML on Apple Silicon; on macOS 26 it builds the session
+and then fails every inference with "Error in building plan" (#16, #32), so no
+document translated on those Macs. BabelDOC runs this model on the CPU only;
+one page is a fraction of a second there. An accelerated session that fails to
+start, or fails its first run, is replaced by a CPU session under a lock for
+the rest of the process; only a CPU failure raises `LayoutModelError`, which
+the GUI reports as E-MODEL-10. That rule sits before E-CORE-01 because
+`CoreMLExecutionProvider_CoreML` lowercased contains `_core`, the pikepdf
+marker, and sent Mac users off to reinstall a complete app.
+
 ## Preservation Invariants
 
 - Formula glyphs and rules retain source fonts and relative geometry. Ordinary
@@ -36,6 +49,24 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   cell ends at a wider line gap, a rule, a bullet, or a change of left edge. A
   table that does not divide that way stays protected, and a gridless cell that
   mixes text sizes (a subscripted variable) keeps its source glyphs.
+  Cells are painted into the mask from MuPDF's word boxes but read back at
+  pdfminer's glyph corners, so the two must agree on where a glyph is (see
+  Damaged Sources for the font that made them disagree). A grid can overlap
+  itself: inline-code backgrounds in a printed web page give `find_tables`
+  small cells inside the real ones, and painting every word whose centre a
+  cell holds let the stray cell painted last take a description's first word
+  ("True", too narrow for its translation). `words_by_cell` gives each word to
+  the single cell covering most of it, the larger on a tie. Inside a cell, a line
+  ending short of 75% of its width ends the paragraph only when the next
+  line's first word would have fitted after it (`cell_line_ends_paragraph`):
+  values listed one per line stay on their lines, and a long word wrapping in
+  a narrow column does not split its sentence. A cell's wrapped lines start
+  where its text starts, not at its layout bound: the bound sits 2 pt inside
+  the cell's rule, and a cluster that `cluster_table_words` splits off a
+  merged cell begins halfway across the gap to its neighbour. In the Codex
+  configuration reference a description beside "Partial." wrapped 56 pt left
+  of its own text, well inside the column of "Partial.". Obstacles still use
+  the whole bound.
 - Fully protected blocks replay source glyph matrices, font size, horizontal
   scaling and rise without prose fitting. Their horizontal grid rules stay in
   the source stream. Array operands use PDF whitespace syntax, not Python list
@@ -67,6 +98,13 @@ come from the onnxruntime session, so nothing imports `onnx` directly.
   A glyph-stable alternative would be a fontTools subset with `retain_gids`.
 - A paragraph takes its size from the first characters that draw ink, so an
   oversized bullet and its tab cannot set the size for a whole list item.
+- A segment with no letter outside its formula placeholders (`has_words`) - a
+  value, a range, a row of axis labels - is never sent to the translator. The
+  local cache showed Google returning `0.62` as `0,62` and `1.5` as `1,5` for
+  Vietnamese while the table beside it kept the point, and collapsing
+  `5   4   3   2   1`. It still counts in `translatable_segments`, so a chart
+  page with numeric labels is not reported as an image-only scan, and a
+  numbers-only document is not refused as one.
 - With OCR off, scanned image-only pages are not read. With OCR standard or
   enhanced, only explicitly owned, structurally safe prose is recognized and
   reflowed; unsafe regions remain source pixels and make the result partial.
@@ -260,17 +298,88 @@ of the same file sends only what is still missing.
 
 ## Large Documents
 
-The app requests mono output only; do not construct the unused interleaved
-dual-language document. A PDF is large at 200 pages or 50 MiB. Large PDFs use
+The engine produces mono output only; do not construct the engine's unused
+interleaved dual-language document (see Bilingual Output for the opt-in copy).
+A PDF is large at 200 pages or 50 MiB. Large PDFs use
 light serialization (`garbage=1`, no recompression/object streams) because
 aggressive cleanup can hold the GIL for tens of seconds after page progress
 reaches 100%. Font subsetting is off for every size, not just large documents.
+
+A page's layout mask (a float64 array at 72 dpi, 3.7 MB for A4) is stored in
+`layout` just before `process_page` and deleted after it; the converter reads
+it only while that page is processed, and a wholly protected page never
+stores one. Keeping every mask for the whole run took a 400-page A4 document
+to a 1681 MB peak working set; releasing them gives 159 MB at the same speed.
+
+## Bilingual Output
+
+`pdf2zh/bilingual.py` builds an optional second file, `{stem}-{lang}-dual.pdf`,
+after the mono PDF is published, from the untouched source and the finished
+translation (CLI `--bilingual`, GUI "Bản song ngữ"; the choice is remembered).
+Both inputs are read into memory and neither is opened for writing. A failure
+is stored in `Translation.bilingual_error` and shown as a partial result; it
+never discards the translation. An existing dual file is refused before any
+work unless overwrite is on (E-OUT-05).
+
+- `side-by-side`: one wide page per source page, original left. Pages are
+  placed with `show_pdf_page`, which draws the unrotated content stream, so a
+  `/Rotate 90` page landed sideways; rotation is cleared on in-memory copies
+  and given back through `rotate=-rotation`. `test_bilingual.py` compares each
+  half with its page rendered alone at 0, 90, 180 and 270 degrees and with a
+  crop box.
+- `alternating`: original page, then its translation. `insert_pdf` dropped
+  every link to a named destination - how journals link a citation to its
+  reference - so links are collected first (named destinations resolved to
+  pages) and recreated after every page exists.
+- `layers`: the translation itself, with the original drawn over each page on
+  an optional-content group `Original` that starts hidden, over a white
+  rectangle. A viewer that honours the default shows exactly the translation;
+  switching the layer on shows exactly the source. MuPDF and PDFium (Chrome's
+  viewer, which has no layer panel) both render the issue #32 spec sheet's
+  layered file pixel-identical to its mono translation.
+
+Blank pages stay blank (MuPDF refuses to show a page with no contents), and
+the outline is copied with page numbers remapped; one MuPDF cannot rebuild is
+left out rather than failing the file.
 
 ## Damaged Sources
 
 `pymupdf_can_round_trip` decides whether a document needs repair, because
 pikepdf opens damage that MuPDF only refuses on write. The repaired copy is
 re-checked; a document that still fails is reported, never silently translated.
+
+A source PDF is untrusted input. `pdf2zh/pdfinterp.py` replaces pdfminer's
+CMap loader on import: pdfminer 20250416 joins a font's `/Encoding` name onto
+each CMap folder and unpickles the file it names (CVE-2025-64512), and on
+Windows that name can be a UNC share; it also searches `CMAP_PATH`, by default
+`/usr/share/pdfminer`, which any user may create at a drive root
+(GHSA-f83h-ghpp-7wcc). Only plain names found among the CMaps installed with
+pdfminer are loaded; anything else is an unknown encoding, which pdfminer
+already tolerates. The frozen builds carry those CMaps through PyInstaller's
+pdfminer hook. Upgrading pdfminer to 20251230 or later replaces the pickles
+with JSON, but it also moves `scs`/`ncs` onto the graphics state (PMT #1008)
+and changes the parser; treat it as its own change with a full regression run.
+
+Two malformed structures used to end the whole document with an unexplained
+E-UNK-99: a Form XObject that draws itself, directly or through another form,
+recursed until `RecursionError` (`open_forms` now enters each form once per
+stack; its `Do` stays in the patched stream), and an ICCBased colour space
+without `/N` raised `KeyError` (its `/Alternate` device space is used, else the
+space is skipped). A translation cache that cannot be read is a miss, the way
+one that cannot be written is ignored; a locked `cache.v1.db` used to fail the
+page and with it the document.
+
+Recent Chrome and Edge write a font descriptor's `/Descent` as a positive
+number (Skia/PDF m152 on the issue #32 spec sheet; pages printed by Skia m141
+still had negative values). pdfminer negates it; MuPDF keeps
+it and, rescaling ascent minus descent to one em, puts every word box of that
+font about half an em above its glyphs. Table cells painted from those boxes
+then missed pdfminer's glyphs: cells were translated up to the middle of a
+word and one-line cells not at all. 42 of the 133 source PDFs in the user's
+library carry such a font, 40 of them web pages printed by Edge.
+`translate_stream` negates positive descents in its working copy before any
+page is read and restores them before writing, so the output keeps the
+source's descriptors.
 
 The product-level authority is
 [`references/preservation-rules.md`](../references/preservation-rules.md).

@@ -22,6 +22,10 @@ The release workflow rejects a mismatch.
   bundled PyObjC dependencies. Packaged/source smoke uses local HTML in a child.
 - macOS builds require Darwin and the target architecture. `build-macos.sh`
   builds/smoke-tests/signs the `.app`, creates a DMG, and verifies it.
+- The smoke test runs one blank-page layout inference and fails on any missing
+  runtime module: the CoreML failure of #16/#32 passed every import and only
+  appeared at the first run, and #29's missing `_multiprocessing` at the first
+  translation.
 
 ## What the In-App Updater Depends On
 

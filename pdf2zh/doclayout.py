@@ -3,6 +3,7 @@ import ast
 import logging
 import os
 import sys
+import threading
 
 import cv2
 import numpy as np
@@ -20,13 +21,49 @@ except ImportError as e:
 
 logger = logging.getLogger(__name__)
 
+CPU_PROVIDER = "CPUExecutionProvider"
 _BACKEND_PROVIDERS = {
-    "cpu": ["CPUExecutionProvider"],
-    "cuda": ["CUDAExecutionProvider", "CPUExecutionProvider"],
-    "dml": ["DmlExecutionProvider", "CPUExecutionProvider"],
+    "cpu": [CPU_PROVIDER],
+    "coreml": ["CoreMLExecutionProvider", CPU_PROVIDER],
+    "cuda": ["CUDAExecutionProvider", CPU_PROVIDER],
+    "dml": ["DmlExecutionProvider", CPU_PROVIDER],
 }
+# Listed by every onnxruntime wheel, but it only serves remote endpoints and
+# never runs a node of this model, so it is not an accelerator to fall back from.
+_PASSIVE_PROVIDERS = frozenset({CPU_PROVIDER, "AzureExecutionProvider"})
+BACKEND_VARIABLE = "PDF_TRANSLATE_ONNX_BACKEND"
 
 _preferred_backend: str | None = None
+
+
+class LayoutModelError(RuntimeError):
+    """The layout model could not run on this machine, even on the CPU."""
+
+
+def preferred_providers(name: str | None = None) -> list[str]:
+    """Execution providers for the layout model: the CPU unless asked otherwise.
+
+    Taking every available provider let onnxruntime pick CoreML on Apple
+    Silicon, which on macOS 26 and later builds the session and then refuses to
+    run it ("Error executing model: Error in building plan"), so no document
+    translated at all on those Macs. BabelDOC runs this same model on the CPU
+    only, and one page of layout inference is a fraction of a second there -
+    the translation service, not the model, sets the pace of a document.
+    Hardware providers stay reachable through set_backend or the
+    PDF_TRANSLATE_ONNX_BACKEND variable; "auto" restores every available one.
+    """
+    name = (name or _preferred_backend or os.environ.get(BACKEND_VARIABLE) or "cpu").lower()
+    available = onnxruntime.get_available_providers()
+    if name == "auto":
+        return list(available) or [CPU_PROVIDER]
+    wanted = _BACKEND_PROVIDERS.get(name, _BACKEND_PROVIDERS["cpu"])
+    chosen = [provider for provider in wanted if provider in available]
+    return chosen or [CPU_PROVIDER]
+
+
+def has_accelerator(providers: list[str]) -> bool:
+    """Whether a session runs nodes anywhere but the CPU."""
+    return any(provider not in _PASSIVE_PROVIDERS for provider in providers)
 
 
 def can_cache_optimized_graph(
@@ -43,10 +80,11 @@ def set_backend(name: str) -> None:
     """Set the ONNX Runtime execution provider backend.
 
     Args:
-        name: One of 'auto', 'cpu', 'cuda', 'dml'.
+        name: One of 'cpu' (the default), 'coreml', 'cuda', 'dml', or 'auto'
+            for every provider this onnxruntime build offers.
     """
     global _preferred_backend
-    _preferred_backend = None if name == "auto" else name
+    _preferred_backend = name
 
 
 class DocLayoutModel(abc.ABC):
@@ -100,30 +138,21 @@ class OnnxModel(DocLayoutModel):
     def __init__(self, model_path: str):
         model_path = str(model_path)
         self.model_path = model_path
+        self._session_lock = threading.Lock()
 
-        sess_options = onnxruntime.SessionOptions()
-        sess_options.graph_optimization_level = (
-            onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
-        )
-
-        if _preferred_backend and _preferred_backend in _BACKEND_PROVIDERS:
-            providers = _BACKEND_PROVIDERS[_preferred_backend]
-        else:
-            providers = onnxruntime.get_available_providers()
-
-        # Providers like CoreML generate compiled nodes that cannot be
-        # serialized, so only cache the optimized graph for CPU-only.
-        can_cache = can_cache_optimized_graph(providers)
-        if can_cache:
-            optimized_path = model_path + ".optimized"
-            if os.path.exists(optimized_path):
-                model_path = optimized_path
-            else:
-                sess_options.optimized_model_filepath = optimized_path
-
-        self.model = onnxruntime.InferenceSession(
-            model_path, sess_options, providers=providers
-        )
+        providers = preferred_providers()
+        try:
+            self.model = self._session(providers)
+        except Exception as error:
+            if not has_accelerator(providers):
+                raise
+            # A hardware provider that cannot even compile the graph is the
+            # same fault as one that cannot run it; the CPU still can.
+            logger.warning(
+                "ONNX Runtime could not start %s; using the CPU instead: %s",
+                providers, error,
+            )
+            self.model = self._session([CPU_PROVIDER])
         logger.info("ONNX Runtime providers: %s", self.model.get_providers())
 
         # The session already parsed the model, so the stride and the class
@@ -135,6 +164,55 @@ class OnnxModel(DocLayoutModel):
         metadata = self.model.get_modelmeta().custom_metadata_map
         self._stride = ast.literal_eval(metadata["stride"])
         self._names = ast.literal_eval(metadata["names"])
+
+    def _session(self, providers: list[str]) -> "onnxruntime.InferenceSession":
+        model_path = self.model_path
+        sess_options = onnxruntime.SessionOptions()
+        sess_options.graph_optimization_level = (
+            onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
+        # Providers like CoreML generate compiled nodes that cannot be
+        # serialized, so only cache the optimized graph for CPU-only.
+        if can_cache_optimized_graph(providers):
+            optimized_path = model_path + ".optimized"
+            if os.path.exists(optimized_path):
+                model_path = optimized_path
+            else:
+                sess_options.optimized_model_filepath = optimized_path
+        return onnxruntime.InferenceSession(
+            model_path, sess_options, providers=providers
+        )
+
+    def run(self, pix: np.ndarray) -> np.ndarray:
+        """Run one inference, moving to the CPU for good if an accelerator fails.
+
+        The failure arrives at the first run, not when the session is built, so
+        only here can it be caught. The CPU session replaces the accelerated one
+        for the rest of the process: every later page would fail the same way.
+        """
+        session = self.model
+        try:
+            return session.run(None, {"images": pix})[0]
+        except Exception as error:
+            if not has_accelerator(session.get_providers()):
+                raise LayoutModelError(
+                    f"The layout model could not run on the CPU: {error}"
+                ) from error
+            with self._session_lock:
+                if self.model is session:
+                    logger.warning(
+                        "ONNX Runtime %s failed during layout inference; "
+                        "continuing on the CPU: %s",
+                        session.get_providers(), error,
+                    )
+                    self.model = self._session([CPU_PROVIDER])
+                session = self.model
+        try:
+            return session.run(None, {"images": pix})[0]
+        except Exception as error:
+            raise LayoutModelError(
+                f"The layout model could not run on the CPU: {error}"
+            ) from error
 
     @staticmethod
     def from_pretrained():
@@ -221,7 +299,7 @@ class OnnxModel(DocLayoutModel):
         new_h, new_w = pix.shape[2:]
 
         # Run inference
-        preds = self.model.run(None, {"images": pix})[0]
+        preds = self.run(pix)
 
         # Postprocess predictions
         preds = preds[preds[..., 4] > 0.25]

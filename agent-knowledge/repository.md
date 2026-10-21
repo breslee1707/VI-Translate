@@ -4,9 +4,28 @@
 
 - `app/`: CustomTkinter GUI, the self-updater, UI fonts, icons, bundled assets.
   `app/update.py` also carries the PowerShell helper that performs the swap.
+  `app/i18n.py` holds every interface string in Vietnamese (the default) and
+  English, error summaries and advice included; a key missing from one catalog
+  fails `test_app_i18n.py`. `app/settings.py` remembers the interface
+  language, target language and bilingual layout in
+  `%LOCALAPPDATA%\PDFTranslate\settings.json` (macOS: Application Support;
+  elsewhere `~/.config`), outside the folder the updater replaces. OCR is
+  deliberately not remembered. QA scripts must patch `settings_path` rather
+  than write the user's real file, and `App._check_for_update` so a
+  screenshot never depends on GitHub.
+- `app/icons.py` draws the queue's status badges, the spinner frames, the
+  button glyphs and the empty-queue icon with Pillow at start-up, in light
+  and dark variants, so no font decides how a status mark looks. `app/gui.py`
+  relies on a few customtkinter 5.2.2 internals (`FieldMenu`'s canvas tags,
+  the draw engine's even-height rounding in `_hairline`, the scrollable
+  frame's scrollbar in `_fit_scrollbar`); before raising the pin in
+  `requirements-app.txt`, re-check those and look at the window in light and
+  dark mode.
 - `scripts/translate_pdf.py`: supported CLI and stable output staging.
 - `scripts/fetch_assets.py`: downloads the layout model and Unicode PDF font.
 - `pdf2zh/`: bundled extraction, translation, preservation, and PDF rendering.
+  `pdf2zh/bilingual.py` builds the opt-in bilingual copy from two finished
+  PDFs.
 - `tests/`: standard-library `unittest` regressions.
 - `references/`: product preservation contract.
 - `app.spec`, `build.ps1`: Windows packaging.

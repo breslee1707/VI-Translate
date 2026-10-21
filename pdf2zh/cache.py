@@ -72,11 +72,18 @@ class TranslationCache:
     # Since peewee and the underlying sqlite are thread-safe,
     # get and set operations don't need locks.
     def get(self, original_text: str) -> Optional[str]:
-        result = _TranslationCache.get_or_none(
-            translate_engine=self.translate_engine,
-            translate_engine_params=self.translate_engine_params,
-            original_text=original_text,
-        )
+        # A cache that cannot be read is a miss, as one that cannot be written
+        # is ignored: a locked or damaged cache.v1.db must not take down a
+        # document halfway through its pages (BabelDOC guards it the same way).
+        try:
+            result = _TranslationCache.get_or_none(
+                translate_engine=self.translate_engine,
+                translate_engine_params=self.translate_engine_params,
+                original_text=original_text,
+            )
+        except Exception as e:
+            logger.debug(f"Error reading cache: {e}")
+            return None
         return result.translation if result else None
 
     def set(self, original_text: str, translation: str):

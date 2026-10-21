@@ -40,6 +40,47 @@ class DescribeFailureTests(unittest.TestCase):
         self.assertEqual(failure.code, "E-CORE-01")
         self.assertIn("giải nén", failure.advice)
 
+    def test_a_coreml_failure_is_not_reported_as_a_missing_library(self):
+        """#16, #32: the provider name lowercases to "..._coreml_...", which the
+        old "_core" marker took for pikepdf._core and sent users to reinstall."""
+        failure = describe_failure(
+            raised(
+                RuntimeError(
+                    "PDF translation core failed: PDFValueError: Failed to translate a.pdf"
+                ),
+                RuntimeError(
+                    "[ONNXRuntimeError] : 1 : FAIL : Non-zero status code returned while "
+                    "running CoreML_9271376872752546511_20 node. "
+                    "Name:'CoreMLExecutionProvider_CoreML_9271376872752546511_20_20' "
+                    "Status Message: Error executing model: Error in building plan."
+                ),
+            )
+        )
+        self.assertEqual(failure.code, "E-MODEL-10")
+        self.assertNotIn("giải nén", failure.advice)
+
+    def test_a_missing_python_module_is_still_a_damaged_install(self):
+        failure = describe_failure(
+            raised(
+                RuntimeError("PDF translation core failed"),
+                ModuleNotFoundError("No module named '_multiprocessing'"),
+            )
+        )
+        self.assertEqual(failure.code, "E-CORE-01")
+
+    def test_a_refused_save_explains_what_holds_the_file(self):
+        failure = describe_failure(
+            raised(
+                RuntimeError(
+                    "Could not save the translated PDF as E:/books/translated/a-vi.pdf: "
+                    "[WinError 5] Access is denied"
+                ),
+                PermissionError(5, "Access is denied"),
+            )
+        )
+        self.assertEqual(failure.code, "E-OUT-11")
+        self.assertIn("ransomware", failure.advice)
+
     def test_an_unreadable_pdf_is_recognised_through_its_cause(self):
         failure = describe_failure(
             raised(

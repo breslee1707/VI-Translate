@@ -19,7 +19,9 @@ those details into this file; update the shared knowledge when behavior changes.
 - Do not commit, push, merge, tag, publish, sign, or overwrite user output
   unless the user has authorized that operation. A release must have matching
   `APP_VERSION` and `v*` tag values.
-- Keep UI text consistent with the existing Vietnamese application. Follow
+- Keep UI text consistent with the existing Vietnamese application, and add
+  every interface string to both catalogs in `app/i18n.py` (Vietnamese, the
+  default, and English) rather than writing it inline. Follow
   nearby Python style: four spaces, type annotations, `snake_case` functions,
   `PascalCase` classes, `UPPER_CASE` constants, and `pathlib.Path` for paths.
 

@@ -11,6 +11,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
@@ -41,6 +42,9 @@ TARGET_LANGUAGES = frozenset(
 
 ENGINES = ("google", "handoff")
 OCR_MODES = ("off", "standard", "enhanced")
+# Off by default: the mono file is the product, and a bilingual copy of a
+# textbook is a second file of about the same size again.
+BILINGUAL_MODES = ("off", "side-by-side", "alternating", "layers")
 
 # Measured on an eight-page sample: 2 threads 48s, 4 threads 30s, 8 threads 27s,
 # 12 threads 29s. Past four, the layout pass rather than the network is the floor,
@@ -63,6 +67,10 @@ class Translation(NamedTuple):
     ocr_pages: tuple[int, ...] = ()
     ocr_profile: str = "off"
     ocr_warnings: tuple[str, ...] = ()
+    bilingual: Path | None = None
+    # Why a requested bilingual file is missing. The translation is saved
+    # either way, so this is reported beside it rather than as a failure.
+    bilingual_error: str = ""
 
 
 # record_translation_failure passes up either an exception class name or one of
@@ -193,6 +201,13 @@ def _parser() -> argparse.ArgumentParser:
         default="off",
         choices=OCR_MODES,
         help="experimental local OCR for image-only pages",
+    )
+    parser.add_argument(
+        "--bilingual",
+        default="off",
+        choices=BILINGUAL_MODES,
+        help="also write <name>-<lang>-dual.pdf: pages side by side, alternating, "
+        "or the original on a hidden layer",
     )
     parser.add_argument(
         "--segments",
@@ -418,6 +433,7 @@ def translate_pdf(
     emit_segments: Path | None = None,
     ocr: str = "off",
     google_browser: bool = False,
+    bilingual: str = "off",
     on_progress: Callable[[int, int], None] | None = None,
     on_status: Callable[[str, int, int], None] | None = None,
 ) -> Translation:
@@ -425,6 +441,8 @@ def translate_pdf(
     _require_core()
     if ocr not in OCR_MODES:
         raise TranslationError(f"Unsupported OCR mode: {ocr}")
+    if bilingual not in BILINGUAL_MODES:
+        raise TranslationError(f"Unsupported bilingual layout: {bilingual}")
     source = _validate_input(input_pdf)
     envs = _segment_envs(segments, emit_segments)
     if google_browser:
@@ -434,15 +452,22 @@ def translate_pdf(
 
     destination: Path | None = None
     destination_dir: Path | None = None
+    bilingual_destination: Path | None = None
     if output_dir is not None:
         destination_dir = output_dir.expanduser().resolve()
-        destination_dir.mkdir(parents=True, exist_ok=True)
         destination = destination_dir / f"{source.stem}-{target_language}.pdf"
-        if destination.exists() and not overwrite:
-            raise TranslationError(
-                f"Output already exists: {destination}. "
-                "Pass --overwrite only with replacement authorization."
-            )
+        try:
+            destination_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise _save_refused(destination, error) from error
+        if bilingual != "off":
+            bilingual_destination = bilingual_output_path(destination)
+        for existing in (destination, bilingual_destination):
+            if existing is not None and existing.exists() and not overwrite:
+                raise TranslationError(
+                    f"Output already exists: {existing}. "
+                    "Pass --overwrite only with replacement authorization."
+                )
 
     if engine == "google" and not google_browser:
         from pdf2zh.translator import GOOGLE_BLOCK, RateLimitedError
@@ -458,7 +483,19 @@ def translate_pdf(
     if on_status:
         on_status("preparing", 0, 0)
 
-    with tempfile.TemporaryDirectory(prefix="pdf-translate-", dir=destination_dir) as temp:
+    # A scanner holding a file inside the work folder must not turn a saved
+    # translation into a failure while that folder is being removed.
+    try:
+        work = tempfile.TemporaryDirectory(
+            prefix="pdf-translate-", dir=destination_dir, ignore_cleanup_errors=True
+        )
+    except OSError as error:
+        # Controlled folder access refuses the first file the app creates
+        # there, long before the translation it would otherwise have cost.
+        if destination is None:
+            raise
+        raise _save_refused(destination, error) from error
+    with work as temp:
         temp_output = Path(temp)
         processing_source = source
         ocr_preparation = None
@@ -570,12 +607,19 @@ def translate_pdf(
 
         if on_status:
             on_status("saving", 0, 0)
-        staged = destination_dir / f".{destination.name}.tmp"
-        try:
-            shutil.copyfile(generated, staged)
-            staged.replace(destination)
-        finally:
-            staged.unlink(missing_ok=True)
+        _stage_and_publish(generated, destination)
+
+        bilingual_path: Path | None = None
+        bilingual_error = ""
+        if bilingual_destination is not None:
+            if on_status:
+                on_status("bilingual", 0, 0)
+            try:
+                bilingual_path = _write_bilingual_output(
+                    source, generated, bilingual_destination, bilingual, temp_output
+                )
+            except TranslationError as error:
+                bilingual_error = str(error)
 
     return Translation(
         destination,
@@ -585,7 +629,107 @@ def translate_pdf(
         ocr_pages,
         ocr,
         ocr_warnings,
+        bilingual_path,
+        bilingual_error,
     )
+
+
+def bilingual_output_path(destination: Path) -> Path:
+    """Where the bilingual copy of ``destination`` goes, whichever layout it uses."""
+    return destination.with_name(f"{destination.stem}-dual.pdf")
+
+
+def _write_bilingual_output(
+    source: Path, translation: Path, destination: Path, layout: str, work: Path
+) -> Path:
+    """Build the bilingual file from the untouched source and the finished translation.
+
+    Built from ``source``, not from the OCR sidecar or a repaired copy, so the
+    original half is exactly the page the user gave.
+    """
+    from pdf2zh.bilingual import BilingualError, write_bilingual
+
+    built = work / f"{source.stem}-bilingual.pdf"
+    try:
+        write_bilingual(source, translation, built, layout)
+    except BilingualError as error:
+        raise TranslationError(str(error)) from error
+    _stage_and_publish(built, destination)
+    return destination
+
+
+def _stage_and_publish(generated: Path, destination: Path) -> None:
+    """Copy a finished file next to its destination, then move it into place."""
+    staged = destination.parent / f".{destination.name}.tmp"
+    try:
+        try:
+            shutil.copyfile(generated, staged)
+        except OSError as error:
+            raise _save_refused(destination, error) from error
+        publish_output(staged, destination)
+    finally:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError:
+            pass  # the scanner still holding it must not undo a saved result
+
+
+def _save_refused(destination: Path, error: OSError) -> TranslationError:
+    """The one message for every refused write; app/errors.py maps it to E-OUT-11."""
+    return TranslationError(
+        f"Could not save the translated PDF as {destination}: {error}. Close the "
+        "file if a PDF reader has it open, or allow PDF Translate in the antivirus "
+        "or ransomware protection that is blocking the folder."
+    )
+
+
+# Windows Defender, the search indexer and cloud-sync clients open a file the
+# moment it is closed, and renaming it while they hold it fails with "Access is
+# denied" (#19). They let go within a few seconds, so the rename is retried for
+# about ten before anything else is tried.
+PUBLISH_ATTEMPTS = 9
+PUBLISH_FIRST_PAUSE = 0.1
+PUBLISH_LONGEST_PAUSE = 2.0
+
+
+def publish_output(
+    staged: Path,
+    destination: Path,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Move a finished PDF into place without ever leaving half of one there.
+
+    A rename is atomic, so it is the normal path. When it is still refused
+    after the retries, the refusal is usually aimed at renaming itself:
+    ransomware shields treat a ``.tmp`` turning into a ``.pdf`` as suspicious,
+    and the same user could rename a file by hand. Writing the destination
+    directly is then the only way left; a copy that fails part-way is removed
+    rather than left looking like a finished translation.
+    """
+    pause = PUBLISH_FIRST_PAUSE
+    for attempt in range(1, PUBLISH_ATTEMPTS + 1):
+        try:
+            staged.replace(destination)
+            return
+        except PermissionError:
+            if attempt == PUBLISH_ATTEMPTS:
+                break
+            sleep(pause)
+            pause = min(pause * 2, PUBLISH_LONGEST_PAUSE)
+    started_writing = False
+    try:
+        with staged.open("rb") as source, destination.open("wb") as sink:
+            started_writing = True
+            shutil.copyfileobj(source, sink, 1 << 20)
+    except OSError as error:
+        # Only a file this call truncated is removed. One that could not even
+        # be opened is still the user's previous translation.
+        if started_writing:
+            try:
+                destination.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise _save_refused(destination, error) from error
 
 
 def _use_utf8_output() -> None:
@@ -617,6 +761,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             segments=args.segments,
             emit_segments=args.emit_segments,
             ocr=args.ocr,
+            bilingual=args.bilingual,
             **({"google_browser": True} if args.google_browser else {}),
         )
     except TranslationError as error:
@@ -624,6 +769,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if result.path is not None:
         print(f"Translated PDF: {result.path}")
+    if result.bilingual is not None:
+        print(f"Bilingual PDF ({args.bilingual}): {result.bilingual}")
+    if result.bilingual_error:
+        print(f"warning: no bilingual PDF was written: {result.bilingual_error}", file=sys.stderr)
     if result.ocr_pages:
         numbers = ", ".join(str(page + 1) for page in result.ocr_pages)
         print(f"OCR ({result.ocr_profile}): pages {numbers}")

@@ -5,9 +5,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pymupdf
 from pdfminer.pdfexceptions import PDFValueError
 
 from pdf2zh import high_level
+from pdf2zh.ocr import OCR_FONT_PATH
+from tests.test_ocr import EmptyLayoutModel
 
 
 class LargeDocumentFinalizationTests(unittest.TestCase):
@@ -111,6 +114,34 @@ class LargeDocumentFinalizationTests(unittest.TestCase):
             ),
             {"deflate": False, "garbage": 1, "use_objstms": 0},
         )
+
+    def test_only_the_page_being_laid_out_holds_a_layout_mask(self):
+        """Each page's float64 mask was kept until the end: a 400-page book
+        peaked at 1.7 GB, and at 159 MB once each is released with its page."""
+        held = []
+
+        class CountingConverter(high_level.TranslateConverter):
+            def receive_layout(self, ltpage):
+                held.append(len(self.layout))
+                return super().receive_layout(ltpage)
+
+        document = pymupdf.open()
+        for number in range(3):
+            document.new_page(width=300, height=200).insert_text(
+                (20, 50), f"Page {number} of the book."
+            )
+        with (
+            mock.patch.object(high_level, "download_remote_fonts", return_value=str(OCR_FONT_PATH)),
+            mock.patch.object(high_level, "output_style_font_paths",
+                              return_value={0: str(OCR_FONT_PATH)}),
+            mock.patch.object(high_level, "TranslateConverter", CountingConverter),
+        ):
+            high_level.translate_stream(
+                document.tobytes(), lang_in="en", lang_out="vi", service="handoff",
+                thread=1, model=EmptyLayoutModel(), create_dual=False, ignore_cache=True,
+            )
+        self.assertGreaterEqual(len(held), 3)
+        self.assertEqual(max(held), 1)
 
 
 if __name__ == "__main__":

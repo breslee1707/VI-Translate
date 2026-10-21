@@ -4,8 +4,8 @@
 The queue row has space for one short line, which is never enough to diagnose a
 failure on someone else's document. Users were sent a clipped English exception
 and could neither understand it nor quote it back, so every failure here gets a
-stable code, a plain Vietnamese summary, one concrete instruction, and the full
-technical text kept verbatim for the report.
+stable code, a plain summary in the interface language, one concrete
+instruction, and the full technical text kept verbatim for the report.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+from app.i18n import t
 
 UNKNOWN_CODE = "E-UNK-99"
 
@@ -35,100 +37,44 @@ class Failure:
 
 
 # Matched in order against the flattened exception chain, so the most specific
-# cause wins. Each entry is (code, markers, summary, advice); a failure matches
-# when any marker appears in the chain's type names or messages.
-_RULES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
-    (
-        "E-VERIFY-01",
-        ("VerificationDeferredError",),
-        "Đã để xác minh Google sau",
-        "Đợt dịch đã tạm dừng theo lựa chọn của bạn. Phần đã dịch được giữ để dùng lại. "
-        "Chọn Tiếp tục dịch khi bạn sẵn sàng xác minh.",
-    ),
-    (
-        "E-BROWSER-01",
-        ("BrowserRuntimeError",),
-        "Không khởi động được cửa sổ xác minh Google",
-        "Giải nén đầy đủ ứng dụng, đóng cửa sổ Google của lần dịch trước rồi thử lại. "
-        "App tự tìm Chrome, Edge, Brave, Cốc Cốc hoặc Firefox đã cài. Trên Windows, "
-        "WebView2 Runtime là lựa chọn dự phòng nếu trình duyệt không dùng được. "
-        "Phần đã dịch được giữ trong bộ nhớ đệm để dùng lại.",
-    ),
-    (
-        "E-NET-08",
-        ("RateLimitedError",),
-        "Google hiện từ chối yêu cầu từ kết nối này",
-        "Đợt dịch đã tạm dừng. Các đoạn dịch thành công được lưu để dùng lại. "
-        "Chọn Tiếp tục dịch sau để thử lại; hiện chưa xác định được thời gian "
-        "Google khôi phục. Không cần gửi lại liên tục.",
-    ),
-    (
-        "E-NET-09",
-        ("ServiceUnavailableError",),
-        "Dịch vụ dịch hiện không phản hồi hoặc từ chối truy cập",
-        "Đợt dịch đã tạm dừng. Kiểm tra kết nối rồi chọn Tiếp tục dịch. "
-        "Các đoạn dịch thành công được lưu để dùng lại.",
-    ),
+# cause wins. A failure matches a code when any of its markers appears in the
+# chain's type names or messages; each code's words live in app/i18n.py.
+_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("E-VERIFY-01", ("VerificationDeferredError",)),
+    ("E-BROWSER-01", ("BrowserRuntimeError",)),
+    ("E-NET-08", ("RateLimitedError",)),
+    ("E-NET-09", ("ServiceUnavailableError",)),
     (
         "E-OCR-07",
         ("OCR dependencies are missing", "OCR found no text that could be translated safely",
          "OCR failed", "could not encode cleaned raster"),
-        "OCR không thể xử lý trang scan an toàn",
-        "Ứng dụng đã giữ nguyên trang để tránh làm hỏng bảng, công thức hoặc hình. "
-        "Thử chế độ OCR Chuẩn; nếu vẫn lỗi, dùng PDF có lớp chữ hoặc gửi báo cáo này.",
     ),
+    ("E-OUT-11", ("Could not save the translated PDF",)),
+    # Before E-CORE-01: "CoreMLExecutionProvider_CoreML" lowercased holds
+    # "_core", which once sent Mac users off to reinstall a complete app.
+    ("E-MODEL-10", ("LayoutModelError", "ONNXRuntimeError", "onnxruntime_pybind11_state")),
     (
         "E-CORE-01",
-        ("pikepdf", "_core", "extension library", "DLL load failed",
+        ("pikepdf._core", "._core", "extension library", "DLL load failed",
          "ImportError", "ModuleNotFoundError"),
-        "Ứng dụng thiếu thư viện nội bộ",
-        "Hãy giải nén TOÀN BỘ thư mục rồi chạy lại từ thư mục đã giải nén "
-        "(không chạy trực tiếp trong file .zip), và thêm ngoại lệ cho phần mềm "
-        "diệt virus. Nếu vẫn lỗi, gửi báo cáo này cho nhà phát triển.",
     ),
-    (
-        "E-OUT-05",
-        ("already exists", "Output already exists"),
-        "Đã có bản dịch trước đó",
-        'Tick ô "Ghi đè file đã dịch trước đó" rồi dịch lại, hoặc xoá file cũ '
-        "trong thư mục translated.",
-    ),
+    ("E-OUT-05", ("already exists", "Output already exists")),
     (
         "E-PDF-02",
         ("FzErrorSyntax", "damaged beyond repair", "Could not repair",
          "invalid key in dict", "FzErrorFormat", "PdfError"),
-        "File PDF bị lỗi cấu trúc",
-        "File này hỏng ở mức không sửa được. Hãy mở bằng trình đọc PDF rồi "
-        '"In ra PDF" (Print to PDF) để tạo bản sạch, sau đó dịch bản đó.',
     ),
-    (
-        "E-PDF-01",
-        ("does not exist", "must have a .pdf extension", "does not contain a PDF header"),
-        "File không phải PDF hợp lệ",
-        "Kiểm tra lại file: nó phải là PDF thật và vẫn còn ở đúng vị trí cũ.",
-    ),
-    (
-        "E-PDF-03",
-        ("scanned", "image-only", "OCR", "no extractable text"),
-        "PDF chỉ chứa ảnh scan",
-        "Bật OCR: chọn Trang ảnh scan → Tự động rồi dịch lại. Vùng bảng, công thức "
-        "hoặc hình không an toàn sẽ được giữ nguyên và kết quả được báo là dịch một phần.",
-    ),
+    ("E-PDF-01", ("does not exist", "must have a .pdf extension", "does not contain a PDF header")),
+    ("E-PDF-03", ("scanned", "image-only", "OCR", "no extractable text")),
     (
         "E-NET-04",
         ("ConnectionError", "Timeout", "timed out", "HTTPError", "SSLError",
          "Max retries", "getaddrinfo", "Google Translate", "RetryError"),
-        "Không kết nối được dịch vụ dịch",
-        "Kiểm tra mạng hoặc VPN rồi dịch lại. Các đoạn đã dịch được vẫn giữ "
-        "trong bộ nhớ đệm nên lần chạy sau sẽ nhanh hơn.",
     ),
-    (
-        "E-MEM-06",
-        ("MemoryError", "not enough memory", "Cannot allocate"),
-        "Máy không đủ bộ nhớ cho file này",
-        "Đóng bớt ứng dụng khác, hoặc dịch file lớn thành từng phần nhỏ hơn.",
-    ),
+    ("E-MEM-06", ("MemoryError", "not enough memory", "Cannot allocate")),
 )
+
+ERROR_CODES = tuple(code for code, _markers in _RULES) + (UNKNOWN_CODE,)
 
 
 def flatten(error: BaseException) -> str:
@@ -153,15 +99,12 @@ def describe_failure(error: BaseException) -> Failure:
     """Classify one failure. Unrecognised causes keep their original text."""
     detail = flatten(error)
     haystack = detail.lower()
-    for code, markers, summary, advice in _RULES:
-        if any(marker.lower() in haystack for marker in markers):
-            return Failure(code, summary, advice, detail)
-    return Failure(
+    code = next(
+        (code for code, markers in _RULES
+         if any(marker.lower() in haystack for marker in markers)),
         UNKNOWN_CODE,
-        "Lỗi không xác định",
-        "Hãy gửi báo cáo bên dưới cho nhà phát triển để được hỗ trợ.",
-        detail,
     )
+    return Failure(code, t(f"{code}.summary"), t(f"{code}.advice"), detail)
 
 
 def report_text(failure: Failure, source: Path, version: str, log: Path | None = None) -> str:
@@ -171,17 +114,17 @@ def report_text(failure: Failure, source: Path, version: str, log: Path | None =
     type out by hand.
     """
     lines = [
-        "PDF Translate - báo cáo lỗi",
-        f"Thời điểm : {datetime.now():%Y-%m-%d %H:%M:%S}",
-        f"Phiên bản : {version}",
-        f"Hệ điều hành: {platform.system()} {platform.release()} ({platform.machine()})",
-        f"Python    : {sys.version.split()[0]}",
-        f"File      : {source.name}",
-        f"Mã lỗi    : {failure.code}  {failure.summary}",
+        t("report.title"),
+        t("report.time", value=f"{datetime.now():%Y-%m-%d %H:%M:%S}"),
+        t("report.version", value=version),
+        t("report.system", value=f"{platform.system()} {platform.release()} ({platform.machine()})"),
+        t("report.python", value=sys.version.split()[0]),
+        t("report.file", value=source.name),
+        t("report.code", value=f"{failure.code}  {failure.summary}"),
         "",
-        "Chi tiết kỹ thuật:",
+        t("report.details"),
         failure.detail,
     ]
     if log is not None:
-        lines += ["", f"Log đầy đủ: {log}"]
+        lines += ["", t("report.log", value=log)]
     return "\n".join(lines)

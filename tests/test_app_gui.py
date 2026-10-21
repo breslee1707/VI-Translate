@@ -13,19 +13,31 @@ from unittest import mock
 try:
     from app.gui import (
         App,
+        DEFAULT_BILINGUAL,
         DEFAULT_OCR_MODE,
         LANGUAGE_NAMES,
-        OCR_NAMES,
+        STAGES,
+        bilingual_names,
         collect_pdfs,
+        elide,
         ensure_writable_streams,
+        file_summary,
+        human_size,
         main,
+        missing_runtime_modules,
+        ocr_names,
+        page_count,
+        primary_action,
+        runnable,
         verify_engine,
         translation_outcome,
     )
 except ImportError:  # customtkinter and tkinterdnd2 are app-only dependencies
     App = None
     collect_pdfs = None
+    ocr_names = None
     main = None
+    missing_runtime_modules = None
     verify_engine = None
 
 from app.update import (
@@ -82,16 +94,35 @@ class LanguageMenuTests(unittest.TestCase):
     def test_menu_labels_are_unique_so_the_reverse_lookup_is_total(self):
         self.assertEqual(len(set(LANGUAGE_NAMES.values())), len(LANGUAGE_NAMES))
 
-    def test_every_ocr_mode_has_a_unique_menu_label(self):
-        from scripts.translate_pdf import OCR_MODES
+    def test_every_ocr_mode_and_bilingual_layout_has_a_unique_label_in_each_language(self):
+        """The menus map a label back to its mode, so labels must be unique."""
+        from app.i18n import UI_LANGUAGES, set_ui_language
+        from scripts.translate_pdf import BILINGUAL_MODES, OCR_MODES
 
-        self.assertEqual(set(OCR_NAMES), set(OCR_MODES))
-        self.assertEqual(len(set(OCR_NAMES.values())), len(OCR_NAMES))
+        try:
+            for code in UI_LANGUAGES:
+                set_ui_language(code)
+                for names, modes in ((ocr_names(), OCR_MODES), (bilingual_names(), BILINGUAL_MODES)):
+                    with self.subTest(language=code, modes=modes):
+                        self.assertEqual(set(names), set(modes))
+                        self.assertEqual(len(set(names.values())), len(names))
+        finally:
+            set_ui_language(None)
 
-    def test_ocr_stays_off_until_the_user_turns_it_on(self):
-        """A scanned book read by OCR is thousands of Google requests, and slow."""
+    def test_ocr_and_the_bilingual_copy_stay_off_until_the_user_turns_them_on(self):
+        """A scanned book read by OCR is thousands of Google requests, and slow;
+        a bilingual copy of a textbook is a second file as large again."""
         self.assertEqual(DEFAULT_OCR_MODE, "off")
-        self.assertIn(DEFAULT_OCR_MODE, OCR_NAMES)
+        self.assertIn(DEFAULT_OCR_MODE, ocr_names())
+        self.assertEqual(DEFAULT_BILINGUAL, "off")
+
+    def test_every_stage_the_runner_reports_has_a_label(self):
+        from app.i18n import CATALOGS
+
+        for code, catalog in CATALOGS.items():
+            for stage in STAGES:
+                with self.subTest(language=code, stage=stage):
+                    self.assertIn(f"stage.{stage}", catalog)
 
 
 @unittest.skipIf(App is None, "desktop app dependencies are not installed")
@@ -166,9 +197,8 @@ class TranslationOutcomeTests(unittest.TestCase):
         output = Path("translated/book-vi.pdf")
         app = types.SimpleNamespace(
             events=queue.Queue(), states={source: "running"}, files=[source],
-            outputs={}, failures={}, rows={source: mock.Mock()},
-            translate_button=mock.Mock(), clear_button=mock.Mock(), status=mock.Mock(),
-            _go_determinate=mock.Mock(), _show_output_link=mock.Mock(),
+            outputs={}, failures={}, rows={source: mock.Mock()}, status=mock.Mock(),
+            _go_determinate=mock.Mock(), _show_output_link=mock.Mock(), _set_busy=mock.Mock(),
         )
         state, detail = translation_outcome(self.result(untranslated=1))
         app.events.put(("status", source, state, detail, output))
@@ -177,14 +207,15 @@ class TranslationOutcomeTests(unittest.TestCase):
         self.assertEqual(app.outputs[source], output)
         self.assertEqual(app.states[source], "partial")
         app.rows[source].set_state.assert_called_with("partial", "", "Hoàn thành — còn 1 đoạn chưa dịch")
+        app.rows[source].show_actions.assert_called_once_with()
+        app._set_busy.assert_called_once_with(False)
         app.status.configure.assert_called_with(text="Hoàn thành 1/1 file · 1 file còn phần chưa dịch")
 
     def test_failed_pdf_is_not_counted_with_completed_partial_pdfs(self):
         paths = [Path("done.pdf"), Path("partial.pdf"), Path("failed.pdf")]
         app = types.SimpleNamespace(
             events=queue.Queue(), states=dict(zip(paths, ("done", "partial", "failed"))), files=paths,
-            translate_button=mock.Mock(), clear_button=mock.Mock(), status=mock.Mock(),
-            _go_determinate=mock.Mock(),
+            status=mock.Mock(), _go_determinate=mock.Mock(), _set_busy=mock.Mock(),
         )
         app.events.put(("finished",))
         App._handle_events(app)
@@ -214,6 +245,125 @@ class TranslationOutcomeTests(unittest.TestCase):
         self.assertLess(first_done, next_running)
         self.assertFalse(app.failures)
         self.assertFalse(any(event[0] == "status" and event[2] == "paused" for event in events))
+
+    def test_a_bilingual_copy_is_reported_before_its_row_turns_done(self):
+        """The row offers "Song ngữ" only if it knows the copy exists when it
+        draws its buttons, which it does on the status event."""
+        source, dual = Path("book.pdf"), Path("translated/book-vi-dual.pdf")
+        result = types.SimpleNamespace(
+            path=Path("translated/book-vi.pdf"), untranslated=0, reasons={},
+            image_only_pages=(), ocr_warnings=(), bilingual=dual,
+        )
+        app = types.SimpleNamespace(events=queue.Queue(), failures={})
+        with mock.patch("app.gui.translate_pdf", return_value=result):
+            App._run(app, [source], "vi", False, "off", bilingual="side-by-side")
+        events = list(app.events.queue)
+        copy = events.index(("bilingual", source, dual))
+        done = next(index for index, event in enumerate(events) if event[:3] == ("status", source, "done"))
+        self.assertLess(copy, done)
+
+
+@unittest.skipIf(App is None, "desktop app dependencies are not installed")
+class PrimaryActionTests(unittest.TestCase):
+    """The main button names what it will do, and is off when it would do nothing."""
+
+    def test_an_empty_queue_leaves_nothing_to_press(self):
+        self.assertEqual(primary_action([]), ("Dịch", False))
+
+    def test_the_button_counts_the_files_it_will_translate(self):
+        self.assertEqual(primary_action(["queued"]), ("Dịch 1 file", True))
+        self.assertEqual(primary_action(["queued", "failed", "done", "partial"]), ("Dịch 2 file", True))
+
+    def test_a_finished_queue_has_nothing_left(self):
+        self.assertEqual(primary_action(["done", "partial", "skipped"]), ("Dịch", False))
+
+    def test_overwrite_brings_a_skipped_file_back(self):
+        """E-OUT-05 tells the user to tick overwrite; the file must then be translatable."""
+        self.assertFalse(runnable("skipped"))
+        self.assertTrue(runnable("skipped", overwrite=True))
+        self.assertEqual(primary_action(["done", "skipped"], overwrite=True), ("Dịch 1 file", True))
+
+    def test_a_paused_batch_offers_to_continue(self):
+        self.assertEqual(primary_action(["done", "paused", "queued"]), ("Tiếp tục dịch", True))
+
+    def test_finished_files_are_never_translated_again(self):
+        for state in ("done", "partial", "running"):
+            with self.subTest(state=state):
+                self.assertFalse(runnable(state, overwrite=True))
+
+    def test_the_label_follows_the_interface_language(self):
+        from app.i18n import set_ui_language
+
+        set_ui_language("en")
+        try:
+            self.assertEqual(primary_action(["queued", "queued"]), ("Translate 2 files", True))
+        finally:
+            set_ui_language(None)
+
+
+@unittest.skipIf(App is None, "desktop app dependencies are not installed")
+class QueueTextTests(unittest.TestCase):
+    class Font:
+        """One pixel per character, like a font whose every glyph is as wide."""
+
+        @staticmethod
+        def measure(text: str) -> int:
+            return len(text)
+
+    def tearDown(self) -> None:
+        from app.i18n import set_ui_language
+
+        set_ui_language(None)
+
+    def test_sizes_read_the_way_people_write_them(self):
+        self.assertEqual(human_size(512), "512 B")
+        self.assertEqual(human_size(2048), "2 KB")
+        self.assertEqual(human_size(1_258_291), "1,2 MB")
+        self.assertEqual(human_size(3 * 1024 ** 2), "3 MB")
+        self.assertEqual(human_size(150 * 1024 ** 2), "150 MB")
+        self.assertEqual(human_size(5 * 1024 ** 3), "5 GB")
+
+    def test_the_decimal_mark_follows_the_interface_language(self):
+        from app.i18n import set_ui_language
+
+        set_ui_language("en")
+        self.assertEqual(human_size(1_258_291), "1.2 MB")
+        self.assertEqual(file_summary(1, 2048), "1 page · 2 KB")
+
+    def test_a_summary_leaves_out_what_could_not_be_read(self):
+        self.assertEqual(file_summary(23, 1_258_291), "23 trang · 1,2 MB")
+        self.assertEqual(file_summary(0, 2048), "2 KB")
+        self.assertEqual(file_summary(0, 0), "")
+
+    def test_a_name_that_fits_is_left_alone(self):
+        self.assertEqual(elide("book.pdf", self.Font, 40), "book.pdf")
+
+    def test_a_long_name_loses_its_middle_and_keeps_its_end(self):
+        name = "ESP-IDF Programming Guide v5.3.2 final.pdf"
+        short = elide(name, self.Font, 24)
+        self.assertLessEqual(len(short), 24)
+        self.assertTrue(short.startswith("ESP-IDF"))
+        self.assertTrue(short.endswith("final.pdf"))
+        self.assertIn("…", short)
+
+    def test_no_room_still_leaves_the_end_of_the_name(self):
+        self.assertTrue(elide("abcdefghijklmnopqrstuvwxyz.pdf", self.Font, 3).endswith(".pdf"))
+
+    def test_page_count_reads_the_catalog_and_shrugs_at_anything_else(self):
+        import pymupdf
+
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "three.pdf"
+            document = pymupdf.open()
+            for _ in range(3):
+                document.new_page()
+            document.save(pdf)
+            document.close()
+            text = Path(directory) / "notes.pdf"
+            text.write_text("not a pdf", encoding="utf-8")
+            self.assertEqual(page_count(pdf), 3)
+            self.assertEqual(page_count(text), 0)
+            self.assertEqual(page_count(Path(directory) / "gone.pdf"), 0)
 
 
 @unittest.skipIf(collect_pdfs is None, "desktop app dependencies are not installed")
@@ -263,6 +413,33 @@ class OpenResultTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+
+    def test_revealing_a_result_selects_it_in_explorer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "book with spaces-vi.pdf"
+            target.write_bytes(b"%PDF-1.7\n")
+            with (
+                mock.patch("app.gui.sys.platform", "win32"),
+                mock.patch("app.gui.subprocess.Popen") as launch,
+            ):
+                App._reveal(target)
+        launch.assert_called_once_with(f'explorer /select,"{target}"')
+
+    def test_revealing_a_result_selects_it_in_finder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "book-vi.pdf"
+            target.write_bytes(b"%PDF-1.7\n")
+            with (
+                mock.patch("app.gui.sys.platform", "darwin"),
+                mock.patch("app.gui.subprocess.Popen") as launch,
+            ):
+                App._reveal(target)
+        self.assertEqual(launch.call_args.args[0], ["open", "-R", str(target)])
+
+    def test_a_vanished_result_is_not_revealed(self):
+        with mock.patch("app.gui.subprocess.Popen") as launch:
+            App._reveal(Path("gone/book-vi.pdf"))
+        launch.assert_not_called()
 
 
 @unittest.skipIf(App is None, "desktop app dependencies are not installed")
@@ -394,6 +571,48 @@ class InstallUpdateTests(unittest.TestCase):
         app.destroy.assert_not_called()
         app._show_update_link.assert_called_once()
         self.assertEqual(app._show_update_link.call_args.args[1], "browser")
+
+
+@unittest.skipIf(App is None, "desktop app dependencies are not installed")
+class RuntimeHealthTests(unittest.TestCase):
+    """#29: antivirus quarantined one file out of the bundle, and the user only
+    learnt of it as E-CORE-01 on their first document."""
+
+    def test_this_environment_has_everything_a_translation_imports(self):
+        self.assertEqual(missing_runtime_modules(), [])
+
+    def test_the_quarantined_file_is_named_rather_than_the_module_that_needed_it(self):
+        error = ModuleNotFoundError("No module named '_multiprocessing'", name="_multiprocessing")
+        with mock.patch("app.gui.importlib.import_module", side_effect=error):
+            self.assertEqual(
+                missing_runtime_modules(("multiprocessing.connection", "pdf2zh.google_browser")),
+                ["_multiprocessing"],
+            )
+
+    def test_a_native_library_that_refuses_to_load_counts_as_missing(self):
+        with mock.patch("app.gui.importlib.import_module", side_effect=OSError("DLL load failed")):
+            self.assertEqual(missing_runtime_modules(("pdf2zh.ocr",)), ["pdf2zh.ocr"])
+
+    def test_a_damaged_install_is_announced_before_the_first_document(self):
+        app = types.SimpleNamespace(events=queue.Queue())
+        with mock.patch("app.gui.preload_layout_model"), \
+             mock.patch("app.gui.missing_runtime_modules", return_value=["_multiprocessing"]):
+            App._prepare_engine(app)
+        self.assertEqual(app.events.get_nowait(), ("health", ["_multiprocessing"]))
+
+    def test_a_complete_install_stays_quiet(self):
+        app = types.SimpleNamespace(events=queue.Queue())
+        with mock.patch("app.gui.preload_layout_model"), \
+             mock.patch("app.gui.missing_runtime_modules", return_value=[]):
+            App._prepare_engine(app)
+        self.assertTrue(app.events.empty())
+
+    def test_the_smoke_test_fails_on_a_missing_module(self):
+        with mock.patch("app.gui.missing_runtime_modules", return_value=["_multiprocessing"]), \
+             mock.patch("app.gui.load_layout_model") as load:
+            with self.assertRaisesRegex(ImportError, "_multiprocessing"):
+                verify_engine()
+        load.assert_not_called()
 
 
 @unittest.skipIf(main is None, "desktop app dependencies are not installed")

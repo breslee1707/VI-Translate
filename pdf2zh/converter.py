@@ -378,6 +378,30 @@ def line_ends_paragraph(
     return line_end < x0 + width * ratio
 
 
+def cell_line_ends_paragraph(
+    line_end: float,
+    next_word: float | None,
+    bounds: tuple[float, float, float, float] | None,
+    ratio: float = PARAGRAPH_END_RATIO,
+) -> bool:
+    """Whether a line inside a table cell is the last line of its paragraph.
+
+    A cell lists values one per line as often as it wraps a sentence:
+    "1073741824 colors" over "30 bits", or four lengths each after its own
+    drawn symbol. Read as one paragraph those lines ran together on the first
+    one, away from the symbols. A short line is not enough on its own, since a
+    long word wrapping in a narrow column leaves one too; the line must also
+    have left room for the first word of the next, which a wrapped line did not.
+    """
+    if bounds is None or next_word is None:
+        return False
+    x0, _y0, x1, _y1 = bounds
+    width = x1 - x0
+    if width <= 0:
+        return False
+    return line_end < x0 + width * ratio and line_end + next_word <= x1
+
+
 def balanced_wrap_positions(
     text: str,
     first_x: float,
@@ -550,6 +574,19 @@ def is_translatable_segment(segment: str, preserved: Iterable[str]) -> bool:
         return False
     visible = strip_style_tags(segment).strip()
     return bool(visible) and PLACEHOLDER_ONLY_PATTERN.fullmatch(visible) is None
+
+
+def has_words(segment: str) -> bool:
+    """Whether a segment holds a letter outside its formula placeholders.
+
+    One that does not - a value, a range, a row of axis labels - gives a
+    translator nothing to improve and figures to reformat: Google returned
+    "0.62" as "0,62" for Vietnamese while the table beside it kept "0.62". It
+    still counts as text on its page, so a chart is never taken for a scan;
+    it is only never sent.
+    """
+    visible = re.sub(r"\{v\d+\}", "", strip_style_tags(segment))
+    return any(character.isalpha() for character in visible)
 
 
 def styled_character_text(characters: list[LTChar]) -> str:
@@ -1031,6 +1068,7 @@ class TranslateConverter(PDFConverterEx):
         xt_cls: int = -1
         vmax: float = ltpage.width / 4
         page_class_bounds = self.class_bounds.get(ltpage.pageid, {})
+        page_cell_bounds = self.layout_bounds.get(ltpage.pageid, {})
         ocr_paragraphs = self.ocr_paragraph_classes.get(ltpage.pageid, set())
         ops: str = ""
         preserved_segments: set[str] = set()
@@ -1160,14 +1198,27 @@ class TranslateConverter(PDFConverterEx):
                     if CJK_PATTERN.match(child.get_text()):
                         region_cjk[child.layout_class] += 1
                 # The first characters of each line, read ahead so the wrap
-                # test can see whether a line opens with an item number.
+                # test can see whether a line opens with an item number, and
+                # how wide its first word is.
                 if (previous_glyph is None
                         or child.x1 < previous_glyph.x0
                         or abs(child.y0 - previous_glyph.y0) > previous_glyph.size * 0.5):
                     line_start = child
                     child.line_opening = ""
-                if line_start is not None and len(line_start.line_opening) < 12:
-                    line_start.line_opening += child.get_text()
+                    child.first_word_end = None
+                    child.first_word_done = False
+                if line_start is not None:
+                    if len(line_start.line_opening) < 12:
+                        line_start.line_opening += child.get_text()
+                    if not line_start.first_word_done:
+                        if child.get_text().isspace():
+                            line_start.first_word_done = line_start.first_word_end is not None
+                        elif (line_start.first_word_end is not None
+                                and child.x0 - previous_glyph.x1 > child.size * 0.2):
+                            # A gap with no space glyph ends the word too.
+                            line_start.first_word_done = True
+                        else:
+                            line_start.first_word_end = child.x1
                 previous_glyph = child
         region_pitch: dict[int, float | None] = {}
         for region, glyphs in region_baselines.items():
@@ -1274,8 +1325,15 @@ class TranslateConverter(PDFConverterEx):
                                     text_style_of(child),
                                 )
                         elif child.x1 < xt.x0:
-                            if cls not in ocr_paragraphs and pstk[-1].text_length > 1 and line_ends_paragraph(
-                                xt.x1, page_class_bounds.get(int(cls))
+                            first_word_end = getattr(child, "first_word_end", None)
+                            if cls not in ocr_paragraphs and pstk[-1].text_length > 1 and (
+                                line_ends_paragraph(xt.x1, page_class_bounds.get(int(cls)))
+                                or cell_line_ends_paragraph(
+                                    xt.x1,
+                                    None if first_word_end is None
+                                    else first_word_end - child.x0 + child.size * 0.25,
+                                    page_cell_bounds.get(int(cls)),
+                                )
                             ):
                                 close_style(len(sstk) - 1)
                                 new_paragraph(child, cls)
@@ -1402,8 +1460,15 @@ class TranslateConverter(PDFConverterEx):
             bound = page_bounds.get(paragraph.cls)
             if bound is None:
                 continue
+            text_left = paragraph.x0
             paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1 = bound
             if paragraph.orientation == IDENTITY_ORIENTATION:
+                # A wrapped line goes back to where the cell's text starts,
+                # not to the cell's edge. A cell split off a merged one starts
+                # halfway across the gap to its neighbour, and its lines ran
+                # into the column beside it.
+                if paragraph.x0 < text_left < paragraph.x1:
+                    paragraph.x0 = text_left
                 paragraph.x = max(paragraph.x, paragraph.x0)
             paragraph.layout_bound = bound
         log.debug("\n==========[VSTACK]==========\n")
@@ -1439,7 +1504,7 @@ class TranslateConverter(PDFConverterEx):
             return s
 
         def worker(s: str) -> str:
-            if not is_translatable_segment(s, preserved_segments):
+            if not is_translatable_segment(s, preserved_segments) or not has_words(s):
                 return s
             try:
                 return translate_segment(s)
@@ -1452,7 +1517,7 @@ class TranslateConverter(PDFConverterEx):
             news = list(sstk)
             asked: list[int] = []
             for index, s in enumerate(sstk):
-                if not is_translatable_segment(s, preserved_segments):
+                if not is_translatable_segment(s, preserved_segments) or not has_words(s):
                     continue
                 preferred = preferred_translation(s, self.translator.lang_out)
                 if preferred is None:
@@ -1731,7 +1796,8 @@ class TranslateConverter(PDFConverterEx):
         # are excluded: a cell owns exactly its cell and must never lean into
         # the row beneath it.
         obstacles = [
-            (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1)
+            paragraph.layout_bound
+            or (paragraph.x0, paragraph.y0, paragraph.x1, paragraph.y1)
             for paragraph in pstk
         ]
         obstacles.extend(

@@ -152,19 +152,20 @@ class BrowserTransportTests(unittest.TestCase):
         from pathlib import Path
         from types import SimpleNamespace
         from app.gui import App
+        from app.i18n import t
 
         source = Path("sample.pdf")
-        row = SimpleNamespace(detail=Mock(), message=Mock())
+        row = Mock()
         app = SimpleNamespace(events=queue.Queue(), states={source: "running"},
                               rows={source: row}, status=Mock(), verification_actions=Mock())
         app.events.put(("stage", source, "verification", 0, 0))
         App._handle_events(app)
-        row.message.grid.assert_called_once_with()
         app.verification_actions.grid.assert_called_once_with()
+        self.assertEqual(row.set_meta.call_args.args[0], t("row.needs_verification"))
         app.events.put(("stage", source, "verified", 0, 0))
         App._handle_events(app)
-        row.message.grid_remove.assert_called_once_with()
         app.verification_actions.grid_remove.assert_called_once_with()
+        self.assertEqual(row.set_meta.call_args.args[0], t("stage.verified"))
 
     def test_closing_browser_is_a_terminal_error_without_document_text(self):
         backend = BrowserBackend()

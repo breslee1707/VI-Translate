@@ -403,6 +403,46 @@ def text_aligned_table_cells(
     return cells if len(cells) >= 2 else []
 
 
+def words_by_cell(
+    cells: Sequence[Sequence[Any]],
+    words: Iterable[Sequence[Any]],
+) -> list[list[Sequence[Any]]]:
+    """Give each word to one cell: the one that covers most of it.
+
+    A cell grid can overlap itself. The inline-code backgrounds of a printed
+    web page give PyMuPDF edges for small cells lying inside the real ones,
+    and a word claimed by two cells went to whichever was painted last:
+    "True", the first word of a description, became a cell of its own, too
+    narrow to hold its translation, and the rest of the sentence was sent
+    without it. On a tie the larger cell wins, since it is the one bounded by
+    the table's own rules.
+    """
+    owned: list[list[Sequence[Any]]] = [[] for _ in cells]
+    bounds = [_rect(cell) for cell in cells]
+    for word in words:
+        box = _rect(word)
+        if box is None:
+            continue
+        x0, y0, x1, y1 = box
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        best: tuple[tuple[float, float], int] | None = None
+        for index, cell in enumerate(bounds):
+            if cell is None:
+                continue
+            cx0, cy0, cx1, cy1 = cell
+            if not (cx0 <= cx <= cx1 and cy0 <= cy <= cy1):
+                continue
+            covered = max(0.0, min(x1, cx1) - max(x0, cx0)) * max(
+                0.0, min(y1, cy1) - max(y0, cy0)
+            )
+            key = (covered, (cx1 - cx0) * (cy1 - cy0))
+            if best is None or key > best[0]:
+                best = (key, index)
+        if best is not None:
+            owned[best[1]].append(word)
+    return owned
+
+
 def should_translate_table_cell(text: str) -> bool:
     """Return whether a cell contains natural-language text rather than codes.
 

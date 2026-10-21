@@ -65,7 +65,7 @@ python3 -m venv "<skill-root>/.venv"
 "<skill-root>/.venv/bin/python" -m pip install -r "<skill-root>/requirements.txt"
 ```
 
-Shared runner options include `--target-language` (default `vi`), `--source-language auto`, one-based `--pages 1,3-5`, `--threads 1..8` (default `4`; Google mode still sends one request at a time), `--ignore-cache`, and `--overwrite`.
+Shared runner options include `--target-language` (default `vi`), `--source-language auto`, one-based `--pages 1,3-5`, `--threads 1..8` (default `4`; Google mode still sends one request at a time), `--ignore-cache`, and `--overwrite`. `--bilingual side-by-side|alternating|layers` (default `off`) also writes `<name>-<lang>-dual.pdf` from the source and the finished translation; it never changes the translated file, and if it cannot be built the runner prints a warning and keeps the translation.
 
 ## Google mode
 
